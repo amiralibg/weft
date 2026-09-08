@@ -1,0 +1,222 @@
+import Testing
+@testable import WeftCore
+
+@Test func labelsAssignByOrdinal() {
+    var s = SpaceState()
+    s.assignLabels(sids: [5, 3, 7], names: ["code", "web"])
+    // `sids` arrives in Mission Control order and is honoured verbatim: the
+    // first desktop on screen is "code" whatever its space id happens to be.
+    // Sorting the ids here (the old behaviour) put every label on the wrong
+    // desktop as soon as a desktop was removed and re-added, because macOS
+    // hands out space ids in creation order, not left-to-right order.
+    #expect(s.labels == [5: "code", 3: "web", 7: "3"])
+    #expect(s.order == [5, 3, 7])
+    #expect(s.persistedNames(sids: [5, 3, 7]) == ["code", "web", "3"])
+    #expect(s.ordinal(of: 3) == 2)
+}
+
+@Test func resolveLabelSidOrdinal() {
+    var s = SpaceState(layouts: [3: .tiling(Tree()), 5: .tiling(Tree()), 7: .tiling(Tree())])
+    s.assignLabels(sids: [3, 5, 7], names: ["code"])
+    #expect(s.resolveSpace("code") == 3)   // label
+    #expect(s.resolveSpace("5") == 5)      // raw sid
+    #expect(s.resolveSpace("3") == 7)      // label "3" wins over sid/ordinal
+    #expect(s.resolveSpace("1") == 3)      // ordinal 1 → first sid
+    #expect(s.resolveSpace("nope") == nil)
+}
+
+@Test func membershipSyncPerSpace() {
+    let s0 = SpaceState()
+    let (s1, fresh1) = syncMembership(s0, spaces: [3: [1, 2], 5: [3]])
+    #expect(s1.layouts[3]?.windows.sorted() == [1, 2])
+    #expect(s1.layouts[5]?.windows == [3])
+    #expect(fresh1 == [1, 2, 3])
+    // Window 2 moves 3 → 5; window 1 closes.
+    let (s2, fresh2) = syncMembership(s1, spaces: [3: [], 5: [2, 3]])
+    #expect(s2.layouts[3]?.windows == [])
+    #expect(s2.layouts[5]?.windows.sorted() == [2, 3])
+    #expect(fresh2 == [2])  // new to space 5's tree (rebind is idempotent)
+}
+
+@Test func spaceGrammar() throws {
+    #expect(try Command.parse("space focus code") == .space(.focus("code")))
+    #expect(try Command.parse("space focus 2") == .space(.focus("2")))
+    #expect(try Command.parse("space move-window web") == .space(.moveWindow("web", nil)))
+    #expect(try Command.parse("space move-window 5 139") == .space(.moveWindow("5", 139)))
+    #expect(try Command.parse("space label code") == .space(.label("code")))
+    #expect(try Command.parse("sticky") == .sticky(nil, .toggle))
+    #expect(try Command.parse("sticky 139 off") == .sticky(139, .off))
+    #expect(try Command.parse("focus display next") == .focusDisplay(.next))
+    #expect(try Command.parse("focus display 2") == .focusDisplay(.index(2)))
+    #expect(try Command.parse("query capability") == .query(.capability))
+}
+
+@Test func scrollMembershipSync() {
+    var s0 = SpaceState(layouts: [5: .scroll(ScrollState())])
+    let (s1, fresh) = syncMembership(s0, spaces: [5: [1, 2]])
+    guard case .scroll(let sc) = s1.layouts[5] else {
+        Issue.record("expected scroll layout")
+        return
+    }
+    #expect(sc.columns.count == 2)
+    #expect(fresh == [1, 2])
+    let (s2, _) = syncMembership(s1, spaces: [5: [2]])
+    guard case .scroll(let sc2) = s2.layouts[5] else {
+        Issue.record("expected scroll layout")
+        return
+    }
+    #expect(sc2.columns.count == 1)
+    #expect(sc2.windows == [2])
+}
+
+@Test func layoutConversionsRoundTrip() {
+    var tree = Tree()
+    for id in [1, 2, 3] as [WindowID] { tree = tree.inserting(id) }
+    tree = tree.focusing(2)
+    let sc = scrollFromTree(tree)
+    #expect(sc.columns.count == 3)
+    #expect(sc.focusedWindow == 2)
+    #expect(sc.columns.allSatisfy { $0.windows.count == 1 })
+    let back = treeFromScroll(sc)
+    #expect(back.windows.sorted() == [1, 2, 3])
+    #expect(back.focus == 2)
+    // Successive right splits: left-nested splitV chain.
+    if case .container(let c) = back.root {
+        #expect(c.layout == .splitV)
+    } else {
+        Issue.record("expected container root")
+    }
+}
+
+@Test func recentSpaceResolution() {
+    var s = SpaceState(layouts: [3: .tiling(Tree()), 5: .tiling(Tree())], recentSpace: 3)
+    #expect(s.resolveSpace("recent") == 3)
+    s.recentSpace = 5
+    #expect(s.resolveSpace("recent") == 5)
+}
+
+@Test func spaceLayoutGrammar() throws {
+    #expect(try Command.parse("space layout bsp") == .space(.layout("bsp")))
+    #expect(try Command.parse("space layout scroll") == .space(.layout("scroll")))
+    #expect(try Command.parse("space layout float") == .space(.layout("float")))
+    #expect(try Command.parse("space layout toggle") == .space(.layout("toggle")))
+    #expect(try Command.parse("space focus recent") == .space(.focus("recent")))
+}
+
+// MARK: - Multi-display
+
+private let builtIn = Frame(x: 0, y: 0, width: 1710, height: 1087)
+/// Above and west of the built-in — the arrangement that makes a single
+/// machine-wide rect not merely imprecise but off-screen.
+private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
+
+@Test func currentSpaceFollowsFocusedDisplay() {
+    let state = SpaceState(
+        currentByDisplay: ["A": 3, "B": 9],
+        displays: ["A", "B"],
+        displayBySpace: [3: "A", 9: "B"],
+        focusedDisplay: "B"
+    )
+    #expect(state.currentSpace == 9)
+    #expect(state.visibleSpaces == [3, 9])
+
+    // No focused display (single display, or SLS answered "Main"): the first
+    // display is the answer, which is what one display makes it anyway.
+    var fallback = state
+    fallback.focusedDisplay = nil
+    #expect(fallback.currentSpace == 3)
+
+    // A display that vanished mid-command must not strand every command on a
+    // space that is no longer current.
+    var unplugged = state
+    unplugged.focusedDisplay = "gone"
+    #expect(unplugged.currentSpace == 3)
+}
+
+@Test func splitAxisFollowsEachSpacesOwnDisplay() {
+    let state = SpaceState(
+        currentByDisplay: ["A": 3, "B": 9],
+        displays: ["A", "B"],
+        displayBySpace: [3: "A", 9: "B"]
+    )
+    // Same two windows on each space; only the display shape differs.
+    let (synced, fresh) = syncMembership(
+        state,
+        spaces: [3: [1, 2], 9: [1, 2]],
+        screens: [3: builtIn, 9: external]
+    )
+    #expect(fresh == [1, 2])
+
+    guard case .tiling(let onBuiltIn)? = synced.layouts[3],
+          case .tiling(let onExternal)? = synced.layouts[9]
+    else { Issue.record("expected tiling layouts"); return }
+
+    let a = layout(onBuiltIn, in: builtIn, config: .none)
+    let b = layout(onExternal, in: external, config: .none)
+    // Both displays are wider than tall here, so both split side by side —
+    // but each within its OWN rect, which is the whole point.
+    #expect(a[1]!.width == 855 && a[1]!.height == 1087)
+    #expect(b[1]!.width == 1920 && b[1]!.height == 2135)
+    // Every frame lands inside the display that owns its space. The external
+    // rect straddles x = 0, so "negative x" proves nothing — containment does.
+    func inside(_ f: Frame, _ r: Frame) -> Bool {
+        f.x >= r.x && f.y >= r.y && f.x + f.width <= r.x + r.width
+            && f.y + f.height <= r.y + r.height
+    }
+    for f in a.values { #expect(inside(f, builtIn)) }
+    for f in b.values { #expect(inside(f, external)) }
+    // The bug this guards: computing space 9 in the built-in rect put every
+    // window on the wrong monitor.
+    for f in b.values { #expect(!inside(f, builtIn)) }
+}
+
+@Test func splitAxisDiffersWhenDisplayShapesDiffer() {
+    // A tall display splits top/bottom where a wide one splits left/right.
+    let tall = Frame(x: 2000, y: 0, width: 1080, height: 1920)
+    let state = SpaceState(displayBySpace: [3: "A", 9: "B"])
+    let (synced, _) = syncMembership(
+        state, spaces: [3: [1, 2], 9: [1, 2]], screens: [3: builtIn, 9: tall]
+    )
+    guard case .tiling(let wide)? = synced.layouts[3],
+          case .tiling(let narrow)? = synced.layouts[9]
+    else { Issue.record("expected tiling layouts"); return }
+    let a = layout(wide, in: builtIn, config: .none)
+    let b = layout(narrow, in: tall, config: .none)
+    #expect(a[1]!.width < builtIn.width)   // split vertically → half width
+    #expect(a[1]!.height == builtIn.height)
+    #expect(b[1]!.width == tall.width)     // split horizontally → half height
+    #expect(b[1]!.height < tall.height)
+}
+
+@Test func displayGrammar() throws {
+    #expect(try Command.parse("focus display west") == .focusDisplay(.west))
+    #expect(try Command.parse("focus display next") == .focusDisplay(.next))
+    #expect(try Command.parse("focus display first") == .focusDisplay(.first))
+    #expect(try Command.parse("focus display 2") == .focusDisplay(.index(2)))
+    #expect(try Command.parse("move display east") == .moveWindowToDisplay(.east, follow: false))
+    #expect(try Command.parse("move display last") == .moveWindowToDisplay(.last, follow: false))
+    // yabai needs `window --display east && display --focus east`; one bind here.
+    #expect(try Command.parse("move display east --follow") == .moveWindowToDisplay(.east, follow: true))
+    #expect(try Command.parse("move display east follow") == .moveWindowToDisplay(.east, follow: true))
+    #expect(try Command.parse("move space display next") == .moveSpaceToDisplay(.next))
+    // `display` must not shadow the directional forms.
+    #expect(try Command.parse("move east") == .move(.east))
+    #expect(try Command.parse("focus east") == .focus(.east))
+    #expect(throws: (any Error).self) { try Command.parse("move display sideways") }
+    #expect(throws: (any Error).self) { try Command.parse("focus display 0") }
+    #expect(throws: (any Error).self) { try Command.parse("move space display") }
+}
+
+@Test func displayGrammarDirections() throws {
+    #expect(try Command.parse("focus display north") == .focusDisplay(.north))
+    #expect(try Command.parse("focus display up") == .focusDisplay(.north))
+    #expect(try Command.parse("move display south") == .moveWindowToDisplay(.south, follow: false))
+    #expect(try Command.parse("move display down") == .moveWindowToDisplay(.south, follow: false))
+}
+
+@Test func displayCycleTarget() throws {
+    // skhd writes wraparound as `{ … next … } || { … first … }`; one word here.
+    #expect(try Command.parse("move display cycle --follow")
+        == .moveWindowToDisplay(.cycle, follow: true))
+    #expect(try Command.parse("focus display cycle") == .focusDisplay(.cycle))
+}

@@ -1,0 +1,490 @@
+import AppKit
+import Foundation
+import WeftBarConfig
+import SwiftUI
+import WeftConfig
+
+// The Settings window's model: a typed, bindable view of weft.toml.
+//
+// Everything the form owns is read out of the document on load and written
+// back into the *same lines* on save (see TomlDocument). Everything else is
+// carried through untouched, so an unrecognised key or a comment survives a
+// round trip through a UI that has never heard of it.
+
+// MARK: - Rows
+
+struct SpaceRow: Identifiable, Equatable {
+    var id = UUID()
+    var label: String = ""
+    var layout: String = "bsp"
+    /// The `[[space]]` section this row came from, so `scroll = { … }` and any
+    /// comment inside the block survive an edit to the label next to them.
+    var origin: TomlSection?
+}
+
+struct RuleRow: Identifiable, Equatable {
+    var id = UUID()
+    var app: String = ""
+    var title: String = ""
+    var bundleID: String = ""
+    var space: String = ""
+    /// nil = unset, which is what `[[rule]]` means by "managed": leaving the
+    /// key out and writing `manage = true` are the same thing to weftd, and
+    /// only the first keeps a hand-written file looking hand-written.
+    var manage: Bool? = nil
+    var origin: TomlSection?
+
+    var isValid: Bool { !(app.isEmpty && title.isEmpty && bundleID.isEmpty) }
+}
+
+struct KeyRow: Identifiable, Equatable {
+    var id = UUID()
+    var chord: String = ""
+    var command: String = ""
+}
+
+struct KeyMode: Identifiable, Equatable {
+    var id = UUID()
+    /// "default" is `[keys]`; anything else is `[mode.<name>]`.
+    var name: String
+    var rows: [KeyRow]
+
+    var header: String { name == "default" ? "[keys]" : "[mode.\(name)]" }
+    var isDefault: Bool { name == "default" }
+}
+
+// MARK: - Store
+
+@MainActor
+final class ConfigStore: ObservableObject {
+    enum Status: Equatable {
+        case idle(String)
+        case ok(String)
+        case problem(String)
+
+        var text: String {
+            switch self {
+            case .idle(let s), .ok(let s), .problem(let s): return s
+            }
+        }
+    }
+
+    // General
+    @Published var innerGap = 8
+    @Published var outerTop = 8
+    @Published var outerBottom = 8
+    @Published var outerLeft = 8
+    @Published var outerRight = 8
+    @Published var linkOuterGaps = true
+    @Published var reserveTop = 0
+    @Published var reserveBottom = 0
+    @Published var reserveLeft = 0
+    @Published var reserveRight = 0
+    @Published var defaultLayout = "bsp"
+    @Published var mouseModifier = "alt"
+    @Published var mouseFollowsFocus = true
+    @Published var focusFollowsMouse = false
+
+    // Integrations
+    @Published var bordersEnabled = false
+    @Published var bordersSupervise = true
+    @Published var bordersArgs = ""
+    /// Set when `args` is spread over several lines in the file — the text
+    /// field cannot represent that, so it goes read-only rather than lossy.
+    @Published var bordersArgsLocked = false
+    @Published var sketchybarEnabled = false
+    @Published var sketchybarBarName = "sketchybar"
+    @Published var sketchybarCoalesceMs = 16
+
+    // Collections
+    @Published var spaces: [SpaceRow] = []
+    @Published var rules: [RuleRow] = []
+    @Published var modes: [KeyMode] = []
+
+    @Published var status: Status = .idle("")
+    @Published var isDirty = false
+    /// Line-numbered validation failure from the last save attempt.
+    @Published var validationError: String?
+
+    private var document = TomlDocument("")
+    private var loading = false
+
+    static var configPath: String { ("~/.config/weft/weft.toml" as NSString).expandingTildeInPath }
+
+    var spaceLabels: [String] { spaces.map(\.label).filter { !$0.isEmpty } }
+
+    // MARK: Load
+
+    func load() {
+        loading = true
+        defer { loading = false; isDirty = false; validationError = nil }
+
+        guard let text = try? String(contentsOfFile: Self.configPath, encoding: .utf8) else {
+            document = TomlDocument(defaultSkeleton)
+            readAll()
+            status = .idle("No config yet — showing defaults. Save to create the file.")
+            return
+        }
+        document = TomlDocument(text)
+        readAll()
+
+        // Report a file that weftd would reject, but still show it: refusing
+        // to open is how a small typo turns into hand-editing TOML, which is
+        // the thing this window exists to avoid.
+        do {
+            _ = try WeftConfig.loadConfig(text)
+            status = .idle("Loaded \(Self.configPath)")
+        } catch let e as ConfigError {
+            status = .problem("Line \(e.line): \(e.message) — weftd is running the last valid version")
+        } catch {
+            status = .problem(error.localizedDescription)
+        }
+    }
+
+    private func readAll() {
+        readGeneral()
+        readIntegrations()
+        readSpaces()
+        readRules()
+        readKeys()
+    }
+
+    private func readGeneral() {
+        let g = document.firstIndex(ofHeader: "[general]").map { document.sections[$0] }
+        innerGap = g?.int("inner-gap") ?? 8
+        if let o = TomlValue.sides(g?.rawValue("outer-gap")) {
+            outerTop = o.top; outerBottom = o.bottom; outerLeft = o.left; outerRight = o.right
+        }
+        if let r = TomlValue.sides(g?.rawValue("reserve")) {
+            reserveTop = r.top; reserveBottom = r.bottom; reserveLeft = r.left; reserveRight = r.right
+        }
+        linkOuterGaps = outerTop == outerBottom && outerBottom == outerLeft && outerLeft == outerRight
+        defaultLayout = g?.string("default-layout") ?? "bsp"
+        mouseModifier = g?.string("mouse-modifier") ?? "alt"
+        mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
+        focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
+    }
+
+    private func readIntegrations() {
+        let b = document.firstIndex(ofHeader: "[integrations.borders]").map { document.sections[$0] }
+        bordersEnabled = b?.bool("enabled") ?? false
+        bordersSupervise = b?.bool("supervise") ?? true
+        bordersArgsLocked = b?.isMultiline("args") ?? false
+        bordersArgs = bordersArgsLocked
+            ? "(spread over several lines — edit in Advanced)"
+            : Self.readArray(b?.rawValue("args")).joined(separator: " ")
+
+        let s = document.firstIndex(ofHeader: "[integrations.sketchybar]").map { document.sections[$0] }
+        sketchybarEnabled = s?.bool("enabled") ?? false
+        sketchybarBarName = s?.string("bar-name") ?? "sketchybar"
+        sketchybarCoalesceMs = s?.int("coalesce-ms") ?? 16
+    }
+
+    private static func readArray(_ raw: String?) -> [String] {
+        guard let raw, raw.hasPrefix("[") else { return [] }
+        let inner = raw.dropFirst().drop(while: { $0 == " " })
+        let body = String(inner.prefix(while: { $0 != "]" }))
+        return body.split(separator: ",")
+            .map { TomlValue.unquote(String($0)) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func writeArray(_ items: [String]) -> String {
+        "[" + items.map(TomlValue.quote).joined(separator: ", ") + "]"
+    }
+
+    private func readSpaces() {
+        spaces = document.indices(ofHeader: "[[space]]").map { i in
+            let s = document.sections[i]
+            return SpaceRow(label: s.string("label") ?? "", layout: s.string("layout") ?? "bsp", origin: s)
+        }
+    }
+
+    private func readRules() {
+        rules = document.indices(ofHeader: "[[rule]]").map { i in
+            let s = document.sections[i]
+            return RuleRow(
+                app: s.string("app") ?? "",
+                title: s.string("title") ?? "",
+                bundleID: s.string("bundle-id") ?? "",
+                space: s.string("space") ?? "",
+                manage: s.bool("manage"),
+                origin: s
+            )
+        }
+    }
+
+    private func readKeys() {
+        var out: [KeyMode] = []
+        for (i, section) in document.sections.enumerated() {
+            guard let header = section.header else { continue }
+            let name: String
+            if header == "[keys]" {
+                name = "default"
+            } else if header.hasPrefix("[mode.") {
+                name = String(header.dropFirst(6).dropLast())
+            } else {
+                continue
+            }
+            _ = i
+            let rows = section.entries.compactMap { entry -> KeyRow? in
+                guard case .pair(let k, let v) = entry else { return nil }
+                return KeyRow(chord: TomlValue.unquote(k), command: TomlValue.unquote(v))
+            }
+            out.append(KeyMode(name: name, rows: rows))
+        }
+        if out.isEmpty { out = [KeyMode(name: "default", rows: [])] }
+        modes = out
+    }
+
+    // MARK: Save
+
+    /// Fold the form back into the document, validate, then write. Nothing
+    /// touches disk unless `WeftConfig.loadConfig` accepts the result — the
+    /// daemon parses this file on a watcher, and half a second of broken
+    /// config is half a second of a window manager that stopped managing.
+    @discardableResult
+    func save() -> Bool {
+        writeGeneral()
+        writeIntegrations()
+        writeSpaces()
+        writeRules()
+        writeKeys()
+
+        let text = document.render()
+        do {
+            _ = try WeftConfig.loadConfig(text)
+        } catch let e as ConfigError {
+            validationError = "Line \(e.line): \(e.message)"
+            status = .problem("Not saved — line \(e.line): \(e.message)")
+            return false
+        } catch {
+            validationError = error.localizedDescription
+            status = .problem("Not saved — \(error.localizedDescription)")
+            return false
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                atPath: (Self.configPath as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
+            )
+            try text.write(toFile: Self.configPath, atomically: true, encoding: .utf8)
+        } catch {
+            status = .problem("Save failed — \(error.localizedDescription)")
+            return false
+        }
+
+        validationError = nil
+        isDirty = false
+        // Re-read so every row is anchored to the section it now occupies.
+        document = TomlDocument(text)
+        loading = true
+        readAll()
+        loading = false
+        status = .ok("Saved — weftd reloads within 100 ms.")
+        _ = BarIPC.send("sync")
+        return true
+    }
+
+    private func writeGeneral() {
+        let i = document.ensureSection("[general]")
+        var s = document.sections[i]
+        s.set("inner-gap", int: innerGap)
+        s.setRaw("outer-gap", TomlValue.sidesLiteral(
+            top: outerTop, bottom: outerBottom, left: outerLeft, right: outerRight))
+        s.set("default-layout", string: defaultLayout)
+        s.set("mouse-modifier", string: mouseModifier)
+        s.set("mouse-follows-focus", bool: mouseFollowsFocus)
+        s.set("focus-follows-mouse", bool: focusFollowsMouse)
+        s.setRaw("reserve", TomlValue.sidesLiteral(
+            top: reserveTop, bottom: reserveBottom, left: reserveLeft, right: reserveRight))
+        document.sections[i] = s
+    }
+
+    private func writeIntegrations() {
+        // Only materialise a section the user actually turned on — an
+        // untouched file should not sprout `[integrations.borders]` just
+        // because the Settings window was opened once.
+        if bordersEnabled || document.firstIndex(ofHeader: "[integrations.borders]") != nil {
+            let i = document.ensureSection("[integrations.borders]")
+            var s = document.sections[i]
+            s.set("enabled", bool: bordersEnabled)
+            s.set("supervise", bool: bordersSupervise)
+            let args = bordersArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
+            if s.isMultiline("args") {
+                // Hand-wrapped across lines. The form showed only the first
+                // line, so writing it back would truncate the list — leave it.
+                // (The flag itself is set on load, never here: `previewText`
+                // runs this from inside a view update, and publishing there
+                // is how you get "Modifying state during view update".)
+            } else if args.isEmpty {
+                s.remove("args")
+            } else {
+                s.setRaw("args", Self.writeArray(args))
+            }
+            document.sections[i] = s
+        }
+        if sketchybarEnabled || document.firstIndex(ofHeader: "[integrations.sketchybar]") != nil {
+            let i = document.ensureSection("[integrations.sketchybar]")
+            var s = document.sections[i]
+            s.set("enabled", bool: sketchybarEnabled)
+            s.set("bar-name", string: sketchybarBarName)
+            s.set("coalesce-ms", int: sketchybarCoalesceMs)
+            document.sections[i] = s
+        }
+    }
+
+    private func writeSpaces() {
+        syncBlocks(header: "[[space]]", rows: spaces) { row, section in
+            section.set("label", string: row.label)
+            section.set("layout", string: row.layout)
+        }
+    }
+
+    private func writeRules() {
+        syncBlocks(header: "[[rule]]", rows: rules.filter(\.isValid)) { row, section in
+            for (key, value) in [
+                ("app", row.app), ("title", row.title),
+                ("bundle-id", row.bundleID), ("space", row.space),
+            ] {
+                if value.isEmpty { section.remove(key) } else { section.set(key, string: value) }
+            }
+            if let manage = row.manage { section.set("manage", bool: manage) }
+            else { section.remove("manage") }
+        }
+    }
+
+    /// Rewrite every `[[header]]` block from `rows`, in the order the rows are
+    /// in now. A row that came from the file keeps its own section — comments,
+    /// `scroll = { … }` and all — and only the keys the form owns are touched.
+    private func syncBlocks<Row: Identifiable>(
+        header: String,
+        rows: [Row],
+        apply: (Row, inout TomlSection) -> Void
+    ) where Row: HasOrigin {
+        let existing = document.indices(ofHeader: header)
+        let anchor = existing.first
+        // The banner above the first block ("# Space Configurations") titles
+        // the whole group, not the row that happens to be under it. Detach it
+        // before rebuilding so reordering rows cannot strand it mid-list.
+        let groupBanner = anchor.map { document.sections[$0].leading } ?? [.line("")]
+        for i in existing.reversed() { document.sections.remove(at: i) }
+
+        var rebuilt: [TomlSection] = []
+        for row in rows {
+            var section = row.origin ?? TomlSection(header: header, leading: [.line("")])
+            section.header = header
+            if rebuilt.isEmpty { section.leading = groupBanner }
+            else if section.leading.isEmpty { section.leading = [.line("")] }
+            apply(row, &section)
+            rebuilt.append(section)
+        }
+        guard !rebuilt.isEmpty else { return }
+        let at = anchor.map { min($0, document.sections.count) } ?? document.sections.count
+        document.sections.insert(contentsOf: rebuilt, at: at)
+    }
+
+    private func writeKeys() {
+        // Modes the user deleted go with their section; the rest are rewritten
+        // pair by pair so a comment between two binds stays between them.
+        let live = Set(modes.map(\.header))
+        document.sections.removeAll { section in
+            guard let h = section.header else { return false }
+            let isKeySection = h == "[keys]" || h.hasPrefix("[mode.")
+            return isKeySection && !live.contains(h)
+        }
+        for mode in modes {
+            let i = document.ensureSection(mode.header)
+            var s = document.sections[i]
+            let valid = mode.rows.filter { !$0.chord.isEmpty && !$0.command.isEmpty }
+            s.removePairs(notIn: Set(valid.map { $0.chord.lowercased() }))
+            for row in valid { s.setRaw(TomlValue.quote(row.chord), TomlValue.quote(row.command)) }
+            document.sections[i] = s
+        }
+    }
+
+    // MARK: Edits
+
+    func markDirty() {
+        guard !loading else { return }
+        isDirty = true
+        if case .ok = status { status = .idle("Unsaved changes") }
+    }
+
+    func addSpace() {
+        spaces.append(SpaceRow(label: "space\(spaces.count + 1)", layout: defaultLayout))
+        markDirty()
+    }
+
+    func addRule() {
+        rules.append(RuleRow())
+        markDirty()
+    }
+
+    func addKey(to modeID: KeyMode.ID) {
+        guard let i = modes.firstIndex(where: { $0.id == modeID }) else { return }
+        modes[i].rows.append(KeyRow())
+        markDirty()
+    }
+
+    func addMode(named name: String) {
+        let clean = name.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !clean.isEmpty, !modes.contains(where: { $0.name == clean }) else { return }
+        modes.append(KeyMode(name: clean, rows: []))
+        markDirty()
+    }
+
+    func removeMode(_ id: KeyMode.ID) {
+        modes.removeAll { $0.id == id && !$0.isDefault }
+        markDirty()
+    }
+
+    /// The file that gets written, for the Advanced tab's preview. Built from
+    /// a copy so previewing never mutates what is on screen.
+    func previewText() -> String {
+        let snapshot = document
+        writeGeneral(); writeIntegrations(); writeSpaces(); writeRules(); writeKeys()
+        let text = document.render()
+        document = snapshot
+        return text
+    }
+
+    func revealInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Self.configPath)])
+    }
+
+    func openExternally() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: Self.configPath))
+    }
+
+    private var defaultSkeleton: String {
+        """
+        # weft.toml — created by the Weft Settings window.
+        # Everything here is hot-reloaded; weftd never needs a restart for it.
+
+        [general]
+        inner-gap = 8
+        outer-gap = 8
+        default-layout = "bsp"
+        mouse-modifier = "alt"
+        mouse-follows-focus = true
+        focus-follows-mouse = false
+        reserve = 0
+
+        [keys]
+        "alt-h" = "focus west"
+        "alt-j" = "focus south"
+        "alt-k" = "focus north"
+        "alt-l" = "focus east"
+        """
+    }
+}
+
+/// Rows that remember the `[[block]]` they were parsed out of.
+protocol HasOrigin {
+    var origin: TomlSection? { get }
+}
+
+extension SpaceRow: HasOrigin {}
+extension RuleRow: HasOrigin {}

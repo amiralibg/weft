@@ -1,0 +1,206 @@
+# ==============================================================================
+# weft.toml — Reference Configuration for Weft Window Manager
+# ==============================================================================
+# Location: ~/.config/weft/weft.toml
+#
+# Hot reload: Changes to this file are automatically picked up by weftd
+# within 100ms via FSEvents without restarting the daemon.
+
+[general]
+# Inner gap between tiled windows (pixels)
+inner-gap = 8
+
+# Outer gap around screen edges (pixels)
+# Can be a single integer or a table: { top = 8, bottom = 8, left = 8, right = 8 }
+outer-gap = 8
+
+# Default layout kind for unconfigured spaces ("bsp", "scroll", or "float")
+default-layout = "bsp"
+
+# Mouse modifier for click-to-drag and click-to-resize ("alt", "cmd", "ctrl", "shift")
+mouse-modifier = "alt"
+
+# Warp hardware cursor to the center of newly focused window
+mouse-follows-focus = true
+
+# Space reservation for persistent docks/bars (top, bottom, left, right)
+# E.g. { top = 32 } for a 32px top bar
+reserve = { top = 0 }
+
+# ------------------------------------------------------------------------------
+# Integrations: JankyBorders & Sketchybar
+# ------------------------------------------------------------------------------
+
+[integrations.borders]
+# Enable JankyBorders integration
+enabled = true
+
+# Let weftd supervise borders binary (/opt/homebrew/bin/borders) and restart on crash
+supervise = true
+
+# Arguments passed directly to borders binary
+args = ["width=5.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "style=round", "hidpi=on"]
+
+# Dynamic border color based on current space layout kind
+active-color = { bsp = "0xff7aa2f7", scroll = "0xff9ece6a", float = "0xffe0af68" }
+
+# Dynamic border color based on active input mode
+mode-color = { default = "0xff7aa2f7", resize = "0xfff7768e" }
+
+[integrations.sketchybar]
+# Enable sketchybar integration (dispatches --trigger weft_event on layout/state changes)
+enabled = true
+
+# Bar reservation applied automatically (alternative to general.reserve)
+reserve = { top = 32 }
+
+# Throttle rapid event storms (milliseconds)
+coalesce-ms = 16
+
+# ------------------------------------------------------------------------------
+# Space Configurations
+# ------------------------------------------------------------------------------
+
+[[space]]
+label = "main"
+layout = "bsp"
+
+[[space]]
+label = "chat"
+layout = "bsp"
+
+[[space]]
+label = "web"
+layout = "scroll"
+scroll = { preset-column-widths = [0.5, 0.667, 0.8, 1.0], center-focused-column = "on-overflow" }
+
+[[space]]
+label = "term"
+layout = "bsp"
+
+[[space]]
+label = "ai"
+layout = "bsp"
+
+[[space]]
+label = "code"
+layout = "bsp"
+
+[[space]]
+label = "design"
+layout = "float"
+
+# ------------------------------------------------------------------------------
+# Window Placement Rules
+# ------------------------------------------------------------------------------
+
+[[rule]]
+app = "WireGuard"
+manage = false
+space = "main"
+
+[[rule]]
+app = "Finder"
+manage = false
+
+[[rule]]
+app = "System Settings"
+manage = false
+
+[[rule]]
+app = "Alacritty|Ghostty|kitty|Warp"
+space = "term"
+
+[[rule]]
+app = "Code|Cursor|Zed|Helium"
+space = "code"
+
+[[rule]]
+app = "Brave Browser|Zen"
+space = "web"
+
+[[rule]]
+app = "Discord|Telegram|Mattermost"
+space = "chat"
+
+[[rule]]
+app = "ChatGPT|Claude"
+space = "ai"
+
+[[rule]]
+app = "Figma"
+space = "design"
+
+# ------------------------------------------------------------------------------
+# Keybindings
+# ------------------------------------------------------------------------------
+
+[keys]
+# Focus navigation (Vim directional)
+"alt-h" = "focus west"
+"alt-j" = "focus south"
+"alt-k" = "focus north"
+"alt-l" = "focus east"
+
+# Window swapping / moving
+"alt-shift-h" = "move west"
+"alt-shift-j" = "move south"
+"alt-shift-k" = "move north"
+"alt-shift-l" = "move east"
+
+# Window toggles
+"alt-f" = "window toggle zoom-fullscreen"
+"alt-backslash" = "window toggle split"
+"alt-shift-space" = "float toggle"
+
+# Stacking (BSP)
+"alt-w" = "stack wrap"
+"alt-bracketright" = "stack next"
+"alt-bracketleft" = "stack prev"
+"alt-u" = "stack unstack"
+
+# Scroll layout navigation
+"alt-n" = "scroll focus next-column"
+"alt-p" = "scroll focus prev-column"
+"alt-r" = "scroll width cycle"
+
+# Space switching (instant via Scripting Addition)
+"alt-1" = "space focus main"
+"alt-2" = "space focus chat"
+"alt-3" = "space focus web"
+"alt-4" = "space focus term"
+"alt-5" = "space focus ai"
+"alt-6" = "space focus code"
+"alt-7" = "space focus design"
+"alt-tab" = "space focus recent"
+
+# Moving window to space
+"alt-shift-1" = "space move-window main"
+"alt-shift-2" = "space move-window chat"
+"alt-shift-3" = "space move-window web"
+"alt-shift-4" = "space move-window term"
+"alt-shift-5" = "space move-window ai"
+"alt-shift-6" = "space move-window code"
+"alt-shift-7" = "space move-window design"
+
+# Multi-monitor. west/east pick the display that way geometrically and fall
+# back to arrangement order, so these still work with a monitor stacked above.
+"alt-ctrl-h" = "focus display west"
+"alt-ctrl-l" = "focus display east"
+# `--follow` is yabai's `window --display east && display --focus east` in one
+# bind; drop it to send the window without leaving this display.
+"shift-alt-ctrl-h" = "move display west --follow"
+"shift-alt-ctrl-l" = "move display east --follow"
+"alt-shift-tab" = "move display next --follow"
+
+# Modal resize layer
+"alt-shift-r" = "mode resize"
+
+[mode.resize]
+"h" = "resize left 40"
+"l" = "resize right 40"
+"j" = "resize down 40"
+"k" = "resize up 40"
+"equal" = "balance"
+"escape" = "mode default"
+"return" = "mode default"

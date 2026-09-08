@@ -1,0 +1,254 @@
+# ==============================================================================
+# weft.toml — a starting point
+# ==============================================================================
+# Location: ~/.config/weft/weft.toml
+#
+# This file is meant to be edited. It sets up a keyboard-driven tiling setup
+# that works on any Mac out of the box, and leaves the machine-specific parts —
+# named spaces, per-app placement, status-bar integrations — switched off with
+# a worked example next to them.
+#
+# Everything here hot-reloads: weftd picks up a save within 100 ms via FSEvents.
+# Nothing in this file needs a restart.
+#
+# Two things that are NOT configured here:
+#   - Setup & Permissions and this file's own editor live in the menu-bar icon
+#   - ctrl-alt-space opens the window switcher (built into WeftBar)
+#
+# Check a change landed:  weftctl doctor
+
+[general]
+
+# Gap between neighbouring tiled windows, in pixels.
+inner-gap = 8
+
+# Gap between the tiling area and the edge of the screen. A single number
+# applies to all four sides; a table sets them separately:
+#   outer-gap = { top = 8, bottom = 8, left = 8, right = 8 }
+outer-gap = 8
+
+# Layout for any space that does not name one of its own, below.
+#   bsp    — binary split; new windows halve the focused one
+#   scroll — one window per column, scrolling sideways
+#   float  — no tiling at all
+default-layout = "bsp"
+
+# Held down to drag a window by its body, or resize it from an edge.
+# One of: alt, cmd, ctrl, shift.
+mouse-modifier = "alt"
+
+# Warp the cursor to a window when a keybind focuses it. Keeps hover effects
+# and scroll wheel on the window you are actually looking at. Set false if a
+# jumping cursor bothers you.
+mouse-follows-focus = true
+
+# Focus whatever window the cursor happens to be over ("sloppy focus"). Off by
+# default: with mouse-follows-focus on as well, the two feed each other.
+focus-follows-mouse = false
+
+# Space kept clear for a bar or dock that is always on screen. Set the top to
+# your bar's height if you run one — e.g. { top = 32 } for sketchybar.
+reserve = 0
+
+# ------------------------------------------------------------------------------
+# Keybindings
+# ------------------------------------------------------------------------------
+# Chords are hardware key positions, so they are the same on QWERTY, Colemak and
+# Dvorak. Modifiers: alt, shift, cmd, ctrl. Named keys: space, tab, return,
+# delete, escape, left/right/up/down, bracketleft, bracketright, backslash,
+# grave, minus, equal, comma, period, slash, semicolon, quote.
+#
+# alt-* is used throughout because macOS leaves most of it free. A matched chord
+# is swallowed, so alt-h moves focus rather than typing "˙".
+
+[keys]
+
+# Move focus between windows, vim-style.
+"alt-h" = "focus west"
+"alt-j" = "focus south"
+"alt-k" = "focus north"
+"alt-l" = "focus east"
+
+# Swap the focused window with its neighbour.
+"alt-shift-h" = "move west"
+"alt-shift-j" = "move south"
+"alt-shift-k" = "move north"
+"alt-shift-l" = "move east"
+
+# Which way the NEXT window splits the focused one.
+"alt-v" = "split vertical"
+"alt-shift-v" = "split horizontal"
+"alt-backslash" = "window toggle split"
+
+# Zoom the focused window to fill the space; again to put it back.
+"alt-f" = "window toggle zoom-fullscreen"
+
+# Take the focused window out of the tiling and let it float; again to re-tile.
+"alt-shift-space" = "float toggle"
+
+# Even out every split on this space.
+"alt-b" = "balance"
+
+# Stacks: several windows sharing one slot, one visible at a time.
+"alt-w" = "stack wrap"
+"alt-bracketright" = "stack next"
+"alt-bracketleft" = "stack prev"
+"alt-u" = "stack unstack"
+
+# Scroll layout only — no effect on a bsp space.
+"alt-n" = "scroll focus next-column"
+"alt-p" = "scroll focus prev-column"
+"alt-r" = "scroll width cycle"
+
+# Change this space's layout on the fly.
+"alt-shift-b" = "space layout bsp"
+"alt-shift-n" = "space layout scroll"
+"alt-shift-f" = "space layout float"
+
+# Spaces (desktops), by their Mission Control number. Bound 1-5 because that
+# covers most setups without leaving a row of dead keys; add 6-9 the same way
+# if you use more. These keep working if you name your spaces below.
+"alt-1" = "space focus 1"
+"alt-2" = "space focus 2"
+"alt-3" = "space focus 3"
+"alt-4" = "space focus 4"
+"alt-5" = "space focus 5"
+
+# Send the focused window to a space.
+"alt-shift-1" = "space move-window 1"
+"alt-shift-2" = "space move-window 2"
+"alt-shift-3" = "space move-window 3"
+"alt-shift-4" = "space move-window 4"
+"alt-shift-5" = "space move-window 5"
+
+# Back to the space you came from.
+"alt-tab" = "space focus recent"
+
+# Multi-display. west/east pick the display in that direction geometrically and
+# fall back to arrangement order, so they work with a monitor stacked above.
+# Harmless on a single display — it reports "already there".
+"alt-ctrl-h" = "focus display west"
+"alt-ctrl-l" = "focus display east"
+# --follow sends the window AND goes with it; drop it to send without leaving.
+"alt-ctrl-shift-h" = "move display west --follow"
+"alt-ctrl-shift-l" = "move display east --follow"
+
+# Enter the resize layer defined below. Escape or Return leaves it.
+"alt-shift-r" = "mode resize"
+
+# ------------------------------------------------------------------------------
+# Modes
+# ------------------------------------------------------------------------------
+# A mode is a modal layer, like vim's. While it is active these bare keys are
+# captured and nothing else is — so bind an escape route in every mode you add.
+
+[mode.resize]
+"h" = "resize left 40"
+"l" = "resize right 40"
+"j" = "resize down 40"
+"k" = "resize up 40"
+"shift-h" = "resize left 120"
+"shift-l" = "resize right 120"
+"shift-j" = "resize down 120"
+"shift-k" = "resize up 120"
+"equal" = "balance"
+"escape" = "mode default"
+"return" = "mode default"
+
+# ------------------------------------------------------------------------------
+# Window rules
+# ------------------------------------------------------------------------------
+# Checked top to bottom; the first rule that matches wins. `app` and `title` are
+# regular expressions, so "Foo|Bar" matches either.
+#
+#   manage = false   leave the window completely alone — never tiled, never moved
+#   space = "..."    move it there when it opens (needs the scripting addition
+#                    for an instant move; without it, it lands on next focus)
+#
+# These few are here because they are fixed-size panels that tiling makes worse.
+# Add your own below.
+
+[[rule]]
+app = "System Settings|System Preferences"
+manage = false
+
+[[rule]]
+app = "Calculator"
+manage = false
+
+[[rule]]
+app = "Archive Utility|Software Update"
+manage = false
+
+# Picture-in-Picture floats over everything by design; tiling it defeats it.
+[[rule]]
+title = "Picture.in.Picture"
+manage = false
+
+# Sending apps to a named space needs the [[space]] blocks below — a rule that
+# names a space you have not declared does nothing, and `weftctl doctor` says so.
+#
+# [[rule]]
+# app = "Ghostty|Alacritty|kitty|WezTerm"
+# space = "term"
+#
+# [[rule]]
+# app = "Safari|Firefox|Google Chrome|Brave Browser"
+# space = "web"
+
+# ------------------------------------------------------------------------------
+# Spaces
+# ------------------------------------------------------------------------------
+# Optional. With no [[space]] blocks — the default — every desktop keeps its
+# Mission Control number as its name, which is what the alt-1..5 binds use.
+#
+# Declaring them gives each desktop a name you can use in rules and keybinds,
+# and a layout of its own. Names are handed out in Mission Control order, so
+# there must be at least as many desktops as blocks: extra blocks have nowhere
+# to land, and anything naming them silently does nothing. Add desktops in
+# Mission Control first, then uncomment.
+#
+# [[space]]
+# label = "main"
+# layout = "bsp"
+#
+# [[space]]
+# label = "web"
+# layout = "scroll"
+# scroll = { preset-column-widths = [0.5, 0.667, 1.0], center-focused-column = "on-overflow" }
+#
+# [[space]]
+# label = "term"
+# layout = "bsp"
+
+# ------------------------------------------------------------------------------
+# Integrations
+# ------------------------------------------------------------------------------
+# Both drive a separate program that weft does not install. Switched on without
+# the binary present they do nothing at all, so they start off; `weftctl doctor`
+# reports the combination, and so does Settings › Integrations.
+
+[integrations.borders]
+# Draws a highlight around the focused window.
+#   brew install FelixKratz/formulae/borders
+enabled = false
+
+# weftd starts borders and restarts it if it dies.
+supervise = true
+
+# Passed straight through to the borders binary.
+args = ["width=5.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "style=round", "hidpi=on"]
+
+# Recolour the border by the current layout, and by the active mode. Handy for
+# modes: the border turns red the moment you enter the resize layer.
+active-color = { bsp = "0xff7aa2f7", scroll = "0xff9ece6a", float = "0xffe0af68" }
+mode-color = { default = "0xff7aa2f7", resize = "0xfff7768e" }
+
+[integrations.sketchybar]
+# Fires `sketchybar --trigger weft_event` on layout, space and focus changes,
+# with WEFT_* variables describing what changed.
+#   brew install FelixKratz/formulae/sketchybar
+enabled = false
+
+# Collapse event storms closer together than this, in milliseconds.
+coalesce-ms = 16

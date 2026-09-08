@@ -1,0 +1,284 @@
+<p align="center">
+  <img src="docs/assets/weft-icon.png" alt="Weft" width="140">
+</p>
+
+<h1 align="center">Weft</h1>
+
+<p align="center">
+  A tiling window manager for macOS.<br>
+  Tiling and keybinds in one native daemon — no <code>yabai</code> + <code>skhd</code> pair, no shell out per keypress.
+</p>
+
+<p align="center">
+  <img alt="platform: macOS 15+" src="https://img.shields.io/badge/platform-macOS%2015%2B-1d1f2b?style=flat-square">
+  <img alt="swift 6.2" src="https://img.shields.io/badge/swift-6.2-7aa2f7?style=flat-square">
+  <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-7aa2f7?style=flat-square">
+</p>
+
+---
+
+## What it is
+
+Weft tiles your windows and owns your keybinds in a single process. A keypress
+is matched inside the daemon's event tap and dispatched in-process — there is no
+`fork` + `exec` of a CLI per binding, which is the design `skhd` is stuck with.
+
+It talks to the WindowServer through SkyLight and moves windows through the
+Accessibility API, so it manages **native macOS spaces** rather than inventing
+its own.
+
+- **Three layouts per space** — `bsp` (binary split), `scroll` (PaperWM-style
+  columns you scroll sideways through), and `float` (no tiling at all). Switch a
+  space between them at runtime; window membership and focus survive the change.
+- **Stacks** — collapse several windows into one slot and cycle through them.
+- **Modes** — modal layers, like vim's. The shipped config puts resizing behind
+  one so `h/j/k/l` can be bare keys while it is active.
+- **Window rules** — regex on app name or window title; send an app to a space,
+  or tell weft to leave it alone entirely.
+- **Multi-display** — spaces are tiled in *their own* display's rect, and
+  `west`/`east` pick the display geometrically rather than by arrangement index.
+- **Mouse** — hold a modifier to drag a window by its body or resize it from an
+  edge.
+- **A menu-bar app** with a visual settings editor, a searchable keybinding
+  cheatsheet (`⌘K`), and a window switcher (`⌃⌥Space`).
+
+Weft is young, and it asks for real system permissions to do its job. The design
+notes in [`docs/DESIGN.md`](docs/DESIGN.md) are candid about what is solved, what
+is a heuristic, and what macOS simply will not allow — read them before trusting
+it with your desktop.
+
+## Install
+
+Requires macOS 15 or later and a Swift 6.2+ toolchain (`swift --version`).
+
+```bash
+git clone https://github.com/amiralibg/weft.git
+cd weft
+./scripts/install.sh
+```
+
+That builds release binaries into `~/.local/bin`, bundles `WeftBar.app` into
+`~/Applications`, seeds a config, installs the launchd service, and opens the
+Setup window.
+
+If `~/.local/bin` is not on your `PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+> **If you already run yabai or skhd**, `install.sh` stops them first — two
+> window managers driving the same windows is a fight you get to watch. It
+> records exactly which launchd agents it stopped, and `./scripts/uninstall.sh`
+> puts those back. Pass `WEFT_KEEP_WM=1` to skip that.
+
+## Permissions
+
+Weft needs two macOS privacy permissions, and **both belong to `weftd`** — the
+engine — not to the `WeftBar` menu-bar app you can see. macOS grants these per
+binary, so granting them to WeftBar does nothing at all.
+
+| Permission | What it is for | Required |
+|---|---|---|
+| **Accessibility** | Moving, resizing and focusing windows | Yes |
+| **Input Monitoring** | Keybinds and mouse gestures | Yes |
+| **Screen Recording** | Only the focus highlight | No |
+
+The Setup window opens each System Settings pane in turn. In each one, find the
+row named **weftd** and turn its switch on — weft notices within a second and
+moves itself along. Nothing needs restarting.
+
+`weftd` asks the system for both permissions on launch, which is what makes
+macOS *list* it, so the row should already be there waiting. If it is not, the
+Setup window's "No weftd row in the list?" section reveals the binary in Finder
+and copies its path — `~/.local/bin` is a hidden directory, so the pane's `+`
+browser cannot reach it on its own.
+
+Reopen it any time from the menu-bar icon → **Permissions…**, or:
+
+```bash
+open -a WeftBar --args --setup
+weftctl doctor          # the same checks, in a terminal
+```
+
+## Default keybindings
+
+`⌥` is Option/Alt. A matched chord is swallowed, so `⌥H` moves focus rather than
+typing `˙`. Chords are hardware key *positions*, so they are identical on
+QWERTY, Colemak and Dvorak.
+
+| Chord | Does |
+|---|---|
+| `⌥H` `⌥J` `⌥K` `⌥L` | Focus the window left / down / up / right |
+| `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Swap the focused window that way |
+| `⌥1`…`⌥5` | Go to desktop 1–5 |
+| `⌥⇧1`…`⌥⇧5` | Send the focused window to that desktop |
+| `⌥Tab` | Back to the desktop you came from |
+| `⌥F` | Zoom the window to fill the space; again to restore |
+| `⌥⇧Space` | Float the window, or put it back in the tiling |
+| `⌥V` / `⌥⇧V` | Next window splits vertically / horizontally |
+| `⌥\` | Flip the split under the focused window |
+| `⌥B` | Even out every split on this space |
+| `⌥W` `⌥]` `⌥[` `⌥U` | Stack: wrap / next / prev / unstack |
+| `⌥N` `⌥P` `⌥R` | Scroll layout: next column / prev column / cycle width |
+| `⌥⇧B` `⌥⇧N` `⌥⇧F` | Switch this space to bsp / scroll / float |
+| `⌥⌃H` `⌥⌃L` | Focus the display west / east |
+| `⌥⌃⇧H` `⌥⌃⇧L` | Send the window to that display and follow it |
+| `⌥⇧R` | Enter resize mode — then `h/j/k/l`, `⇧` for bigger steps, `=` to balance, `Esc` to leave |
+| `⌃⌥Space` | Window switcher |
+| `⌘K` | Keybinding cheatsheet |
+
+All of it is configuration — change any of it in `~/.config/weft/weft.toml`.
+
+## Configuration
+
+One file: `~/.config/weft/weft.toml`. Weft watches it and reloads within 100 ms
+of a save — layout changes, new keybinds and new rules all take effect without
+restarting anything.
+
+The shipped [`examples/weft.toml`](examples/weft.toml) is deliberately generic:
+no named spaces, no per-app placement, both integrations off. It behaves the
+same on a Mac with one desktop as on one with nine. Named spaces and app
+placement are in it as commented-out worked examples.
+
+```toml
+[general]
+inner-gap = 8
+outer-gap = 8
+default-layout = "bsp"          # bsp | scroll | float
+mouse-modifier = "alt"
+mouse-follows-focus = true
+reserve = 0                     # room for an always-on-screen bar
+
+[keys]
+"alt-h" = "focus west"
+"alt-1" = "space focus 1"
+"alt-shift-r" = "mode resize"
+
+[mode.resize]
+"h" = "resize left 40"
+"escape" = "mode default"
+
+[[rule]]
+app = "System Settings"
+manage = false                  # never tiled, never moved
+
+[[space]]                       # optional — see the note below
+label = "term"
+layout = "bsp"
+```
+
+Prefer buttons? The menu-bar icon → **Settings…** is a full editor for the file
+— gaps with a live preview of what they do, spaces, rules, a keybinding table
+with a chord recorder, and integrations. It writes back into the same lines,
+so your comments and any key it does not recognise survive untouched.
+
+```bash
+open -a WeftBar --args --settings
+```
+
+> **A note on `[[space]]`.** Labels are handed out in Mission Control order, so
+> there must be at least as many desktops as blocks. Declare more and the extras
+> have nowhere to land — and every keybind and rule naming them fails *silently*.
+> `weftctl doctor` and the Settings window both report this; add the desktops in
+> Mission Control first.
+
+## Command line
+
+`weftctl` drives a running `weftd` over a Unix socket. Every keybind is just one
+of these commands.
+
+```bash
+weftctl focus east                  # same thing your keybind does
+weftctl space focus 3
+weftctl space layout scroll
+weftctl query state                 # JSON: the world as weftd sees it
+weftctl query windows
+weftctl subscribe --all             # live event stream
+weftctl doctor                      # health check: permissions, config, helpers
+weftctl bench "focus east" -n 200   # latency histogram
+weftctl service restart
+```
+
+`weftctl doctor` is the first thing to run when something is wrong. It reports
+the daemon's *own* permissions (not `weftctl`'s — TCC is per binary, and asking
+the wrong process is how a green checklist sits next to a weft that cannot move
+a window), validates the config with line numbers, and cross-checks it against
+reality: rules and keybinds pointing at desktops that do not exist, integrations
+switched on whose binary is not installed.
+
+## Coming from yabai + skhd
+
+```bash
+weftctl migrate           # print the translated weft.toml
+weftctl migrate --write   # write it to ~/.config/weft/weft.toml
+```
+
+`install.sh` runs this for you when it finds a `yabairc` or `skhdrc` and no
+existing weft config — your own keybinds are the only ones that will feel right,
+and seeding a demo config over them makes a working install look broken.
+
+## Instant space switching (optional)
+
+Without help, switching desktops uses the Mission Control `⌃N` shortcut, which
+covers desktops 1–9 and plays the system animation.
+
+Weft also speaks the Dock scripting-addition protocol. If you already have
+yabai's loaded (`sudo yabai --install-sa && yabai --load-sa`, which needs SIP
+configured with a scripting-addition exception), weft drives it and space
+switches become instant and animation-free — and sticky windows and
+non-activating window moves start working too.
+
+Entirely optional. `weftctl doctor` reports which capabilities you have.
+
+## Integrations
+
+Both are off by default, because both drive a program weft does not install.
+
+| | What it does | Install |
+|---|---|---|
+| [JankyBorders](https://github.com/FelixKratz/JankyBorders) | Highlight around the focused window, recoloured per layout and per mode | `brew install FelixKratz/formulae/borders` |
+| [SketchyBar](https://github.com/FelixKratz/SketchyBar) | Fires `--trigger weft_event` with `WEFT_*` variables on layout, space and focus changes | `brew install FelixKratz/formulae/sketchybar` |
+
+Turn them on in `[integrations.*]`, or in Settings → Integrations, which tells
+you whether the binary is actually there.
+
+## Building from source
+
+```bash
+swift build -c release      # weftd, weftctl, weft-bar
+swift test                  # 97 tests, no window manager required
+./scripts/build-app.sh      # bundles build/WeftBar.app
+```
+
+> Use `swift build` without `--target`. In this package `swift build --target
+> weft-bar` can report success while producing a byte-identical binary, so an
+> edit appears to have no effect.
+
+## Uninstall
+
+```bash
+./scripts/uninstall.sh
+```
+
+Stops and removes the service, the binaries and the app, and restores whatever
+yabai/skhd launchd agents `install.sh` stopped — by the labels it actually
+recorded, not by guessing. Your `~/.config/weft` is left alone.
+
+## Layout of the repo
+
+| Path | |
+|---|---|
+| `Sources/WeftCore` | Geometry and the world model. Pure — no I/O, no AppKit, no SkyLight. |
+| `Sources/WeftPlatform` | Accessibility, SkyLight, spaces, displays, permissions. |
+| `Sources/WeftConfig` | TOML parsing and validation of `weft.toml`. |
+| `Sources/WeftInput` | The event tap, chord matching and modes. |
+| `Sources/weftd` | The daemon. |
+| `Sources/weftctl` | The CLI. |
+| `Sources/weft-bar` | The menu-bar app, Settings, cheatsheet, switcher. |
+| `docs/DESIGN.md` | Why things are the way they are, including the mistakes. |
+| `docs/TESTING.md` | The manual test matrix. |
+
+## License
+
+MIT — see [LICENSE](LICENSE).

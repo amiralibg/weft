@@ -1,0 +1,19 @@
+# SwiftPM
+.build/
+.swiftpm/
+
+# Build products — scripts/build-app.sh regenerates build/WeftBar.app
+build/
+*.dSYM/
+*.o
+
+# Compiled spike binaries (the .swift sources are the point, not the output)
+spikes/spike
+
+# Xcode, if anyone opens the package in it
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
