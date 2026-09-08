@@ -1,0 +1,225 @@
+# Cut a release: build universal binaries, bundle WeftBar.app, publish both.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag must match WeftVersion.current in Sources/WeftCore/Version.swift —
+# the job refuses to publish otherwise, so the number a user sees in
+# `weftctl --version` is always the number they downloaded.
+#
+# Signing is optional and secret-driven. With no secrets set the artefacts are
+# ad-hoc signed, which is enough to *run* but not enough for Gatekeeper once
+# downloaded — scripts/install-release.sh strips the quarantine flag, and the
+# release notes say so plainly. Set the four secrets below and the same workflow
+# produces properly signed, notarised artefacts with none of that caveat:
+#
+#   MACOS_CERTIFICATE_P12   base64 of a "Developer ID Application" .p12
+#   MACOS_CERTIFICATE_PWD   its password
+#   MACOS_NOTARY_APPLE_ID   the Apple ID to notarise as
+#   MACOS_NOTARY_PASSWORD   an app-specific password for that Apple ID
+#   MACOS_TEAM_ID           the 10-character Developer Team ID
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Select the newest Xcode
+        run: |
+          set -euo pipefail
+          # The package needs Swift 6.2. Pick the newest toolchain the image
+          # has and fail loudly rather than half-building against an old one.
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          swift --version
+          version=$(swift --version | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
+          if [ "$(printf '%s\n6.2\n' "$version" | sort -V | head -1)" != "6.2" ]; then
+            echo "::error::Swift 6.2+ required, runner has $version ($latest)"
+            exit 1
+          fi
+
+      - name: Check the tag matches Version.swift
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          declared=$(sed -n 's/.*static let current = "\(.*\)".*/\1/p' Sources/WeftCore/Version.swift)
+          echo "tag=$tag  Version.swift=$declared"
+          if [ "$tag" != "v$declared" ]; then
+            echo "::error::tag $tag does not match WeftVersion.current ($declared).
+          Bump Sources/WeftCore/Version.swift, commit, then re-tag."
+            exit 1
+          fi
+          echo "VERSION=$declared" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: swift test
+
+      - name: Build universal binaries
+        run: |
+          set -euo pipefail
+          swift build -c release --arch arm64 --arch x86_64
+          # `.build/release` symlinks to the host arch only; the fat products
+          # land here.
+          echo "PRODUCT_DIR=$PWD/.build/apple/Products/Release" >> "$GITHUB_ENV"
+
+      - name: Set up signing (skipped when no certificate secret is present)
+        id: signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          NOTARY_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+        run: |
+          set -euo pipefail
+          # Whether to notarise is decided here too: `secrets` is not reliably
+          # available in a step-level `if:`, so it becomes an output.
+          if [ -n "${NOTARY_ID:-}" ]; then
+            echo "notarise=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notarise=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "identity=" >> "$GITHUB_OUTPUT"
+            echo "No signing certificate — artefacts will be ad-hoc signed."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/build.keychain"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$CERT_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application.*\)"/\1/p' | head -1)
+          rm -f "$RUNNER_TEMP/cert.p12"
+          if [ -z "$identity" ]; then
+            echo "::error::certificate imported but no Developer ID Application identity found"
+            exit 1
+          fi
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "Signing as: $identity"
+
+      - name: Bundle WeftBar.app
+        env:
+          WEFT_PRODUCT_DIR: ${{ env.PRODUCT_DIR }}
+          WEFT_VERSION: ${{ env.VERSION }}
+          WEFT_CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: ./scripts/build-app.sh
+
+      - name: Sign the command-line binaries
+        if: ${{ steps.signing.outputs.identity != '' }}
+        run: |
+          set -euo pipefail
+          for bin in weftd weftctl; do
+            codesign --force --options runtime --timestamp \
+              --sign "${{ steps.signing.outputs.identity }}" \
+              "$PRODUCT_DIR/$bin"
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/weft-$VERSION"
+          mkdir -p "$stage/bin"
+          cp "$PRODUCT_DIR/weftd" "$PRODUCT_DIR/weftctl" "$stage/bin/"
+          cp -R build/WeftBar.app "$stage/"
+          cp examples/weft.toml "$stage/weft.toml.example"
+          cp README.md LICENSE "$stage/"
+          cp scripts/lib-agents.sh scripts/uninstall.sh "$stage/"
+          cp scripts/install-release.sh "$stage/install.sh"
+          # No symlink dereferencing surprises, and a stable file order so the
+          # checksum only changes when the contents do.
+          tar -C "$RUNNER_TEMP" -czf "weft-$VERSION-macos-universal.tar.gz" "weft-$VERSION"
+          shasum -a 256 "weft-$VERSION-macos-universal.tar.gz" \
+            > "weft-$VERSION-macos-universal.tar.gz.sha256"
+          cat "weft-$VERSION-macos-universal.tar.gz.sha256"
+          echo "ARCHS=$(lipo -archs "$PRODUCT_DIR/weftd")" >> "$GITHUB_ENV"
+
+      - name: Notarise
+        if: ${{ steps.signing.outputs.identity != '' && steps.signing.outputs.notarise == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          APPLE_PWD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Notarise the archive itself; staple the app inside it afterwards.
+          xcrun notarytool submit "weft-$VERSION-macos-universal.tar.gz" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PWD" --team-id "$TEAM_ID" \
+            --wait
+          xcrun stapler staple build/WeftBar.app || true
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          signed="ad-hoc signed"
+          caveat=$'\n> **Not notarised.** macOS quarantines anything downloaded from the internet, so\n> the installer clears that flag on the files it installs. If you prefer, inspect\n> `install.sh` in the archive before running it — it is the same script as in the repo.\n> Because the binaries are ad-hoc signed, **macOS forgets their Accessibility and\n> Input Monitoring grants on every update**: after upgrading, Setup reopens by itself\n> and you toggle `weftd` off and on again in System Settings.\n'
+          if [ -n "${{ steps.signing.outputs.identity }}" ]; then
+            signed="signed with a Developer ID"
+            caveat=""
+          fi
+          sum=$(cut -d' ' -f1 < "weft-$VERSION-macos-universal.tar.gz.sha256")
+          cat > NOTES.md <<EOF
+          ## Install
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-release.sh | bash
+          \`\`\`
+
+          Or download the archive below, unpack it, and run \`./install.sh\`.
+
+          Then open **WeftBar** and grant \`weftd\` Accessibility and Input Monitoring.
+          Check anything with \`weftctl doctor\`.
+          $caveat
+          ## This build
+
+          | | |
+          |---|---|
+          | Version | \`$VERSION\` |
+          | Architectures | \`$ARCHS\` |
+          | Requires | macOS 15 or later |
+          | Signing | $signed |
+          | SHA-256 | \`$sum\` |
+
+          Verify what you downloaded:
+
+          \`\`\`bash
+          shasum -a 256 -c weft-$VERSION-macos-universal.tar.gz.sha256
+          \`\`\`
+          EOF
+          cat NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create "$tag" \
+            --title "weft $VERSION" \
+            --notes-file NOTES.md \
+            "weft-$VERSION-macos-universal.tar.gz" \
+            "weft-$VERSION-macos-universal.tar.gz.sha256"

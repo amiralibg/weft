@@ -49,7 +49,31 @@ it with your desktop.
 
 ## Install
 
-Requires macOS 15 or later and a Swift 6.2+ toolchain (`swift --version`).
+macOS 15 or later, Intel or Apple Silicon.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash
+```
+
+That downloads the [latest release](https://github.com/amiralibg/weft/releases/latest),
+verifies its checksum, installs `weftd` and `weftctl` into `~/.local/bin` and
+`WeftBar.app` into `~/Applications`, seeds a config, registers the launchd
+service, and opens Setup. No toolchain, no compile.
+
+Prefer to look before you run it? Download the archive from the
+[releases page](https://github.com/amiralibg/weft/releases/latest), check it,
+and run the `install.sh` inside:
+
+```bash
+shasum -a 256 -c weft-*-macos-universal.tar.gz.sha256
+tar -xzf weft-*-macos-universal.tar.gz && cd weft-*/
+./install.sh
+```
+
+<details>
+<summary><b>Build from source instead</b></summary>
+
+Needs a Swift 6.2+ toolchain (`swift --version`).
 
 ```bash
 git clone https://github.com/amiralibg/weft.git
@@ -57,20 +81,36 @@ cd weft
 ./scripts/install.sh
 ```
 
-That builds release binaries into `~/.local/bin`, bundles `WeftBar.app` into
-`~/Applications`, seeds a config, installs the launchd service, and opens the
-Setup window.
+</details>
 
-If `~/.local/bin` is not on your `PATH`:
+Either way, if `~/.local/bin` is not on your `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-> **If you already run yabai or skhd**, `install.sh` stops them first — two
+> **If you already run yabai or skhd**, the installer stops them first — two
 > window managers driving the same windows is a fight you get to watch. It
-> records exactly which launchd agents it stopped, and `./scripts/uninstall.sh`
-> puts those back. Pass `WEFT_KEEP_WM=1` to skip that.
+> records exactly which launchd agents it stopped, and `uninstall.sh` puts those
+> back. Pass `WEFT_KEEP_WM=1` to skip that.
+
+### About the released binaries
+
+They are **ad-hoc signed, not notarised** — weft has no paid Apple Developer
+account behind it. Two consequences worth knowing up front:
+
+- macOS quarantines anything downloaded from the internet, and refuses to launch
+  an unsigned app that carries the flag — reporting it as "damaged", which it is
+  not. The installer clears the flag from the files it installs. That is the one
+  thing in it you should read before piping it to a shell.
+- macOS identifies an unsigned binary by its **contents**, so every new build is
+  a different program as far as Privacy & Security is concerned: **an update
+  drops weftd's Accessibility and Input Monitoring grants.** The installer says
+  so, and Setup reopens by itself; you toggle `weftd` off and on again in System
+  Settings. Building from source has exactly the same property.
+
+Neither applies to a build signed with a Developer ID — the release workflow
+does that automatically if the repository has the signing secrets configured.
 
 ## Permissions
 
@@ -249,6 +289,27 @@ you whether the binary is actually there.
 swift build -c release      # weftd, weftctl, weft-bar
 swift test                  # 97 tests, no window manager required
 ./scripts/build-app.sh      # bundles build/WeftBar.app
+```
+
+To produce what a release ships — universal binaries for both architectures:
+
+```bash
+swift build -c release --arch arm64 --arch x86_64
+WEFT_PRODUCT_DIR="$PWD/.build/apple/Products/Release" ./scripts/build-app.sh
+```
+
+`.build/release` is a symlink to the *host* architecture's products, so the fat
+binaries do not land there — they go to `.build/apple/Products/Release`, which
+is why `build-app.sh` takes that override.
+
+Releases are cut by tagging. `.github/workflows/release.yml` refuses to publish
+a tag that disagrees with `WeftVersion.current` in
+[`Sources/WeftCore/Version.swift`](Sources/WeftCore/Version.swift), so
+`weftctl --version` always matches what was downloaded:
+
+```bash
+# bump Version.swift, commit, then:
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 > Use `swift build` without `--target`. In this package `swift build --target

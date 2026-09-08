@@ -7,9 +7,24 @@
 # Mirrors scripts/install.sh.
 set -e
 
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=lib-agents.sh
-. "$DIR/scripts/lib-agents.sh"
+# lib-agents.sh lives beside this script in a release archive, and one level
+# up under scripts/ in a clone. Find it either way, and survive not finding it
+# at all: uninstalling weft must work even when the helper that puts yabai back
+# is missing — the alternative is a half-removed window manager.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+LIB=""
+for candidate in "$HERE/lib-agents.sh" "$HERE/../scripts/lib-agents.sh"; do
+    [ -f "$candidate" ] && LIB="$candidate" && break
+done
+if [ -n "$LIB" ]; then
+    # shellcheck source=lib-agents.sh
+    . "$LIB"
+else
+    echo "NOTE: lib-agents.sh not found — cannot restore yabai/skhd automatically."
+    weft_restore_wms() {
+        echo "    skipped: restart yabai/skhd yourself, or re-run from a clone of the repo"
+    }
+fi
 BINDIR="${PREFIX:-$HOME/.local}/bin"
 APPDIR="${WEFT_APP_DIR:-$HOME/Applications}"
 PURGE=0

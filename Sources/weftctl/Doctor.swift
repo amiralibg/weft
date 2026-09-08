@@ -118,7 +118,7 @@ public enum Doctor {
     }
 
     public static func run() {
-        print("=== weft doctor ===")
+        print("=== weft doctor === \(WeftVersion.full)")
         var allOk = true
 
         // 1. Accessibility

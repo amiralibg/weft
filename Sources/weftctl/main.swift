@@ -18,6 +18,7 @@ func usage() -> Never {
           weftctl bench <cmd> [-n N]   # latency benchmark & histogram
           weftctl migrate [--write]    # migrate yabai/skhd configuration
           weftctl service <install|uninstall|start|stop|restart|status>
+          weftctl --version
         """,
         stderr
     )
@@ -45,6 +46,11 @@ func localQuery(_ kind: String) -> Never {
 
 let args = Array(CommandLine.arguments.dropFirst())
 guard !args.isEmpty, !["help", "--help", "-h"].contains(args[0]) else { usage() }
+
+if ["--version", "-v", "version"].contains(args[0]) {
+    print(WeftVersion.full)
+    exit(0)
+}
 
 ignoreSIGPIPE()
 
