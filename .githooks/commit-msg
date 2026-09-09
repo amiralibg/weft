@@ -1,0 +1,11 @@
+#!/bin/sh
+# Block AI co-authorship / session trailers from entering history.
+# Enabled via: git config core.hooksPath .githooks
+MSG_FILE="$1"
+if grep -iEq '^[[:space:]]*Co-Authored-By:[[:space:]]*Claude\b' "$MSG_FILE" \
+  || grep -iEq '^[[:space:]]*Claude-Session[[:space:]]*:' "$MSG_FILE" \
+  || grep -iEq 'noreply@anthropic\.com' "$MSG_FILE"; then
+  echo "commit-msg hook: AI trailers are not allowed in this repo." >&2
+  echo "Remove Co-Authored-By: Claude / Claude-Session lines (see AGENTS.md)." >&2
+  exit 1
+fi
