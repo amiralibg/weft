@@ -26,6 +26,13 @@ public struct Frame: Codable, Sendable, Equatable {
     public func contains(x: Double, y: Double) -> Bool {
         x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
     }
+
+    /// True when the two rectangles share any area. Touching edges do not
+    /// count, so a zero-area rect intersects nothing.
+    public func intersects(_ other: Frame) -> Bool {
+        x < other.x + other.width && other.x < x + width
+            && y < other.y + other.height && other.y < y + height
+    }
 }
 
 public struct Display: Codable, Sendable, Equatable {

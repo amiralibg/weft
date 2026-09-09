@@ -2,9 +2,10 @@
 //
 // An ordered horizontal strip of columns; each column holds a vertical stack
 // of windows. The viewport (viewportX) pans so the focused column is visible;
-// columns entirely outside viewport ± margin are PARKED (SLSMoveWindow to
-// union.minX - 5000, S4) and cost nothing until re-entry. Unparking needs the
-// nudge protocol (SLS back + AX different + AX target) — platform side.
+// columns with too little of themselves on screen for AX to place honestly are
+// PARKED (SLSMoveWindow to union.minX - 5000, S4) and cost nothing until
+// re-entry. Unparking needs the nudge protocol (SLS back + AX different + AX
+// target) — platform side.
 //
 // Visible columns move via AX only (S2 rejected SLSMoveWindow for visible
 // windows: the app desyncs). Parking is SLS-only (AX clamps at -(width-40)).
@@ -212,6 +213,18 @@ public struct ScrollState: Sendable, Equatable {
         return copy
     }
 
+    /// Where a window sits in the strip, or nil if it is not in it.
+    ///
+    /// A mouse drag names the two windows either side of the border it
+    /// grabbed, so the resize has to be aimed at *that* column — not at
+    /// whatever happens to be focused.
+    public func position(of id: WindowID) -> (col: Int, row: Int)? {
+        for (c, col) in columns.enumerated() {
+            if let r = col.windows.firstIndex(of: id) { return (c, r) }
+        }
+        return nil
+    }
+
     /// Cycle the focused column through the preset ring.
     public func cyclingWidth() -> ScrollState {
         guard columns.indices.contains(focusCol) else { return self }
@@ -229,9 +242,17 @@ public struct ScrollState: Sendable, Equatable {
 
     /// Nudge the focused column width (resize left/right). Clamped.
     public func adjustingWidth(_ delta: Double) -> ScrollState {
-        guard columns.indices.contains(focusCol) else { return self }
+        adjustingWidth(delta, column: focusCol)
+    }
+
+    /// Nudge a named column's width. Clamped. Every column right of it moves
+    /// by the same amount, because a column's strip position is the sum of
+    /// the widths before it — which is what makes the rest of the strip
+    /// follow a resize instead of overlapping it.
+    public func adjustingWidth(_ delta: Double, column: Int) -> ScrollState {
+        guard columns.indices.contains(column) else { return self }
         var copy = self
-        copy.columns[focusCol].width = min(max(copy.columns[focusCol].width + delta, 0.15), 1.0)
+        copy.columns[column].width = min(max(copy.columns[column].width + delta, 0.15), 1.0)
         return copy
     }
 
@@ -241,11 +262,17 @@ public struct ScrollState: Sendable, Equatable {
     /// boundary *above* it instead — otherwise the bottom window was the one
     /// window in the strip that could not be resized.
     public func adjustingHeight(_ delta: Double) -> ScrollState {
-        guard columns.indices.contains(focusCol) else { return self }
-        var col = columns[focusCol]
+        adjustingHeight(delta, column: focusCol, row: focusRow)
+    }
+
+    /// The same edit, aimed at a named row of a named column, for a mouse
+    /// drag on a horizontal border.
+    public func adjustingHeight(_ delta: Double, column: Int, row rawRow: Int) -> ScrollState {
+        guard columns.indices.contains(column) else { return self }
+        var col = columns[column]
         let n = col.windows.count
         guard n > 1, col.heights.count == n else { return self }
-        let row = min(max(focusRow, 0), n - 1)
+        let row = min(max(rawRow, 0), n - 1)
         // Which pair of adjacent rows the boundary sits between, and which of
         // the two grows for a positive delta.
         let (grow, shrink) = row < n - 1 ? (row, row + 1) : (row, row - 1)
@@ -255,7 +282,7 @@ public struct ScrollState: Sendable, Equatable {
         col.heights[grow] += d
         col.heights[shrink] -= d
         var copy = self
-        copy.columns[focusCol] = col
+        copy.columns[column] = col
         return copy
     }
 
@@ -283,15 +310,20 @@ public struct ScrollState: Sendable, Equatable {
     public mutating func ensureVisible(_ col: Int, screen: Frame, config: TilingConfig) {
         let (usableW, _, _, _) = scrollUsable(screen: screen, config: config)
         guard columns.indices.contains(col), usableW > 0, screen.width > 0 else { return }
-        let outerLeft = config.outerGap.left
-        let windowW = screen.width - outerLeft  // visible strip span below vx
         let (x0, x1) = columnRange(col, usableW: usableW)
         // 1. Minimum scroll to fit (left edge first, then right).
+        //
+        // The visible strip window is [vx, vx + usableW], not [vx - outerLeft,
+        // vx + screen.width - outerLeft]. Strip coordinates already run inside
+        // the outer gaps — `scrollLayout` draws strip position `vx` at
+        // `screen.x + outerGap.left` — so measuring the window in *screen*
+        // width let a scrolled-to column sit flush against the screen edge
+        // with its outer gap eaten, and did it only after a scroll.
         var vx = viewportX
-        if x0 < vx - outerLeft { vx = x0 + outerLeft }
-        if x1 > vx + windowW { vx = x1 - windowW }
+        if x0 < vx { vx = x0 }
+        if x1 > vx + usableW { vx = x1 - usableW }
         // 2. Center modes, against the fresh window.
-        let mid = (vx - outerLeft + vx + windowW) / 2
+        let mid = vx + usableW / 2
         switch centerMode {
         case .never:
             break
@@ -299,7 +331,7 @@ public struct ScrollState: Sendable, Equatable {
             vx += (x0 + x1) / 2 - mid
         case .onOverflow:
             // Only center what can't fit: it never sits fully in view.
-            if x1 - x0 > screen.width { vx += (x0 + x1) / 2 - mid }
+            if x1 - x0 > usableW { vx += (x0 + x1) / 2 - mid }
         }
         viewportX = max(vx, 0)
     }
@@ -363,9 +395,19 @@ public func scrollUsable(screen: Frame, config: TilingConfig) -> (
 }
 
 /// Screen-coordinate frames for VISIBLE columns + the parked set.
-/// Parked = entirely outside [vx - margin, vx + w + margin], margin = w.
+///
+/// Parked = not enough of the column lands on screen to be worth placing.
 /// Returned frames are final (screen coords); parked windows get no frame —
 /// the daemon SLS-parks them and persists the set.
+///
+/// The threshold is not a taste call. AX refuses to put a window where only a
+/// sliver of it would be visible — it clamps at roughly `-(width - 40)` — and
+/// it clamps *silently*, so a column scrolled off the left edge was written to
+/// its true off-screen position, snapped back by the WindowServer, and left
+/// sitting under the leftmost visible column. Four windows into a scroll space
+/// that reads as a pile of windows stacked in the corner, which is exactly
+/// what it is. Anything AX would clamp gets SLS-parked instead, which has no
+/// such limit.
 public func scrollLayout(
     _ state: ScrollState,
     screen: Frame,
@@ -374,7 +416,11 @@ public func scrollLayout(
     let gap = config.innerGap
     let (usableW, usableH, baseX, baseY) = scrollUsable(screen: screen, config: config)
     let vx = state.viewportX
-    let margin = screen.width
+    /// How much of a column has to be on screen for AX to place it honestly.
+    /// The clamp leaves 40pt; 48 keeps a margin over it, and a column narrower
+    /// than that is measured against its own width instead so a deliberately
+    /// tiny column is never unreachable.
+    let minVisible = 48.0
 
     // Strip positions (raw widths, matching columnRange).
     var stripX: [Double] = []
@@ -388,16 +434,14 @@ public func scrollLayout(
     var parked = Set<WindowID>()
     for (i, col) in state.columns.enumerated() {
         let x0 = stripX[i]
-        let x1 = x0 + col.width * usableW
-        // Entirely outside the window (with margin) → parked, zero cost.
-        if x1 < vx - margin || x0 > vx + screen.width + margin {
+        let drawX = baseX + (x0 - vx) + gap / 2
+        // Half-gap inset per side so columns don't touch.
+        let drawW = max(col.width * usableW - gap, 1)
+        let onScreen = min(drawX + drawW, screen.x + screen.width) - max(drawX, screen.x)
+        if onScreen < min(minVisible, drawW) {
             parked.formUnion(col.windows)
             continue
         }
-        let drawX = baseX + (x0 - vx) + gap / 2
-        // Half-gap inset per side so columns don't touch (parking math stays
-        // on raw strip widths — conservative, keeps marginal columns alive).
-        let drawW = max(col.width * usableW - gap, 1)
         // Rows divide the column height by their stored shares (equal until
         // something resizes them), inner gaps between.
         let n = max(col.windows.count, 1)
@@ -416,6 +460,10 @@ public func scrollLayout(
     // included, rather than the whole display.
     if let fs = state.fullscreen, state.windows.contains(fs) {
         frames[fs] = Frame(x: baseX, y: baseY, width: usableW, height: usableH)
+        // A zoomed window covers the screen, so it is visible by definition
+        // even when its own column has scrolled out of the strip. Without
+        // this it was handed a frame and parked in the same pass.
+        parked.remove(fs)
     }
     return (frames, parked)
 }

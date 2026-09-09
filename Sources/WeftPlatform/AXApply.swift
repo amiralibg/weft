@@ -313,19 +313,26 @@ public final class AXApplier: @unchecked Sendable {
         // out-of-sync windows. Position must match tightly; size gets slop
         // for cell-snapping terminals (else every sync rewrites a settled
         // 5px-snapped window — churn that looked like "moving by itself").
-        let todo: [(wid: WindowID, frame: Frame, pid: Int32)] = lock.withLock {
-            frames.compactMap { wid, frame in
-                guard let pid = pids[wid] else { return nil }
-                if let actual = WorldReader.frame(of: wid),
-                   abs(actual.x - frame.x) < 1.0, abs(actual.y - frame.y) < 1.0,
-                   abs(actual.width - frame.width) <= self.sizeSlop,
-                   abs(actual.height - frame.height) <= self.sizeSlop
-                {
-                    lastApplied[wid] = actual
-                    return nil
-                }
-                return (wid, frame, pid)
+        // Read geometry first, take the lock second. These are SLS calls —
+        // cheap, but there is one per window, and doing them inside the lock
+        // meant a drag's diff pass blocked every per-pid queue that wanted to
+        // record a result at the same time.
+        var settled: [WindowID: Frame] = [:]
+        var todo: [(wid: WindowID, frame: Frame, pid: Int32)] = []
+        for (wid, frame) in frames {
+            guard let pid = pids[wid] else { continue }
+            if let actual = WorldReader.frame(of: wid),
+               abs(actual.x - frame.x) < 1.0, abs(actual.y - frame.y) < 1.0,
+               abs(actual.width - frame.width) <= sizeSlop,
+               abs(actual.height - frame.height) <= sizeSlop
+            {
+                settled[wid] = actual
+                continue
             }
+            todo.append((wid, frame, pid))
+        }
+        if !settled.isEmpty {
+            lock.withLock { for (wid, f) in settled { lastApplied[wid] = f } }
         }
         guard !todo.isEmpty else {
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
@@ -577,14 +584,32 @@ public final class AXApplier: @unchecked Sendable {
             return posOK ? nil : .positionRejected(want: target, got: rect.origin)
         }
 
-        let size = CGSize(width: frame.width, height: frame.height)
+        // Is the size already right? An AX size write is the expensive half of
+        // this — it forces the app through a full relayout, and a browser or
+        // an Electron window can spend tens of milliseconds there. Resizing
+        // one column of a scroll strip only *translates* every column right of
+        // it, and moving a bsp divider only translates the windows on the far
+        // side, so most windows in a drag are the same size they already were
+        // and were being asked to relayout for nothing.
+        //
+        // The tolerance is tight on purpose. `sizeSlop` is 8pt — the room a
+        // cell-snapping terminal is allowed — and reusing it here would have
+        // swallowed the 2pt steps a slow drag is made of, so a resize would
+        // simply not happen until the cursor moved far enough in one event.
+        var pre = CGRect.zero
+        let sizeAlreadyRight = SLSGetWindowBounds(cid, wid, &pre) == 0
+            && abs(pre.width - frame.width) <= 0.5
+            && abs(pre.height - frame.height) <= 0.5
+
         var p = target
         if let v = AXValueCreate(.cgPoint, &p) {
             AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
         }
-        var s = size
-        if let v = AXValueCreate(.cgSize, &s) {
-            AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+        if !sizeAlreadyRight {
+            var s = CGSize(width: frame.width, height: frame.height)
+            if let v = AXValueCreate(.cgSize, &s) {
+                AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+            }
         }
         // Verify POSITION with SLS (cheap, no app IPC). Correction fires
         // ~half the time depending on grow-vs-shrink direction (S1). Size is

@@ -97,20 +97,102 @@ private func strip(_ ids: WindowID...) -> ScrollState {
         Column(windows: [2], width: 0.667),
     ])
     s.ensureVisible(1, screen: screen, config: config)
-    // col1 = [847, 1976.898]; visible [vx-8, vx+1702] → vx = 274.898.
-    #expect(abs(s.viewportX - 274.898) < 0.01)
+    // col1 = [847, 1976.898]; the strip window is the USABLE width, so
+    // vx = 1976.898 - 1694 = 282.898.
+    #expect(abs(s.viewportX - 282.898) < 0.01)
 }
 
-@Test func layoutParksDistantColumns() {
-    // Six half-width columns: strip 3000 wide, screen 1000, margin 1000.
-    // Visible window: [-1000, 2000]. Col 4 starts exactly at the margin edge
-    // (kept — boundary-inclusive is the safe direction); col 5 parks.
+@Test func aScrolledToColumnKeepsItsOuterGap() {
+    // The old viewport measured the window in screen width, which parked the
+    // scrolled-to column flush against the screen edge: the outer gap was
+    // there before you scrolled and gone afterwards.
+    let screen = Frame(x: 0, y: 0, width: 1710, height: 1073)
+    let config = TilingConfig()  // outer 8s
+    var s = ScrollState(columns: [
+        Column(windows: [1], width: 0.5),
+        Column(windows: [2], width: 0.667),
+    ])
+    s.ensureVisible(1, screen: screen, config: config)
+    let (frames, _) = scrollLayout(s, screen: screen, config: config)
+    let right = frames[2]!.x + frames[2]!.width
+    // Right edge sits on the outer gap, not on the screen edge, and the inner
+    // half-gap inset accounts for the rest.
+    #expect(abs(right - (1710 - 8 - config.innerGap / 2)) < 0.01)
+}
+
+@Test func layoutParksEverythingWithNothingOnScreen() {
+    // Six half-width columns: strip 3000 wide, screen 1000. Two fit; the rest
+    // have no on-screen overlap at all.
+    //
+    // Regression: the park test used to allow a full screen width of slack
+    // either side, so columns 3 and 4 were handed frames at x = 1000 and
+    // 1500 on a 1000-wide screen. AX will not put a window there — it clamps
+    // at roughly -(width - 40) — so they snapped back and stacked in the
+    // corner on top of the visible ones. Four windows into a scroll space
+    // that is the whole bug.
     let s = strip(1, 2, 3, 4, 5, 6)
     let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
-    #expect(frames.keys.sorted() == [1, 2, 3, 4, 5])
-    #expect(parked == [6])
+    #expect(frames.keys.sorted() == [1, 2])
+    #expect(parked == [3, 4, 5, 6])
     #expect(frames[1]!.x == 0)  // gap/2 inset with noGaps → 0
     #expect(frames[1]!.width == 500)
+    // Nothing that got a frame is off the screen it was laid out on.
+    for f in frames.values {
+        #expect(f.x + f.width > scrollScreen.x)
+        #expect(f.x < scrollScreen.x + scrollScreen.width)
+    }
+}
+
+@Test func aSliverTooThinForAXToPlaceIsParked() {
+    // AX leaves 40pt of a window on screen whatever you ask for. A column
+    // with less than that showing is parked rather than written to a position
+    // the WindowServer will quietly overrule.
+    var s = strip(1, 2)
+    // Scroll so column 1 has 20pt of itself left on screen.
+    s.viewportX = 480
+    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    #expect(parked == [1])
+    #expect(frames.keys.sorted() == [2])
+}
+
+@Test func aZoomedWindowIsNeverParked() {
+    // Zoom covers the screen, so it is visible even when its own column has
+    // scrolled out of the strip.
+    var s = strip(1, 2, 3, 4, 5, 6)
+    s = s.focusing(6).togglingFullscreen()
+    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    #expect(frames[6] != nil)
+    #expect(!parked.contains(6))
+}
+
+@Test func aBorderDragResizesTheColumnItWasGrabbedOn() {
+    // Dragging a border names the two windows either side of it. The resize
+    // has to land on that column — it used to focus the west window first and
+    // resize "the focused column", which moved focus as a side effect of a
+    // mouse gesture that is documented not to.
+    let s = ScrollState(columns: [
+        Column(windows: [1]), Column(windows: [2]), Column(windows: [3]),
+    ], focusCol: 2)
+    let (col, row) = s.position(of: 1)!
+    #expect((col, row) == (0, 0))
+    let next = s.adjustingWidth(0.1, column: col)
+    #expect(abs(next.columns[0].width - 0.6) < 1e-9)
+    #expect(next.columns[2].width == s.columns[2].width)
+    #expect(next.focusCol == 2)  // focus did not move
+}
+
+@Test func resizingAColumnShiftsEveryColumnRightOfIt() {
+    // The rest of the strip follows a resize: column positions are the sum of
+    // the widths before them, so growing one moves its neighbours over by
+    // exactly the same amount rather than letting them overlap.
+    let s = strip(1, 2, 3)
+    let (before, _) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    let widened = s.adjustingWidth(0.1, column: 0)
+    let (after, _) = scrollLayout(widened, screen: scrollScreen, config: noGaps)
+    #expect(abs(after[1]!.width - (before[1]!.width + 100)) < 1e-9)
+    #expect(abs(after[2]!.x - (before[2]!.x + 100)) < 1e-9)
+    // And they still do not overlap.
+    #expect(after[2]!.x >= after[1]!.x + after[1]!.width)
 }
 
 @Test func scrollFocusByGeometry() {

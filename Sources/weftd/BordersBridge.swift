@@ -12,6 +12,10 @@ final class BordersBridge: @unchecked Sendable {
     private var currentActiveColor: String?
     /// One "not installed" line per outage, not one per retry.
     private var warnedMissing = false
+    /// Same, for the "already running externally" line: `applyConfig` runs on
+    /// every config reload and never adopts the foreign process, so this used
+    /// to print again on every save of weft.toml.
+    private var warnedExternal = false
     /// Consecutive crash restarts. A borders that dies on its own arguments
     /// dies again in a millisecond, and the old handler respawned it every
     /// second forever — a permanent 1 Hz fork bomb in a background daemon,
@@ -23,6 +27,8 @@ final class BordersBridge: @unchecked Sendable {
             lastConfig = config
             if !config.enabled {
                 stopInternal()
+                warnedMissing = false
+                warnedExternal = false
                 return
             }
             if config.supervise && process == nil && !stopped {
@@ -73,9 +79,13 @@ final class BordersBridge: @unchecked Sendable {
         }
         warnedMissing = false
         if isBordersAlreadyRunning() {
-            fputs("weftd: borders is already running externally; managing dynamic colors\n", stderr)
+            if !warnedExternal {
+                warnedExternal = true
+                fputs("weftd: borders is already running externally; managing dynamic colors\n", stderr)
+            }
             return
         }
+        warnedExternal = false
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = config.args

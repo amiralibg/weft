@@ -326,14 +326,25 @@ public enum Migrate {
         toml += "mouse-modifier = \"\(effectiveMouseMod)\"\n"
         toml += "mouse-follows-focus = \(mouseFollowsFocus)\n\n"
 
+        // Both integrations stay OFF. Migration reads a yabai config, not a
+        // permission to start two more processes: turning them on here meant a
+        // fresh install drew borders round every window and fired sketchybar
+        // events that nobody had asked for, with the only clue buried in a
+        // generated file. The settings editor has a toggle for each; the
+        // sections are written out so the toggle has somewhere to land.
         toml += "[integrations.borders]\n"
-        toml += "enabled = true\n"
+        toml += "# Draws a highlight around the focused window. Off until you ask for it:\n"
+        toml += "# WeftBar -> Settings -> Integrations, or set enabled = true here.\n"
+        toml += "#   brew install FelixKratz/formulae/borders\n"
+        toml += "enabled = false\n"
         toml += "supervise = true\n"
         toml += "args = [\"width=5.0\", \"active_color=0xff7aa2f7\", \"inactive_color=0x40414868\"]\n"
         toml += "active-color = { bsp = \"0xff7aa2f7\", scroll = \"0xff9ece6a\", float = \"0xffe0af68\" }\n\n"
 
         toml += "[integrations.sketchybar]\n"
-        toml += "enabled = true\n\n"
+        toml += "# Fires `sketchybar --trigger weft_event` on layout, space and focus\n"
+        toml += "# changes. Off until you ask for it.\n"
+        toml += "enabled = false\n\n"
 
         if !spaces.isEmpty {
             for s in spaces.sorted(by: { $0.index < $1.index }) {

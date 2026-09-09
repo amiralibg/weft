@@ -23,6 +23,9 @@ final class Daemon: @unchecked Sendable {
     private let core = DispatchQueue(label: "weft.core")
     private let coreKey = DispatchSpecificKey<UInt8>()
     private let applyQueue = DispatchQueue(label: "weft.apply", qos: .userInitiated)
+    /// Serial, so parked-set writes land in the order they were taken.
+    private let parkedSaveQueue = DispatchQueue(label: "weft.parked-save", qos: .utility)
+    private let parkedLock = NSLock()
     /// Serializes keybind commands. The tap callback must never block (§6),
     /// and handleCommand blocks (core.sync + apply wait) — so input lands
     /// here and runs off the tap thread, in press order.
@@ -79,6 +82,9 @@ final class Daemon: @unchecked Sendable {
         /// one behave as it always did.
         var pendingX: Double = 0
         var pendingY: Double = 0
+        /// Whether this gesture has actually written a frame. A press that
+        /// moved nothing has nothing to flush and nothing to announce.
+        var movedGeometry = false
     }
     private var currentDrag: DragState?
     /// Points of accumulated drag before a tiled resize step is emitted.
@@ -300,56 +306,81 @@ final class Daemon: @unchecked Sendable {
             let dx = Double(location.x - drag.lastPoint.x)
             let dy = Double(location.y - drag.lastPoint.y)
             drag.lastPoint = location
-            currentDrag = drag
             if let d = drag.divider {
                 // Border drag: no threshold and no quantisation. The border
                 // is under the cursor, so anything other than "it moves with
                 // the cursor" reads as broken.
                 let delta = d.axis == .horizontal ? dx : dy
-                guard abs(delta) > 0.01 else { return }
+                guard abs(delta) > 0.01 else { currentDrag = drag; return }
+                drag.movedGeometry = true
+                currentDrag = drag
                 dragDivider(d, by: delta)
                 return
             }
+            // Floating drags are measured from where the gesture *started*,
+            // against the frame the window had then.
+            //
+            // They used to read the window's live frame and add this event's
+            // delta to it. With the writes coalesced that read is a lagging
+            // source — it returns the frame from two events ago — so the
+            // deltas it was adding to were stale and the window fell steadily
+            // behind the cursor, keeping whatever it had lost. Total offset
+            // from the start point cannot drift, and it is self-correcting if
+            // a write is dropped.
+            let totalX = Double(location.x - drag.startPoint.x)
+            let totalY = Double(location.y - drag.startPoint.y)
             if button == .left {
                 if drag.isFloating {
-                    if let cur = WorldReader.frame(of: drag.windowID) {
-                        let newF = Frame(x: cur.x + dx, y: cur.y + dy, width: cur.width, height: cur.height)
-                        applyFrames([drag.windowID: newF])
-                    }
+                    let f = drag.startFrame
+                    drag.movedGeometry = true
+                    applyFramesCoalesced([drag.windowID: Frame(
+                        x: f.x + totalX, y: f.y + totalY, width: f.width, height: f.height
+                    )])
                 }
             } else if button == .right {
                 if drag.isFloating {
-                    if let cur = WorldReader.frame(of: drag.windowID) {
-                        let newW = max(cur.width + dx, 100)
-                        let newH = max(cur.height + dy, 100)
-                        let newF = Frame(x: cur.x, y: cur.y, width: newW, height: newH)
-                        applyFrames([drag.windowID: newF])
-                    }
+                    let f = drag.startFrame
+                    drag.movedGeometry = true
+                    applyFramesCoalesced([drag.windowID: Frame(
+                        x: f.x, y: f.y,
+                        width: max(f.width + totalX, 100),
+                        height: max(f.height + totalY, 100)
+                    )])
                 } else {
                     drag.pendingX += dx
                     drag.pendingY += dy
                     if abs(drag.pendingX) >= Self.resizeStep {
                         let amount = drag.pendingX
-                        let dir: ResizeDirection = amount > 0 ? .right : .left
-                        _ = dispatch(.resize(dir, abs(amount)))
+                        drag.movedGeometry = true
+                        dragResize(amount > 0 ? .right : .left, by: abs(amount))
                         drag.pendingX = 0
                     }
                     if abs(drag.pendingY) >= Self.resizeStep {
                         let amount = drag.pendingY
-                        let dir: ResizeDirection = amount > 0 ? .down : .up
-                        _ = dispatch(.resize(dir, abs(amount)))
+                        drag.movedGeometry = true
+                        dragResize(amount > 0 ? .down : .up, by: abs(amount))
                         drag.pendingY = 0
                     }
-                    currentDrag = drag
                 }
             }
+            currentDrag = drag
         case .up(let button, let location):
             guard let drag = currentDrag else { return }
             currentDrag = nil
-            if drag.divider != nil {
+            // Every gesture that moved geometry fed the coalescer and
+            // suppressed the per-event bus traffic, so the tail of it is
+            // settled here. A press that never moved anything — a plain click
+            // on a floating window — settles nothing and emits nothing.
+            if drag.movedGeometry {
                 // Flush whatever the coalescer was holding back, then let the
                 // borders and the bar catch up with the final geometry.
                 flushPendingApply()
+                // The borders moved with the windows, so the grab zones the
+                // tap is hit-testing against describe the layout as it was
+                // before the drag. Leaving them stale is a click swallowed
+                // where there is nothing left to drag — and after a resize
+                // that is exactly where the user's cursor already is.
+                refreshDividerZones()
                 bus.emit(stateChangedEvent())
                 return
             }
@@ -382,7 +413,7 @@ final class Daemon: @unchecked Sendable {
     /// 120 Hz drag costs 120 tree edits and however many frame writes the two
     /// apps involved can actually absorb.
     private func dragDivider(_ d: Divider, by delta: Double) {
-        let frames: [WindowID: Frame]? = core.sync {
+        let result: (frames: [WindowID: Frame], parked: Set<WindowID>, scope: Set<WindowID>)? = core.sync {
             guard let sid = self.spaces.currentSpace,
                   let layout = self.spaces.layouts[sid]
             else { return nil }
@@ -397,27 +428,41 @@ final class Daemon: @unchecked Sendable {
                 )
                 guard next != tree else { return nil }
                 self.spaces.layouts[sid] = .tiling(next)
-                return WeftCore.layout(next, in: screen, config: config)
+                return (WeftCore.layout(next, in: screen, config: config), [], [])
             case .scroll(let sc):
-                // The strip resizes around the focused column/row, so the
-                // border's west/north window has to be the focused one for
-                // the edit to land on the border the cursor is holding.
+                // Aim the edit at the column the cursor is actually holding.
+                //
+                // This used to focus `d.a` first and resize "the focused
+                // column", which had two costs: grabbing a border silently
+                // moved focus — the exact thing the mouse-down path goes out
+                // of its way not to do — and the follow-up `ensureVisible`
+                // re-panned the strip mid-drag, so the border slid out from
+                // under the cursor as soon as the column outgrew the screen.
+                guard let (col, row) = sc.position(of: d.a) else { return nil }
                 let usable = scrollUsable(screen: screen, config: config)
-                var next = sc.focusing(d.a)
+                let next: ScrollState
                 switch d.axis {
-                case .horizontal: next = next.adjustingWidth(delta / max(usable.w, 1))
-                case .vertical: next = next.adjustingHeight(delta / max(usable.h, 1))
+                case .horizontal:
+                    next = sc.adjustingWidth(delta / max(usable.w, 1), column: col)
+                case .vertical:
+                    next = sc.adjustingHeight(delta / max(usable.h, 1), column: col, row: row)
                 }
                 guard next != sc else { return nil }
-                next.ensureVisible(next.focusCol, screen: screen, config: config)
                 self.spaces.layouts[sid] = .scroll(next)
-                return scrollLayout(next, screen: screen, config: config).frames
+                let (frames, parked) = scrollLayout(next, screen: screen, config: config)
+                return (frames, parked, Set(next.windows))
             case .float:
                 return nil
             }
         }
-        guard let frames else { return }
-        applyFramesCoalesced(frames)
+        guard let result else { return }
+        applyFramesCoalesced(result.frames)
+        // Widening a column pushes the ones right of it off the edge. Without
+        // this they kept their last on-screen frame and piled up under the
+        // rightmost visible column for the rest of the drag.
+        if !result.scope.isEmpty {
+            reconcileParked(parkedNow: result.parked, frames: result.frames, scope: result.scope)
+        }
     }
 
     /// Latest-wins frame writes, for drags.
@@ -1445,7 +1490,53 @@ final class Daemon: @unchecked Sendable {
             return handleFocusWindow(wid)
         }
 
-        let (nextKind, mutations): (LayoutKind, [Mutation]) = core.sync {
+        let outcome = reduceOnCore(command)
+        let frames = outcome.frames
+        // Fire and forget: the keybind is done as soon as the writes are
+        // queued. Z-order and focus follow on the same per-pid queues, so
+        // they still land after the frames for each window.
+        applyFrames(frames)
+        outcome.reconcileParked(on: self, frames: frames)
+        raiseFronts(outcome.raises)
+        if let focus = outcome.focus, let pid = pid(of: focus) {
+            focusAndWarp(window: focus, pid: pid)
+        }
+        // The borders moved with the windows. A stale grab zone is a click
+        // swallowed where there is nothing to drag.
+        if !frames.isEmpty { refreshDividerZones() }
+        bus.emit(stateChangedEvent())
+        return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
+    }
+
+    /// What reducing one command produced, before anything is written.
+    ///
+    /// `parkedNow`/`scope` are non-empty only for scroll spaces: every command
+    /// that changes the strip changes which columns are on screen, and
+    /// reconciling that used to happen exclusively in `applySpaceLayout`.
+    /// Nothing on the command path called it, so a resize or a column focus
+    /// left newly-hidden columns unparked — sitting on screen at their last
+    /// frame, underneath the columns still visible — and newly-revealed
+    /// columns still at -5000.
+    private struct ReduceOutcome {
+        var frames: [WindowID: Frame] = [:]
+        var focus: WindowID?
+        var raises: [WindowID] = []
+        var parkedNow: Set<WindowID> = []
+        var scope: Set<WindowID> = []
+
+        func reconcileParked(on daemon: Daemon, frames: [WindowID: Frame]) {
+            guard !scope.isEmpty else { return }
+            daemon.reconcileParked(parkedNow: parkedNow, frames: frames, scope: scope)
+        }
+    }
+
+    /// Reduce one command against the current space and commit the new layout
+    /// state. Writes nothing to the screen — the caller decides whether the
+    /// frames go out immediately (a keybind) or through the drag coalescer.
+    private func reduceOnCore(_ command: Command) -> ReduceOutcome {
+        dispatchPrecondition(condition: .notOnQueue(core))
+        let (mutations, parkedNow, scope):
+            ([Mutation], Set<WindowID>, Set<WindowID>) = core.sync {
             let sid = self.spaces.currentSpace
             let tile = self.currentConfig().general.asTilingConfig()
             let uScreen = self.usableScreen(for: sid)
@@ -1454,13 +1545,15 @@ final class Daemon: @unchecked Sendable {
                 let cur = State(tree: tree, screen: uScreen, config: tile)
                 let (n, m) = Reducer.reduce(cur, command)
                 if let sid { self.spaces.layouts[sid] = .tiling(n.tree) }
-                return (.bsp, m)
+                return (m, [], [])
             case .scroll(let sc):
                 let (n, m) = Reducer.reduceScroll(
                     sc, screen: uScreen, config: tile, command: command
                 )
                 if let sid { self.spaces.layouts[sid] = .scroll(n) }
-                return (.scroll, m)
+                guard n != sc else { return (m, [], []) }
+                let (_, parked) = scrollLayout(n, screen: uScreen, config: tile)
+                return (m, parked, Set(n.windows))
             case .float(let fl):
                 // Live SLS frames, not `remembered`: the user has been moving
                 // these windows by hand, so remembered geometry is stale by
@@ -1468,33 +1561,34 @@ final class Daemon: @unchecked Sendable {
                 let live = self.liveFrames(of: fl.windows)
                 let (n, m) = Reducer.reduceFloat(fl, command: command, frames: live)
                 if let sid { self.spaces.layouts[sid] = .float(n) }
-                return (.float, m)
+                return (m, [], [])
             }
         }
-        _ = nextKind
-        var frames: [WindowID: Frame] = [:]
-        var focus: WindowID?
-        var raises: [WindowID] = []
+        var out = ReduceOutcome(parkedNow: parkedNow, scope: scope)
         for m in mutations {
             switch m {
-            case .setFrame(let id, let f): frames[id] = f
-            case .focusWindow(let id): focus = id
-            case .raise(let id): raises.append(id)
+            case .setFrame(let id, let f): out.frames[id] = f
+            case .focusWindow(let id): out.focus = id
+            case .raise(let id): out.raises.append(id)
             }
         }
-        // Fire and forget: the keybind is done as soon as the writes are
-        // queued. Z-order and focus follow on the same per-pid queues, so
-        // they still land after the frames for each window.
-        applyFrames(frames)
-        raiseFronts(raises)
-        if let focus, let pid = pid(of: focus) {
-            focusAndWarp(window: focus, pid: pid)
-        }
-        // The borders moved with the windows. A stale grab zone is a click
-        // swallowed where there is nothing to drag.
-        if !frames.isEmpty { refreshDividerZones() }
-        bus.emit(stateChangedEvent())
-        return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
+        return out
+    }
+
+    /// One step of a modifier-drag resize on a tiled window.
+    ///
+    /// The same reduction a `resize` keybind performs, minus everything that
+    /// only makes sense once: the frames go through the drag coalescer rather
+    /// than straight out, and the state-changed event and the divider-zone
+    /// rebuild wait for the button to come up. Running the full command path
+    /// per mouse event meant a core round trip, an uncoalesced AX write, a
+    /// zone rebuild and a bus event — which forks sketchybar — a hundred
+    /// times a second, and the drag fell behind the cursor and stayed behind.
+    private func dragResize(_ dir: ResizeDirection, by amount: Double) {
+        let outcome = reduceOnCore(.resize(dir, amount))
+        guard !outcome.frames.isEmpty else { return }
+        applyFramesCoalesced(outcome.frames)
+        outcome.reconcileParked(on: self, frames: outcome.frames)
     }
 
     // MARK: - Spaces (M4)
@@ -2102,9 +2196,14 @@ final class Daemon: @unchecked Sendable {
         case (.bsp, .float(let f)):
             sp.layouts[sid] = .tiling(treeFromOrder(f.order, focus: f.focus))
         case (.float, .tiling(let t)):
-            sp.layouts[sid] = .float(floatFromWindows(t.windows, actuals: liveFrames(of: t.windows), focus: t.focus))
+            sp.layouts[sid] = .float(floatFromWindows(
+                t.windows, actuals: conversionFrames(of: t.windows, sid: sid), focus: t.focus
+            ))
         case (.float, .scroll(let s)):
-            sp.layouts[sid] = .float(floatFromWindows(s.windows, actuals: liveFrames(of: s.windows), focus: s.focusedWindow))
+            sp.layouts[sid] = .float(floatFromWindows(
+                s.windows, actuals: conversionFrames(of: s.windows, sid: sid),
+                focus: s.focusedWindow
+            ))
         }
     }
 
@@ -2113,6 +2212,36 @@ final class Daemon: @unchecked Sendable {
         var out: [WindowID: Frame] = [:]
         for wid in wids {
             if let f = WorldReader.frame(of: wid) { out[wid] = f }
+        }
+        return out
+    }
+
+    /// The same, with a substitute for any window that is not on a display.
+    ///
+    /// Converting a scroll space to float read every window's live frame and
+    /// remembered it as that window's floating position — including the
+    /// scrolled-away columns, which are SLS-parked at `minX - 5000`. Their
+    /// remembered position was therefore off every screen there is, so the
+    /// conversion "restored" them to nowhere. Anything off-display gets a
+    /// cascaded rect on this space's screen instead.
+    private func conversionFrames(of wids: [WindowID], sid: SpaceID) -> [WindowID: Frame] {
+        let live = liveFrames(of: wids)
+        let displays = SpaceControl.displayLayout().map(\.frame)
+        let screen = usableScreen(for: sid)
+        var out: [WindowID: Frame] = [:]
+        var cascade = 0.0
+        for wid in wids {
+            if let f = live[wid], displays.contains(where: { $0.intersects(f) }) {
+                out[wid] = f
+                continue
+            }
+            out[wid] = Frame(
+                x: screen.x + screen.width * 0.1 + cascade,
+                y: screen.y + screen.height * 0.1 + cascade,
+                width: screen.width * 0.6,
+                height: screen.height * 0.6
+            )
+            cascade += 28
         }
         return out
     }
@@ -2167,13 +2296,23 @@ final class Daemon: @unchecked Sendable {
         return Set(ids)
     }
 
+    /// Persist the parked set off the caller's thread.
+    ///
+    /// This is crash-recovery bookkeeping, not something anything waits on,
+    /// and it is now reached from the drag path — a column crossing the edge
+    /// of the screen mid-resize parks, which called this. A synchronous
+    /// `write(to:)` there put a file system round trip in the middle of a
+    /// gesture that has 8 ms to answer the cursor.
     private func saveParked() {
-        let url = Daemon.parkedFile()
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        if let data = try? JSONEncoder().encode(parkedWindows.sorted()) {
-            try? data.write(to: url)
+        let snapshot = readParked().sorted()
+        parkedSaveQueue.async {
+            let url = Daemon.parkedFile()
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url)
+            }
         }
     }
 
@@ -2491,7 +2630,13 @@ final class Daemon: @unchecked Sendable {
         guard let spaceLayout = readSpaces().layouts[sid] else { return }
         switch spaceLayout {
         case .tiling(let tree):
-            applyFrames(layout(tree, in: screen, config: config))
+            let frames = layout(tree, in: screen, config: config)
+            applyFrames(frames)
+            // A space that was scroll a moment ago can still have columns
+            // SLS-parked at -5000. bsp gives every window a frame, so nothing
+            // here is meant to be hidden: bring them all back, or they stay
+            // invisible until the space is switched to scroll again.
+            reconcileParked(parkedNow: [], frames: frames, scope: Set(tree.windows))
             if let focus = tree.focus, raiseFocus {
                 raiseFronts([focus])
                 if stealFocus, let pid = pids[focus] {
@@ -2507,7 +2652,7 @@ final class Daemon: @unchecked Sendable {
             }
             let (frames, parkedNow) = scrollLayout(sc, screen: screen, config: config)
             applyFrames(frames)
-            reconcileParked(parkedNow: parkedNow, frames: frames)
+            reconcileParked(parkedNow: parkedNow, frames: frames, scope: Set(sc.windows))
             if let focus = sc.focusedWindow, raiseFocus {
                 raiseFronts([focus])
                 if stealFocus, let pid = pids[focus] {
@@ -2515,8 +2660,11 @@ final class Daemon: @unchecked Sendable {
                 }
             }
         case .float(let fl):
-            // Never position floats. Front the focused one so focus changes
-            // stay visible; everything else is the user's arrangement.
+            // Never position floats — but do put back anything this space
+            // parked while it was a scroll strip, to its remembered frame.
+            reconcileParked(parkedNow: [], frames: fl.remembered, scope: Set(fl.windows))
+            // Front the focused one so focus changes stay visible; everything
+            // else is the user's arrangement.
             if let focus = fl.focus, let pid = pids[focus], raiseFocus {
                 if stealFocus {
                     focusAndWarp(window: focus, pid: pid)
@@ -2565,16 +2713,31 @@ final class Daemon: @unchecked Sendable {
     /// hidden columns, nudge-unpark newly visible ones. Unpark failures stay
     /// tracked (retried next sync); park failures stay untracked (retried as
     /// newly-hidden next sync). All SLS-local except the AX nudge.
-    private func reconcileParked(parkedNow: Set<WindowID>, frames: [WindowID: Frame]) {
-        let before = parkedWindows
+    ///
+    /// `scope` is the windows this layout is entitled to speak for — the
+    /// space being applied. `parkedWindows` is global, so without it applying
+    /// a bsp space would have unparked every scrolled-away column on every
+    /// *other* scroll space, dumping them on top of the space in front.
+    private func reconcileParked(
+        parkedNow: Set<WindowID>, frames: [WindowID: Frame], scope: Set<WindowID>
+    ) {
+        let before = readParked()
         let toPark = parkedNow.subtracting(before)
-        let toUnpark = before.subtracting(parkedNow)
+        let toUnpark = before.intersection(scope).subtracting(parkedNow)
         guard !toPark.isEmpty || !toUnpark.isEmpty else { return }
         let applier = self.applier
         let pids = self.pids
         let parkX = (SpaceControl.displayLayout().map { $0.frame.x }.min() ?? 0) - 5000
-        applyQueue.sync {
-            var next = before
+        // Async, not sync.
+        //
+        // `unpark` is the nudge protocol: an SLS move plus two AX writes taken
+        // *synchronously* on the target app's queue. Blocking the caller on
+        // that meant every column that scrolled into view charged its app's
+        // round trip to whatever asked — a keybind on the command queue, or a
+        // mouse event mid-drag. `applyQueue` is serial, so the ordering these
+        // need is still exact; nothing waits on the result.
+        applyQueue.async {
+            var next = self.readParked()
             for wid in toPark.sorted() {
                 if applier.park(wid, toX: parkX) {
                     next.insert(wid)
@@ -2590,9 +2753,20 @@ final class Daemon: @unchecked Sendable {
                     next.remove(wid)
                 }
             }
-            self.parkedWindows = next
+            self.writeParked(next)
+            self.saveParked()
         }
-        saveParked()
+    }
+
+    /// `parkedWindows` is mutated on `applyQueue` and read from the command
+    /// and mouse queues (`rescue`, and the reconcile's own entry check), so it
+    /// carries a lock rather than relying on the caller's queue.
+    private func readParked() -> Set<WindowID> {
+        parkedLock.withLock { parkedWindows }
+    }
+
+    private func writeParked(_ next: Set<WindowID>) {
+        parkedLock.withLock { parkedWindows = next }
     }
 
     /// Sweep for stranded windows: SLS bounds far off every display that are
@@ -2604,9 +2778,10 @@ final class Daemon: @unchecked Sendable {
         var healed = 0
         var unknown: [WindowID] = []
         let frames = currentVisibleFrames()
+        let tracked0 = readParked()
         for wid in pids.keys.sorted() {
             guard let f = WorldReader.frame(of: wid), f.x + f.width < minX - 1000 else { continue }
-            if parkedWindows.contains(wid) {
+            if tracked0.contains(wid) {
                 tracked += 1
             } else if let target = frames[wid], let pid = pids[wid] {
                 if applier.unpark(wid, pid: pid, to: target) {
