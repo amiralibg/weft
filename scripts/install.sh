@@ -101,11 +101,8 @@ echo "==> installing launchd service"
 echo "==> health check"
 "$BINDIR/weftctl" doctor || true
 
-# weftd is running by now, and on start it asks the system for Accessibility
-# and (when the tap fails) Input Monitoring. That request is what makes macOS
-# LIST weftd in those panes — so give it a moment before Setup opens, or the
-# user is looking at a list that does not have the row they need yet.
-sleep 2
+# Give weftd a moment to initialize its socket before opening Setup.
+sleep 1
 
 echo
 echo "==> opening Setup"

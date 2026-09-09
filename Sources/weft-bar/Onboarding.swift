@@ -354,7 +354,12 @@ final class SetupModel: ObservableObject {
     func revealBinary() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(weftdPath, forType: .string)
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: weftdPath)])
+        let fileURL = URL(fileURLWithPath: weftdPath)
+        if FileManager.default.fileExists(atPath: weftdPath) {
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        } else {
+            NSWorkspace.shared.open(fileURL.deletingLastPathComponent())
+        }
     }
 
     func copyPath() {
@@ -979,23 +984,69 @@ private struct PermissionCard: View {
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 10)
 
-            VStack(alignment: .leading, spacing: 9) {
-                Step(1, "Find the row named **weftd** in the list.")
-                if model.showsStaleGrantWarning {
-                    // The only instruction that works when the switch is
-                    // already on. Telling someone to "turn it on" in that
-                    // state is not a hard instruction, it is an impossible
-                    // one, and they conclude weft is broken — correctly.
-                    Step(2, "Its switch is probably **already on**. Turn it **off**, then **on** again.")
-                    Step(3, "If macOS offers to quit and reopen, choose **Later**.")
-                } else {
-                    Step(2, "Turn its switch **on**. If it is already on, turn it **off and on again**.")
-                    Step(3, "If macOS offers to quit and reopen, choose **Later** — weft picks the grant up on its own.")
-                }
+            if kind == .screenRecording {
+                screenRecordingInstructions
+            } else {
+                standardInstructions
+                fallback
+                    .padding(.top, 14)
+            }
+        }
+    }
+
+    private var standardInstructions: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Step(1, "Find the row named **weftd** in the list.")
+            if model.showsStaleGrantWarning {
+                // The only instruction that works when the switch is
+                // already on. Telling someone to "turn it on" in that
+                // state is not a hard instruction, it is an impossible
+                // one, and they conclude weft is broken — correctly.
+                Step(2, "Its switch is probably **already on**. Turn it **off**, then **on** again.")
+                Step(3, "If macOS offers to quit and reopen, choose **Later**.")
+            } else {
+                Step(2, "Turn its switch **on**. If it is already on, turn it **off and on again**.")
+                Step(3, "If macOS offers to quit and reopen, choose **Later** — weft picks the grant up on its own.")
+            }
+        }
+    }
+
+    private var screenRecordingInstructions: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Step(1, "macOS does not list background tools here automatically.")
+            Step(2, "Click **Open folder with weftd** below to open the folder where **weftd** is.")
+            Step(3, "Drag **weftd** from Finder into the list in System Settings.")
+            if model.showsStaleGrantWarning {
+                Step(4, "Its switch is probably **already on**. Turn it **off**, then **on** again.")
+                Step(5, "If macOS offers to quit and reopen, choose **Later**.")
+            } else {
+                Step(4, "Turn its switch **on**. If macOS offers to quit and reopen, choose **Later** — weft picks the grant up on its own.")
             }
 
-            fallback
-                .padding(.top, 14)
+            HStack(spacing: 10) {
+                Button {
+                    model.revealBinary()
+                } label: {
+                    Label("Open folder with weftd", systemImage: "folder")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button {
+                    model.copyPath()
+                } label: {
+                    Label("Copy path", systemImage: "doc.on.doc")
+                }
+                .controlSize(.small)
+            }
+            .padding(.top, 4)
+            .padding(.leading, 27)
+
+            Text("Tip: You can also click **+** in System Settings, press **⇧⌘G**, and paste the copied path.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .padding(.top, 3)
+                .padding(.leading, 27)
         }
     }
 
@@ -1034,8 +1085,16 @@ private struct PermissionCard: View {
                     Step(3, "Or click **+** in the list, press **⌘⇧G**, and paste the path.")
 
                     HStack(spacing: 10) {
-                        Button("Reveal weftd", action: model.revealBinary)
-                        Button("Copy path", action: model.copyPath)
+                        Button {
+                            model.revealBinary()
+                        } label: {
+                            Label("Open folder with weftd", systemImage: "folder")
+                        }
+                        Button {
+                            model.copyPath()
+                        } label: {
+                            Label("Copy path", systemImage: "doc.on.doc")
+                        }
                     }
                     .controlSize(.small)
                     .padding(.top, 3)

@@ -262,10 +262,8 @@ case ":$PATH:" in
        echo "  export PATH=\"$BINDIR:\$PATH\"" ;;
 esac
 
-# weftd asks the system for its permissions on start, and that request is what
-# makes macOS *list* it in those panes. Opening Setup before it lands shows a
-# list missing the row the user needs.
-sleep 2
+# Give weftd a moment to initialize its socket before opening Setup.
+sleep 1
 
 if [ "${WEFT_NO_SERVICE:-0}" != 1 ]; then
     say "health check"

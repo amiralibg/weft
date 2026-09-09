@@ -2744,10 +2744,9 @@ private final class ApplyResultBox: @unchecked Sendable {
 ignoreSIGPIPE()
 setlinebuf(stderr)  // launchd/log captures must see lines instantly, not on exit
 
-// Prompt for Accessibility if not trusted
-let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-if !AXIsProcessTrustedWithOptions(options) {
-    fputs("weftd: accessibility permission missing — requesting prompt\n", stderr)
+// Check Accessibility without triggering a macOS modal prompt
+if !Permissions.accessibility() {
+    fputs("weftd: accessibility permission missing\n", stderr)
 }
 
 guard let daemon = Daemon() else { exit(1) }
