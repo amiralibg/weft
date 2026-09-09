@@ -99,7 +99,7 @@ final class SpaceRowView: NSView {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private var timer: Timer?
+    private let state = BarState()
     private let switcher = WindowSwitcher()
     /// The update line, kept hidden unless there is a newer release.
     private var updateItem: NSMenuItem?
@@ -113,16 +113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        // The status item redraws from a cached snapshot; nothing on this
+        // thread ever waits for the daemon to answer.
+        state.onChange = { [weak self] in self?.updateTitle() }
+        state.start()
         updateTitle()
 
-        // Refresh on active space change + periodic timer
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(updateTitle),
+            self, selector: #selector(spaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
-
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateTitle() }
-        }
 
         // Install keybindings via Carbon HotKeyManager
         installKeybindings()
@@ -189,8 +188,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if parts.count == 2 {
                     let chord = parts[0]
                     let cmd = parts[1]
+                    // Off the main thread: these are a fallback for when
+                    // weftd's own event tap is not up, and a keypress that
+                    // blocks the UI thread on a socket is worse than one that
+                    // does nothing.
                     HotKeyManager.shared.register(keyString: chord) {
-                        _ = BarIPC.send(cmd)
+                        BarIPC.post(cmd)
                     }
                 }
             }
@@ -215,37 +218,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
+    @objc private func spaceChanged() {
+        state.refresh()
+    }
+
     @objc func updateTitle() {
-        guard let sJson = BarIPC.send("query spaces"),
-              let data = sJson.data(using: .utf8),
-              let spaces = try? JSONDecoder().decode([BarSpace].self, from: data)
-        else {
-            statusItem.button?.title = "—"
+        guard let button = statusItem.button else { return }
+        guard state.daemonUp != false else {
+            button.title = " —"
+            button.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle",
+                accessibilityDescription: "weftd not responding"
+            )
+            button.image?.isTemplate = true
+            button.imagePosition = .imageLeading
             return
         }
-
-        if let current = spaces.first(where: { $0.current }) {
+        if let current = state.currentSpace {
             let name = current.label.isEmpty ? "\(current.id)" : current.label
-            statusItem.button?.title = " \(name)"
-            statusItem.button?.image = Self.layoutIcon(current.layout)
-            statusItem.button?.imagePosition = .imageLeading
+            button.title = " \(name)"
+            button.image = state.needsRestart
+                ? Self.restartIcon()
+                : Self.layoutIcon(current.layout)
         } else {
-            statusItem.button?.title = " —"
-            statusItem.button?.image = Self.layoutIcon(nil)
-            statusItem.button?.imagePosition = .imageLeading
+            button.title = " —"
+            button.image = Self.layoutIcon(nil)
         }
+        button.imagePosition = .imageLeading
+    }
+
+    /// Replaces the layout glyph while a restart is pending, so the one thing
+    /// standing between the user and a working weft is visible from the menu
+    /// bar rather than only inside a window they have already closed.
+    private static func restartIcon() -> NSImage? {
+        let image = NSImage(
+            systemSymbolName: "arrow.clockwise.circle.fill",
+            accessibilityDescription: "restart needed"
+        )
+        image?.isTemplate = true
+        return image
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        // Built entirely from the cached snapshot. Opening a menu must not
+        // block on a socket: AppKit is holding the run loop while this runs,
+        // and a daemon mid-sweep would hang the pointer.
+        state.refresh()
 
-        guard let sJson = BarIPC.send("query spaces"),
-              let sData = sJson.data(using: .utf8),
-              let spaces = try? JSONDecoder().decode([BarSpace].self, from: sData),
-              let wJson = BarIPC.send("query windows"),
-              let wData = wJson.data(using: .utf8),
-              let windows = try? JSONDecoder().decode([BarWindow].self, from: wData)
-        else {
+        if state.needsRestart {
+            let item = NSMenuItem(
+                title: "Restart engine to finish setup",
+                action: #selector(restartForPermissions), keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "arrow.clockwise.circle.fill", accessibilityDescription: nil
+            )
+            menu.addItem(item)
+            let note = NSMenuItem(
+                title: "Permissions were granted after weftd started.",
+                action: nil, keyEquivalent: ""
+            )
+            note.isEnabled = false
+            menu.addItem(note)
+            menu.addItem(.separator())
+        }
+
+        let spaces = state.spaces
+        guard state.daemonUp != false, !spaces.isEmpty else {
             let item = NSMenuItem(title: "weftd not responding", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
@@ -253,7 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        let byID = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let byID = Dictionary(state.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var lastDisplay = ""
         var displayCount = 1
         var spaceIdx = 1
@@ -280,8 +321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let item = NSMenuItem()
             let sName = space.label.isEmpty ? "\(space.id)" : space.label
             item.view = SpaceRowView(space: space, displayIndex: spaceIdx, icons: icons) { [weak self] in
-                _ = BarIPC.send("space focus \(sName)")
-                self?.updateTitle()
+                BarIPC.post("space focus \(sName)")
+                self?.state.refresh()
             }
             menu.addItem(item)
             spaceIdx += 1
@@ -305,6 +346,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let floatItem = NSMenuItem(title: "Float Layout", action: #selector(setLayoutFloat), keyEquivalent: "")
         floatItem.target = self
         menu.addItem(floatItem)
+
+        menu.addItem(.separator())
+
+        // Floating one window, rather than the whole space. Bindable as
+        // `float toggle`, but it needs to be reachable without a keybind —
+        // a config migrated from a skhdrc that never bound it had no way in.
+        let floatWindowItem = NSMenuItem(
+            title: "Float Focused Window", action: #selector(toggleFloatWindow), keyEquivalent: ""
+        )
+        floatWindowItem.target = self
+        floatWindowItem.image = NSImage(
+            systemSymbolName: "macwindow.badge.plus", accessibilityDescription: nil
+        )
+        menu.addItem(floatWindowItem)
 
         menu.addItem(.separator())
 
@@ -362,17 +417,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
-    @objc private func setLayoutBSP() {
-        _ = BarIPC.send("space layout bsp")
-        updateTitle()
+    @objc private func setLayoutBSP() { send("space layout bsp") }
+    @objc private func setLayoutScroll() { send("space layout scroll") }
+    @objc private func setLayoutFloat() { send("space layout float") }
+    @objc private func toggleFloatWindow() { send("float toggle") }
+
+    private func send(_ command: String) {
+        BarIPC.post(command)
+        state.refresh()
     }
-    @objc private func setLayoutScroll() {
-        _ = BarIPC.send("space layout scroll")
-        updateTitle()
-    }
-    @objc private func setLayoutFloat() {
-        _ = BarIPC.send("space layout float")
-        updateTitle()
+
+    /// The one-click fix for a grant that landed after weftd was already up.
+    @objc private func restartForPermissions() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            ConfigEditorWindowController.restartWeftCtl()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.state.refresh()
+            }
+        }
     }
     @objc private func openSwitcher() {
         switcher.toggle()
@@ -420,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 proc.waitUntilExit()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.updateTitle()
+                self?.state.refresh()
             }
         }
     }

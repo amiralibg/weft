@@ -99,7 +99,9 @@ public enum Reducer {
             tree = tree.togglingSplit()
             let newState = State(tree: tree, screen: state.screen, config: state.config)
             return (newState, relayoutMutations(state: newState, previous: state0))
-        case .toggleFloat:
+        case .float:
+            // Daemon-level: floating a window is a membership change across
+            // every layout kind, not a tree edit.
             return (state, [])
         case .space, .sticky, .focusDisplay, .moveWindowToDisplay, .moveSpaceToDisplay,
              .scroll, .appToggle:
@@ -157,7 +159,9 @@ public enum Reducer {
         config: TilingConfig,
         command: Command
     ) -> (ScrollState, [Mutation]) {
-        let usableW = scrollUsable(screen: screen, config: config).w
+        let usable = scrollUsable(screen: screen, config: config)
+        let usableW = usable.w
+        let usableH = usable.h
         var next = sc
         switch command {
         case .insert(let id):
@@ -180,12 +184,19 @@ public enum Reducer {
             else { return (sc, []) }
             next = sc.swapping(focused, id)
         case .resize(let dir, let delta):
-            // Column widths are the horizontal axis; rows share heights
-            // (per-row heights are a later refinement — vertical is a no-op).
-            guard dir.axis == .horizontal else { return (sc, []) }
-            next = sc.adjustingWidth(dir.signed(delta) / max(usableW, 1))
+            // Column widths on the horizontal axis, row shares on the
+            // vertical one. Vertical used to be a no-op, which made the whole
+            // resize layer — and mouse border drags — dead on scroll spaces.
+            switch dir.axis {
+            case .horizontal:
+                next = sc.adjustingWidth(dir.signed(delta) / max(usableW, 1))
+            case .vertical:
+                next = sc.adjustingHeight(dir.signed(delta) / max(usableH, 1))
+            }
         case .balance:
             next = ScrollState(
+                // Widths back to the default and heights back to equal —
+                // balance means "undo every resize on this space".
                 columns: sc.columns.map { Column(windows: $0.windows) },
                 viewportX: sc.viewportX,
                 focusCol: sc.focusCol,
@@ -207,7 +218,7 @@ public enum Reducer {
                 mutations.append(.focusWindow(fs))
             }
             return (next, mutations)
-        case .toggleSplit, .toggleFloat, .split, .insertion, .stack, .space, .sticky,
+        case .toggleSplit, .float, .split, .insertion, .stack, .space, .sticky,
              .focusDisplay, .moveWindowToDisplay, .moveSpaceToDisplay, .appToggle, .query:
             return (sc, [])
         }
@@ -251,7 +262,7 @@ public enum Reducer {
         case .move, .resize, .split, .insertion, .balance,
              .stack, .scroll, .space, .sticky, .focusDisplay, .moveWindowToDisplay,
              .moveSpaceToDisplay, .appToggle, .query,
-             .toggleFullscreen, .toggleSplit, .toggleFloat:
+             .toggleFullscreen, .toggleSplit, .float:
             return (fl, [])
         }
         guard next != fl else { return (fl, []) }

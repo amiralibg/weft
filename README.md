@@ -37,8 +37,14 @@ its own.
   or tell weft to leave it alone entirely.
 - **Multi-display** — spaces are tiled in *their own* display's rect, and
   `west`/`east` pick the display geometrically rather than by arrangement index.
-- **Mouse** — hold a modifier to drag a window by its body or resize it from an
-  edge.
+- **Mouse** — drag the border between two tiled windows to resize them, with no
+  modifier and no mode; hold a modifier to drag a window by its body. Weft
+  claims a plain click only when it lands on a border, so every other click
+  reaches the app untouched.
+- **Knows a popup when it sees one** — a dialog, a window the app refuses to
+  resize, or a small frameless panel with no title-bar buttons is floated rather
+  than given a slot. That is what an Electron app's floating call widget is, and
+  tiling one hands a quarter of the screen to a badge.
 - **A menu-bar app** with a visual settings editor, a searchable keybinding
   cheatsheet (`⌘K`), and a window switcher (`⌃⌥Space`).
 
@@ -192,6 +198,7 @@ QWERTY, Colemak and Dvorak.
 | `⌥⌃H` `⌥⌃L` | Focus the display west / east |
 | `⌥⌃⇧H` `⌥⌃⇧L` | Send the window to that display and follow it |
 | `⌥⇧R` | Enter resize mode — then `h/j/k/l`, `⇧` for bigger steps, `=` to balance, `Esc` to leave |
+| Drag a border | Resize the two windows either side of it — no modifier, no mode |
 | `⌃⌥Space` | Window switcher |
 | `⌘K` | Keybinding cheatsheet |
 
@@ -212,8 +219,10 @@ placement are in it as commented-out worked examples.
 [general]
 inner-gap = 8
 outer-gap = 8
+stack-offset = 8                # how far a stack's members peek out
 default-layout = "bsp"          # bsp | scroll | float
-mouse-modifier = "alt"
+mouse-border-resize = true      # drag a window border to resize, no modifier
+mouse-modifier = "alt"          # hold to drag a window by its body
 mouse-follows-focus = true
 reserve = 0                     # room for an always-on-screen bar
 

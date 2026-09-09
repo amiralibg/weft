@@ -1,9 +1,16 @@
 import CoreGraphics
 import Foundation
+import WeftCore
 
 public enum MouseButton: Sendable, Equatable {
     case left
     case right
+    /// A plain left-press that landed on the border between two tiled
+    /// windows. Not a button — a role: it is the same physical button as
+    /// `.left`, claimed by the tap because of where it landed rather than
+    /// because a modifier was held. Kept apart so the daemon never confuses a
+    /// border drag with a window drag.
+    case border
 }
 
 public enum MouseGesture: Sendable, Equatable {
@@ -91,6 +98,19 @@ private final class TapBox: @unchecked Sendable {
     var mode: String
     var mouseModifier: CGEventFlags = .maskAlternate
     var isDragging: Bool = false
+    /// The button role of the drag in progress, so drag/up events report the
+    /// same one the down did.
+    var dragButton: MouseButton = .left
+    /// Grab zones for the borders between tiled windows, republished by the
+    /// daemon on every layout apply.
+    ///
+    /// Read on the tap thread for every mouse-down, which is why it is a flat
+    /// array of rectangles and not a query: the callback must decide whether
+    /// to swallow the click before returning, and it may not block. A scan of
+    /// a few dozen rects is tens of nanoseconds.
+    var dividerZones: [Frame] = []
+    /// Off unless the user has asked for border dragging.
+    var borderDragEnabled = false
     var onCommand: ((String) -> Void)?
     var onModeChange: ((String) -> Void)?
     var onMouseGesture: ((MouseGesture) -> Void)?
@@ -118,32 +138,41 @@ private func tapCallback(
         return Unmanaged.passUnretained(event)
     }
     if type == .leftMouseDown || type == .rightMouseDown {
-        let reqMod = box.lock.withLock { box.mouseModifier }
-        if reqMod.rawValue != 0 && event.flags.contains(reqMod) {
-            box.lock.withLock { box.isDragging = true }
-            let btn: MouseButton = (type == .leftMouseDown) ? .left : .right
-            let loc = event.location
-            box.lock.withLock { box.onMouseGesture }?(.down(button: btn, location: loc))
-            return nil
+        let loc = event.location
+        let claimed: MouseButton? = box.lock.withLock {
+            if box.mouseModifier.rawValue != 0 && event.flags.contains(box.mouseModifier) {
+                return (type == .leftMouseDown) ? .left : .right
+            }
+            // No modifier: the one thing a bare click may be claimed for is
+            // the border between two tiled windows. Everything else — every
+            // click inside a window, on its title bar, on the desktop — is
+            // passed straight through, so the tap is invisible in normal use.
+            guard box.borderDragEnabled, type == .leftMouseDown else { return nil }
+            let x = Double(loc.x), y = Double(loc.y)
+            return box.dividerZones.contains { $0.contains(x: x, y: y) } ? .border : nil
         }
-        return Unmanaged.passUnretained(event)
+        guard let btn = claimed else { return Unmanaged.passUnretained(event) }
+        box.lock.withLock {
+            box.isDragging = true
+            box.dragButton = btn
+        }
+        box.lock.withLock { box.onMouseGesture }?(.down(button: btn, location: loc))
+        return nil
     } else if type == .leftMouseDragged || type == .rightMouseDragged {
-        let dragging = box.lock.withLock { box.isDragging }
-        if dragging {
-            let btn: MouseButton = (type == .leftMouseDragged) ? .left : .right
+        let btn: MouseButton? = box.lock.withLock { box.isDragging ? box.dragButton : nil }
+        if let btn {
             let loc = event.location
             box.lock.withLock { box.onMouseGesture }?(.drag(button: btn, location: loc))
             return nil
         }
         return Unmanaged.passUnretained(event)
     } else if type == .leftMouseUp || type == .rightMouseUp {
-        let wasDragging = box.lock.withLock {
-            let d = box.isDragging
+        let btn: MouseButton? = box.lock.withLock {
+            let b = box.isDragging ? box.dragButton : nil
             box.isDragging = false
-            return d
+            return b
         }
-        if wasDragging {
-            let btn: MouseButton = (type == .leftMouseUp) ? .left : .right
+        if let btn {
             let loc = event.location
             box.lock.withLock { box.onMouseGesture }?(.up(button: btn, location: loc))
             return nil
@@ -232,6 +261,24 @@ public final class InputManager: @unchecked Sendable {
         default: flags = .maskAlternate
         }
         box.lock.withLock { box.mouseModifier = flags }
+    }
+
+    /// Republish the border grab zones. Called on every layout apply, so it
+    /// stays cheap: one lock, one array swap, no allocation on the tap side.
+    public func updateDividerZones(_ zones: [Frame]) {
+        box.lock.withLock {
+            guard box.dividerZones != zones else { return }
+            box.dividerZones = zones
+        }
+    }
+
+    /// Whether a bare click on a border starts a resize. Off means the tap
+    /// never claims an unmodified click at all.
+    public func setBorderDragEnabled(_ enabled: Bool) {
+        box.lock.withLock {
+            box.borderDragEnabled = enabled
+            if !enabled { box.dividerZones = [] }
+        }
     }
 
     public var currentMode: String { box.lock.withLock { box.mode } }

@@ -40,6 +40,15 @@ public struct GeneralConfig: Sendable, Equatable {
     public var outerGap: TilingConfig.OuterGap
     public var defaultLayout: LayoutKind
     public var mouseModifier: String
+    /// Whether a plain click-and-drag on the border between two tiled windows
+    /// resizes them.
+    ///
+    /// On, because it is what every other tiling window manager does and the
+    /// alternative — hold a modifier, or enter a resize mode — is something
+    /// you have to be told about. weft claims a bare click only when it lands
+    /// inside a border's grab strip, so with this on every other click still
+    /// reaches the app untouched.
+    public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
     public var reserve: ScreenReserve
@@ -52,6 +61,7 @@ public struct GeneralConfig: Sendable, Equatable {
         outerGap: TilingConfig.OuterGap = TilingConfig.OuterGap(top: 8, bottom: 8, left: 8, right: 8),
         defaultLayout: LayoutKind = .bsp,
         mouseModifier: String = "alt",
+        mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
         reserve: ScreenReserve = ScreenReserve()
@@ -63,6 +73,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.outerGap = outerGap
         self.defaultLayout = defaultLayout
         self.mouseModifier = mouseModifier
+        self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
         self.reserve = reserve
@@ -260,6 +271,9 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "mouse-modifier":
                 guard case .string(let s) = v else { throw err(path, "expected string") }
                 general.mouseModifier = s
+            case "mouse-border-resize":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                general.mouseBorderResize = b
             case "mouse-follows-focus":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.mouseFollowsFocus = b

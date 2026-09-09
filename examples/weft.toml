@@ -27,10 +27,11 @@ inner-gap = 8
 #   outer-gap = { top = 8, bottom = 8, left = 8, right = 8 }
 outer-gap = 8
 
-# How far each window in a stack sits inset from the one behind it. Stacked
+# How far each window in a stack sits below the one in front of it. Stacked
 # windows share a slot, so without this a stack looks exactly like a single
-# window and there is nothing on screen to say the others are there. Set 0 for
-# flat stacks.
+# window and there is nothing on screen to say the others are there. The offset
+# is vertical only — every member keeps the slot's full width, so switching
+# members never jogs the content sideways. Set 0 for flat stacks.
 stack-offset = 8
 
 # Whether to tile windows belonging to menu-bar-only apps (Stats, Ice, and
@@ -53,7 +54,13 @@ check-for-updates = true
 #   float  — no tiling at all
 default-layout = "bsp"
 
-# Held down to drag a window by its body, or resize it from an edge.
+# Drag the border between two tiled windows to resize them, with no modifier
+# and no mode. Weft claims a plain click only when it lands inside a border's
+# grab strip, so every other click still reaches the app untouched. Set false
+# if you would rather nothing ever intercepted an unmodified click.
+mouse-border-resize = true
+
+# Held down to drag a window by its body, or right-drag to resize it.
 # One of: alt, cmd, ctrl, shift.
 mouse-modifier = "alt"
 
@@ -104,6 +111,8 @@ reserve = 0
 "alt-f" = "window toggle zoom-fullscreen"
 
 # Take the focused window out of the tiling and let it float; again to re-tile.
+# A floated window remembers where you left it, so this really is a toggle.
+# `float on` and `float off` are the one-way halves, for scripts.
 "alt-shift-space" = "float toggle"
 
 # Even out every split on this space.
@@ -186,8 +195,13 @@ reserve = 0
 #   space = "..."    move it there when it opens (needs the scripting addition
 #                    for an instant move; without it, it lands on next focus)
 #
-# These few are here because they are fixed-size panels that tiling makes worse.
-# Add your own below.
+# Weft already floats anything that is not a real window on its own: a dialog
+# or popover (its AX subrole is not a standard window), a window the app
+# refuses to resize, or a small frameless panel with no title-bar buttons —
+# which is what an Electron app's floating call widget or huddle badge is.
+# `weftctl query windows` shows the verdict per window in a `floating` field.
+# The rules below are for the ones that pass all of that and you still do not
+# want tiled.
 
 [[rule]]
 app = "System Settings|System Preferences"

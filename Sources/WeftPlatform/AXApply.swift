@@ -57,7 +57,21 @@ public final class AXApplier: @unchecked Sendable {
     /// windows are on the active space (S0) — typically right after discovery
     /// or on window-created events. Rebinds are cheap and idempotent.
     public func bind(windows: [(wid: WindowID, pid: Int32)]) {
-        let pids = Set(windows.map { $0.pid })
+        // Only apps with something still unbound.
+        //
+        // This runs at the end of every world sweep, and sweeps fire on every
+        // window creation, focus change and space switch. Enumerating AX
+        // windows is a cross-process round trip per app with a 0.15s timeout
+        // each, taken synchronously on the queue that also applies frames —
+        // so re-binding fifteen already-bound apps was, on every event, the
+        // single most expensive thing weft did, for nothing. A window's AX
+        // element does not change under us; the only ones worth asking about
+        // are the ones we have never resolved.
+        let unbound: [(wid: WindowID, pid: Int32)] = lock.withLock {
+            windows.filter { windowElements[$0.wid] == nil }
+        }
+        let pids = Set(unbound.map { $0.pid })
+        guard !pids.isEmpty else { return }
         lock.withLock {
             for pid in pids where queues[pid] == nil {
                 queues[pid] = DispatchQueue(label: "weft.ax.\(pid)")
@@ -104,40 +118,97 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         // Windows whose pid wasn't enumerable keep their old binding, if any.
-        _ = windows
+    }
+
+    /// Why a window is not tileable. `nil` from `classify` means "cannot
+    /// tell"; a value here means "asked, and the answer is no".
+    public enum NotTileable: String, Error, Sendable {
+        /// AX subrole is a dialog, a sheet, a popover, a system panel —
+        /// anything that is not `AXStandardWindow`.
+        case subrole
+        /// The app refuses to resize this window. A fixed-size window cannot
+        /// take a tile: it keeps its own size, sits in the middle of a slot
+        /// the layout reserved for it, and pushes every real window aside for
+        /// nothing. Mattermost's in-call widget is exactly this.
+        case fixedSize
+        /// No title-bar buttons at all — no close, no minimise, no
+        /// full-screen: a panel wearing a standard subrole. Only trusted for
+        /// small windows, where a false positive costs little and a false
+        /// negative is very visible.
+        case panelChrome
     }
 
     /// Is this a real, tileable window?
     ///
     /// The CGWindowList filter (layer 0, both dimensions over 100px) is not
-    /// enough on its own: a menu-bar extra's panel — Stats, iStat, a Now
-    /// Playing popover — is a layer-0 window bigger than 100x100, so weft
-    /// tiled it and pushed the user's real windows aside. yabai does not,
-    /// because it manages only windows whose AX subrole is
-    /// `AXStandardWindow`; a popover's is `AXSystemDialog`, `AXUnknown` or
-    /// similar. This is that check.
+    /// enough on its own, and neither is the subrole alone:
+    ///
+    /// - A menu-bar extra's panel — Stats, iStat, a Now Playing popover — is
+    ///   a layer-0 window bigger than 100x100, so weft tiled it and pushed
+    ///   the user's real windows aside. Its subrole is `AXSystemDialog`,
+    ///   `AXUnknown` or similar, so the subrole test catches it.
+    /// - An Electron popup — Mattermost's floating call widget, a Slack huddle
+    ///   window — reports `AXStandardWindow` and is caught by nothing. It is
+    ///   fixed-size, though, and a window that will not resize cannot be
+    ///   tiled: given a slot it keeps its own 470x180, ignores the frame, and
+    ///   the layout has silently given a quarter of the screen to a badge.
+    ///
+    /// So: standard subrole AND resizable AND (for small windows) real window
+    /// chrome. Anything else floats.
     ///
     /// nil means "cannot tell" — the app is not AX-enumerable right now (the
     /// window may be on another space, S0). Callers must treat nil as "not
-    /// yet classified" and ask again, never as "not standard": answering no
+    /// yet classified" and ask again, never as "not tileable": answering no
     /// on a cold read would silently unmanage every window on an unvisited
     /// space.
     ///
-    /// One AX round trip, and the caller is expected to cache the answer for
-    /// the window's lifetime. Never call this from the core queue.
-    public func isStandardWindow(wid: WindowID, pid: Int32) -> Bool? {
+    /// One batch of AX reads on the app's own queue, and the caller is
+    /// expected to cache the answer for the window's lifetime. Never call
+    /// this from the core queue.
+    public func classify(wid: WindowID, pid: Int32) -> Result<Void, NotTileable>? {
         var element: AXUIElement? = lock.withLock { windowElements[wid] }
         if element == nil {
             bind(windows: [(wid: wid, pid: pid)])
             element = lock.withLock { windowElements[wid] }
         }
         guard let el = element else { return nil }
-        return queue(for: pid).sync { () -> Bool? in
+        return queue(for: pid).sync { () -> Result<Void, NotTileable>? in
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(
                 el, kAXSubroleAttribute as CFString, &value
             ) == .success, let subrole = value as? String else { return nil }
-            return subrole == (kAXStandardWindowSubrole as String)
+            guard subrole == (kAXStandardWindowSubrole as String) else {
+                return .failure(.subrole)
+            }
+            // A window the app will not let us resize cannot hold a tile.
+            var sizeSettable: DarwinBoolean = false
+            guard AXUIElementIsAttributeSettable(
+                el, kAXSizeAttribute as CFString, &sizeSettable
+            ) == .success else { return nil }
+            guard sizeSettable.boolValue else { return .failure(.fixedSize) }
+            // Chrome check, small windows only. A real document window has a
+            // minimise button, a full-screen button, or both; a floating
+            // widget that has talked its way past the two tests above has
+            // neither. Restricted by size because a legitimately chromeless
+            // window (a game, a kiosk view) is always large, and floating one
+            // of those would be much worse than tiling a badge.
+            var bounds = CGRect.zero
+            if SLSGetWindowBounds(self.cid, wid, &bounds) == 0,
+               bounds.width < 480 || bounds.height < 320
+            {
+                var button: CFTypeRef?
+                let chrome = [
+                    kAXMinimizeButtonAttribute,
+                    kAXFullScreenButtonAttribute,
+                    kAXCloseButtonAttribute,
+                ].contains {
+                    AXUIElementCopyAttributeValue(el, $0 as CFString, &button) == .success
+                }
+                // All three absent, or it is a real window. One title-bar
+                // button is enough to prove there is a title bar.
+                if !chrome { return .failure(.panelChrome) }
+            }
+            return .success(())
         }
     }
 

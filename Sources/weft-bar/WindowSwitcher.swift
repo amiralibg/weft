@@ -159,38 +159,11 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func show() {
-        guard let jsonStr = BarIPC.send("query windows"),
-              let data = jsonStr.data(using: .utf8)
-        else { return }
-
-        struct QueryWin: Decodable {
-            let id: Int
-            let app: String
-            let title: String
-            let pid: Int
-            let spaces: [UInt64]
-        }
-
-        var spacesMap: [UInt64: String] = [:]
-        if let sJson = BarIPC.send("query spaces"),
-           let sData = sJson.data(using: .utf8) {
-            struct QuerySpace: Decodable {
-                let id: UInt64
-                let label: String
-            }
-            if let parsedSpaces = try? JSONDecoder().decode([QuerySpace].self, from: sData) {
-                for s in parsedSpaces {
-                    spacesMap[s.id] = s.label.isEmpty ? "\(s.id)" : s.label
-                }
-            }
-        }
-
-        guard let wins = try? JSONDecoder().decode([QueryWin].self, from: data) else { return }
-        all = wins.filter { !$0.app.isEmpty }.map {
-            let sLabel = $0.spaces.first.flatMap { spacesMap[$0] } ?? "space"
-            return SwitcherItem(wid: $0.id, pid: $0.pid, app: $0.app, title: $0.title, spaceLabel: sLabel)
-        }
-
+        // Open first, load second. The list is two socket round trips against
+        // a daemon that may be mid-sweep, and doing them before the panel
+        // appears made ⌃⌥Space feel like it had not registered the keypress.
+        // The window list arrives a few milliseconds later, into a panel that
+        // is already on screen and already taking typing.
         field.stringValue = ""
         filter("")
         if let s = NSScreen.main {
@@ -199,6 +172,50 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
+        reload()
+    }
+
+    private func reload() {
+        Task.detached(priority: .userInitiated) {
+            let items = Self.fetch()
+            await MainActor.run { [weak self] in
+                guard let self, self.panel.isVisible else { return }
+                self.all = items
+                self.filter(self.field.stringValue)
+            }
+        }
+    }
+
+    private nonisolated static func fetch() -> [SwitcherItem] {
+        struct QueryWin: Decodable {
+            let id: Int
+            let app: String
+            let title: String
+            let pid: Int
+            let spaces: [UInt64]
+        }
+        struct QuerySpace: Decodable {
+            let id: UInt64
+            let label: String
+        }
+        guard let jsonStr = BarIPC.send("query windows"),
+              let data = jsonStr.data(using: .utf8),
+              let wins = try? JSONDecoder().decode([QueryWin].self, from: data)
+        else { return [] }
+
+        var spacesMap: [UInt64: String] = [:]
+        if let sJson = BarIPC.send("query spaces"),
+           let sData = sJson.data(using: .utf8),
+           let parsed = try? JSONDecoder().decode([QuerySpace].self, from: sData)
+        {
+            for s in parsed { spacesMap[s.id] = s.label.isEmpty ? "\(s.id)" : s.label }
+        }
+        return wins.filter { !$0.app.isEmpty }.map {
+            let sLabel = $0.spaces.first.flatMap { spacesMap[$0] } ?? "space"
+            return SwitcherItem(
+                wid: $0.id, pid: $0.pid, app: $0.app, title: $0.title, spaceLabel: sLabel
+            )
+        }
     }
 
     func hide() {
@@ -224,7 +241,10 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let row = table.selectedRow
         guard row >= 0, row < shown.count else { return }
         let target = shown[row]
-        _ = BarIPC.send("focus \(target.wid)")
+        // `set-focus <id>`, not `focus <id>`: `focus` takes a direction, so
+        // every pick from this list parsed as an error and did nothing. The
+        // daemon switches space for us when the window is on another one.
+        BarIPC.post("set-focus \(target.wid)")
         hide()
     }
 

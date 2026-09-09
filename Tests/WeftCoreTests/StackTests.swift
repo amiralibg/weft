@@ -171,11 +171,16 @@ private func tree(_ ids: WindowID...) -> Tree {
     // Identical frames are what made a stack indistinguishable from a single
     // window. The active member sits inset, the one behind it fills the slot.
     #expect(frames[1] != frames[2])
-    #expect(frames[2]!.x == 0)
-    #expect(frames[1]!.x == 10)
-    #expect(frames[1]!.width == 990)
-    // Bottom-right corners stay aligned on the slot.
-    #expect(frames[1]!.x + frames[1]!.width == frames[2]!.x + frames[2]!.width)
+    #expect(frames[2]!.y == 0)
+    #expect(frames[1]!.y == 10)
+    #expect(frames[1]!.height == 790)
+    // Width is shared exactly: a stack occupies one column, so switching
+    // members must not jog the content sideways.
+    #expect(frames[1]!.x == frames[2]!.x)
+    #expect(frames[1]!.width == frames[2]!.width)
+    #expect(frames[1]!.width == 1000)
+    // Bottom edges stay aligned on the slot.
+    #expect(frames[1]!.y + frames[1]!.height == frames[2]!.y + frames[2]!.height)
 }
 
 @Test func stackInsetIsCappedSoDeepStacksDoNotShrinkAway() {
@@ -187,6 +192,8 @@ private func tree(_ ids: WindowID...) -> Tree {
     let frames = layout(t, in: stackScreen, config: config)
     // Three layers of offset, whatever the depth: a six-window stack must not
     // shrink its slot by sixty points.
-    let maxInset = frames.values.map(\.x).max() ?? 0
+    let maxInset = frames.values.map(\.y).max() ?? 0
     #expect(maxInset == 30)
+    // And the inset never touches the horizontal axis.
+    #expect(Set(frames.values.map(\.x)) == [0])
 }

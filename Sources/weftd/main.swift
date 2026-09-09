@@ -53,6 +53,11 @@ final class Daemon: @unchecked Sendable {
     private var displayOrder: [String] = []
     private let screensLock = NSLock()
     private var manualFloat: Set<WindowID> = []
+    /// Where each hand-floated window was when it was last put back into the
+    /// layout. Floating it again restores that geometry instead of re-centring
+    /// it, so `float toggle` is a toggle rather than a reset. Pruned with the
+    /// rest of the per-window tables on every sweep.
+    private var floatFrames: [WindowID: Frame] = [:]
 
     private struct DragState {
         var windowID: WindowID
@@ -61,6 +66,8 @@ final class Daemon: @unchecked Sendable {
         var lastPoint: CGPoint
         var startFrame: Frame
         var isFloating: Bool
+        /// The border being dragged, when this is a bare border drag.
+        var divider: Divider?
         /// Motion seen since the last resize step was emitted.
         ///
         /// A tiled resize is quantised — it only fires past a threshold — and
@@ -74,9 +81,30 @@ final class Daemon: @unchecked Sendable {
         var pendingY: Double = 0
     }
     private var currentDrag: DragState?
-    /// Points of accumulated drag before a tiled resize step is emitted. Small
-    /// enough to feel continuous, large enough not to send a command per event.
-    private static let resizeStep: Double = 8
+    /// Points of accumulated drag before a tiled resize step is emitted.
+    ///
+    /// Two, not eight. Eight was chosen to keep the command rate down when
+    /// every step meant a string round trip and an unthrottled frame write;
+    /// the drag path now skips the parser and coalesces its writes, so the
+    /// only thing the threshold still costs is visible stepping. At 2pt a
+    /// drag tracks the cursor.
+    private static let resizeStep: Double = 2
+    /// Borders between tiled windows on the visible spaces, for hit-testing a
+    /// bare mouse-down. Written on the sync/apply paths, read on the incoming
+    /// queue; the tap gets its own copy of just the rectangles.
+    private var dividerZones: [Divider] = []
+    private let dividerLock = NSLock()
+
+    /// Whether Accessibility was already granted when this process started.
+    ///
+    /// A grant that arrives afterwards flips `AXIsProcessTrusted()` to true,
+    /// and every AX call still fails: the app connections this process opened
+    /// while untrusted stay untrusted for its lifetime. So weft comes up
+    /// looking healthy — green permissions, no errors — and cannot move a
+    /// window until it is restarted, which nothing told the user to do. This
+    /// is the flag that lets the Setup window put a button in front of them
+    /// instead.
+    private let launchedTrusted = AXIsProcessTrusted()
 
     init?() {
         core.setSpecific(key: coreKey, value: 1)
@@ -127,6 +155,7 @@ final class Daemon: @unchecked Sendable {
             fputs("weftd: mode \(mode)\n", stderr)
         }
         input.updateMouseModifier(currentConfig().general.mouseModifier)
+        input.setBorderDragEnabled(currentConfig().general.mouseBorderResize)
         WorldReader.manageMenubarApps = currentConfig().general.manageMenubarApps
         input.onMouseGesture = { [weak self] gesture in
             self?.handleMouseGesture(gesture)
@@ -140,6 +169,8 @@ final class Daemon: @unchecked Sendable {
             let cfg = self.currentConfig()
             self.input.updateKeymap(cfg.keymap)
             self.input.updateMouseModifier(cfg.general.mouseModifier)
+            self.input.setBorderDragEnabled(cfg.general.mouseBorderResize)
+            self.syncQueue.async { [weak self] in self?.refreshDividerZones() }
             fputs("weftd: input tap installed late — keybinds are live\n", stderr)
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -233,6 +264,23 @@ final class Daemon: @unchecked Sendable {
     private func processMouseGesture(_ gesture: MouseGesture) {
         switch gesture {
         case .down(let button, let location):
+            if button == .border {
+                // The tap already decided this press is on a border; find
+                // which one, and start dragging it. Focus is deliberately NOT
+                // taken: grabbing a border is not selecting a window, and
+                // pulling focus across the screen on every drag would be
+                // exactly the "windows moving by themselves" complaint.
+                let zones = dividerLock.withLock { dividerZones }
+                guard let d = divider(
+                    at: Double(location.x), y: Double(location.y), in: zones
+                ) else { return }
+                currentDrag = DragState(
+                    windowID: d.a, button: button,
+                    startPoint: location, lastPoint: location,
+                    startFrame: .zero, isFloating: false, divider: d
+                )
+                return
+            }
             guard let hit = findWindow(at: location) else { return }
             noteFocusedWindow(hit.wid)
             if let pid = pids[hit.wid] {
@@ -253,6 +301,15 @@ final class Daemon: @unchecked Sendable {
             let dy = Double(location.y - drag.lastPoint.y)
             drag.lastPoint = location
             currentDrag = drag
+            if let d = drag.divider {
+                // Border drag: no threshold and no quantisation. The border
+                // is under the cursor, so anything other than "it moves with
+                // the cursor" reads as broken.
+                let delta = d.axis == .horizontal ? dx : dy
+                guard abs(delta) > 0.01 else { return }
+                dragDivider(d, by: delta)
+                return
+            }
             if button == .left {
                 if drag.isFloating {
                     if let cur = WorldReader.frame(of: drag.windowID) {
@@ -274,13 +331,13 @@ final class Daemon: @unchecked Sendable {
                     if abs(drag.pendingX) >= Self.resizeStep {
                         let amount = drag.pendingX
                         let dir: ResizeDirection = amount > 0 ? .right : .left
-                        _ = handleCommand("resize \(dir.rawValue) \(abs(amount))")
+                        _ = dispatch(.resize(dir, abs(amount)))
                         drag.pendingX = 0
                     }
                     if abs(drag.pendingY) >= Self.resizeStep {
                         let amount = drag.pendingY
                         let dir: ResizeDirection = amount > 0 ? .down : .up
-                        _ = handleCommand("resize \(dir.rawValue) \(abs(amount))")
+                        _ = dispatch(.resize(dir, abs(amount)))
                         drag.pendingY = 0
                     }
                     currentDrag = drag
@@ -289,6 +346,13 @@ final class Daemon: @unchecked Sendable {
         case .up(let button, let location):
             guard let drag = currentDrag else { return }
             currentDrag = nil
+            if drag.divider != nil {
+                // Flush whatever the coalescer was holding back, then let the
+                // borders and the bar catch up with the final geometry.
+                flushPendingApply()
+                bus.emit(stateChangedEvent())
+                return
+            }
             if button == .left && !drag.isFloating {
                 if let target = findWindow(at: location), target.wid != drag.windowID {
                     updateSpaces { sp in
@@ -307,6 +371,146 @@ final class Daemon: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    // MARK: - Border dragging
+
+    /// Move one border by `delta` points along its axis and repaint.
+    ///
+    /// Runs on the incoming queue, once per mouse event. Everything expensive
+    /// is either pure (the ratio edit) or coalesced (the frame writes), so a
+    /// 120 Hz drag costs 120 tree edits and however many frame writes the two
+    /// apps involved can actually absorb.
+    private func dragDivider(_ d: Divider, by delta: Double) {
+        let frames: [WindowID: Frame]? = core.sync {
+            guard let sid = self.spaces.currentSpace,
+                  let layout = self.spaces.layouts[sid]
+            else { return nil }
+            let screen = self.usableScreen(for: sid)
+            let config = self.currentConfig().general.asTilingConfig()
+            switch layout {
+            case .tiling(let tree):
+                let current = WeftCore.layout(tree, in: screen, config: config)
+                let next = tree.resizing(
+                    divider: d.a, d.b, axis: d.axis,
+                    deltaPoints: delta, frames: current
+                )
+                guard next != tree else { return nil }
+                self.spaces.layouts[sid] = .tiling(next)
+                return WeftCore.layout(next, in: screen, config: config)
+            case .scroll(let sc):
+                // The strip resizes around the focused column/row, so the
+                // border's west/north window has to be the focused one for
+                // the edit to land on the border the cursor is holding.
+                let usable = scrollUsable(screen: screen, config: config)
+                var next = sc.focusing(d.a)
+                switch d.axis {
+                case .horizontal: next = next.adjustingWidth(delta / max(usable.w, 1))
+                case .vertical: next = next.adjustingHeight(delta / max(usable.h, 1))
+                }
+                guard next != sc else { return nil }
+                next.ensureVisible(next.focusCol, screen: screen, config: config)
+                self.spaces.layouts[sid] = .scroll(next)
+                return scrollLayout(next, screen: screen, config: config).frames
+            case .float:
+                return nil
+            }
+        }
+        guard let frames else { return }
+        applyFramesCoalesced(frames)
+    }
+
+    /// Latest-wins frame writes, for drags.
+    ///
+    /// AX frame writes are cross-process and take single-digit milliseconds
+    /// per window; a mouse reports every 8 ms. Queueing one apply per event
+    /// builds a backlog the drag never catches up with — the window keeps
+    /// resizing for a second after the button comes up, which is what a
+    /// "slow" resize actually is. So: at most one apply in flight, and the
+    /// newest target replaces any that were waiting. Intermediate frames of a
+    /// drag are worth nothing once a newer one exists.
+    private var applyInFlight = false
+    private var pendingApplyFrames: [WindowID: Frame]?
+    private let applyCoalesceLock = NSLock()
+
+    private func applyFramesCoalesced(_ frames: [WindowID: Frame]) {
+        let go: [WindowID: Frame]? = applyCoalesceLock.withLock {
+            guard !applyInFlight else {
+                pendingApplyFrames = frames
+                return nil
+            }
+            applyInFlight = true
+            return frames
+        }
+        if let go { runCoalescedApply(go) }
+    }
+
+    /// One apply, then whatever arrived while it was running, until nothing
+    /// is waiting. Chained rather than nested: a fixed depth of two dropped
+    /// every batch that landed during the second write, which on a long drag
+    /// is most of them.
+    private func runCoalescedApply(_ frames: [WindowID: Frame]) {
+        applier.apply(frames: frames, pids: allPids()) { [weak self] result in
+            guard let self else { return }
+            self.noteApplyFailures(result)
+            let next: [WindowID: Frame]? = self.applyCoalesceLock.withLock {
+                let n = self.pendingApplyFrames
+                self.pendingApplyFrames = nil
+                if n == nil { self.applyInFlight = false }
+                return n
+            }
+            if let next { self.runCoalescedApply(next) }
+        }
+    }
+
+    /// Write whatever the coalescer is still holding, now. Called when a drag
+    /// ends, so the final position is never the one that got dropped.
+    private func flushPendingApply() {
+        let last: [WindowID: Frame]? = applyCoalesceLock.withLock {
+            let n = pendingApplyFrames
+            pendingApplyFrames = nil
+            return n
+        }
+        if let last { applyFrames(last) }
+    }
+
+    /// Republish the borders the mouse can grab, for the spaces on screen.
+    ///
+    /// Called from the apply path, so the zones can never describe a layout
+    /// that is no longer on screen — a stale zone means a click swallowed
+    /// where there is nothing to drag, which is worse than no zones at all.
+    private func refreshDividerZones() {
+        let cfg = currentConfig().general
+        guard cfg.mouseBorderResize else {
+            dividerLock.withLock { dividerZones = [] }
+            input.updateDividerZones([])
+            return
+        }
+        let config = cfg.asTilingConfig()
+        var all: [Divider] = []
+        // One core hop for the whole refresh, not one per space: this runs at
+        // the end of every apply, and the core queue is what keybinds wait on.
+        let sp = readSpaces()
+        for sid in Set(sp.currentByDisplay.values) {
+            guard let layout = sp.layouts[sid] else { continue }
+            let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
+            let frames: [WindowID: Frame]
+            switch layout {
+            case .tiling(let tree):
+                // A fullscreen window covers its neighbours, so there is no
+                // border to grab and every pair overlaps anyway.
+                guard tree.fullscreen == nil else { continue }
+                frames = WeftCore.layout(tree, in: screen, config: config)
+            case .scroll(let sc):
+                guard sc.fullscreen == nil else { continue }
+                frames = scrollLayout(sc, screen: screen, config: config).frames
+            case .float:
+                continue
+            }
+            all += dividers(in: frames, innerGap: cfg.innerGap)
+        }
+        dividerLock.withLock { dividerZones = all }
+        input.updateDividerZones(all.map(\.rect))
     }
 
     /// Keybind entry point. Returns immediately (tap-thread safe); the command
@@ -561,10 +765,13 @@ final class Daemon: @unchecked Sendable {
         var freshUnbindable: [WindowID: Date] = [:]
         let now = Date()
         for w in unclassified {
-            if let standard = applier.isStandardWindow(wid: w.id, pid: w.pid) {
-                freshlyClassified[w.id] = standard
-                if !standard {
-                    fputs("weftd: ignoring \(w.app) (\(w.id)) — subrole is not a standard window\n", stderr)
+            if let verdict = applier.classify(wid: w.id, pid: w.pid) {
+                switch verdict {
+                case .success:
+                    freshlyClassified[w.id] = true
+                case .failure(let why):
+                    freshlyClassified[w.id] = false
+                    fputs("weftd: floating \(w.app) (\(w.id)) — \(Self.reason(why))\n", stderr)
                 }
                 continue
             }
@@ -699,6 +906,7 @@ final class Daemon: @unchecked Sendable {
                 fputs("weftd: floating \(wid) (rule/quirk — excluded from layouts)\n", stderr)
             }
             self.manualFloat = self.manualFloat.intersection(worldWids)
+            self.floatFrames = self.floatFrames.filter { worldWids.contains($0.key) }
             unmanagedNow.formUnion(self.manualFloat)
             self.unmanaged = unmanagedNow
             let priorKeys = Set(sp.layouts.keys)
@@ -805,6 +1013,7 @@ final class Daemon: @unchecked Sendable {
             self.standardWindow.removeValue(forKey: wid)
             self.unbindableSince.removeValue(forKey: wid)
             self.manualFloat.remove(wid)
+            self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
         }
         observers.forgetWindow(wid)
@@ -847,6 +1056,9 @@ final class Daemon: @unchecked Sendable {
     /// Follow-up sweep after a rule relocates a window, so layout membership
     /// catches up with where the window actually is.
     private var pendingRuleResync: DispatchWorkItem?
+    /// Trailing re-apply after `space move-window`, for the size write an app
+    /// drops while it is still changing spaces.
+    private var pendingMoveSettle: DispatchWorkItem?
 
     /// Request a world resync. `fast` collapses the current burst into a single
     /// sweep ~20 ms out; the 0.3 s trailing sweep always follows, because a
@@ -1026,12 +1238,23 @@ final class Daemon: @unchecked Sendable {
         return nil
     }
 
-    private func handleToggleFloat() -> IPCResponse {
+    private func handleFloat(_ mode: StickyMode) -> IPCResponse {
         guard let wid = activeWindowID() else {
-            return IPCResponse(ok: false, error: "no focused window to toggle float")
+            return IPCResponse(ok: false, error: "no focused window to float")
         }
         let isManual = manualFloat.contains(wid)
+        switch mode {
+        case .on where isManual:
+            return IPCResponse(ok: true, output: "window \(wid) already floating")
+        case .off where !isManual:
+            return IPCResponse(ok: true, output: "window \(wid) already tiled")
+        default:
+            break
+        }
         if isManual {
+            // Snapshot where the user had it before the layout reclaims it,
+            // so floating it again lands back in the same place.
+            if let live = WorldReader.frame(of: wid) { floatFrames[wid] = live }
             manualFloat.remove(wid)
             unmanaged.remove(wid)
             if let sid = currentSID() {
@@ -1071,12 +1294,24 @@ final class Daemon: @unchecked Sendable {
                 }
                 applySpaceLayout(sid)
             }
+            // Where the user last left this window floating, if they ever
+            // did. Floating a window, moving it, tiling it and floating it
+            // again used to snap it back to the centre every time — the
+            // second float threw away the whole arrangement the first one
+            // was for. Fall back to a centred 70% only the first time.
             let uScreen = usableScreen(for: currentSID())
-            let fw = uScreen.width * 0.70
-            let fh = uScreen.height * 0.70
-            let fx = uScreen.x + (uScreen.width - fw) / 2
-            let fy = uScreen.y + (uScreen.height - fh) / 2
-            applyFrames([wid: Frame(x: fx, y: fy, width: fw, height: fh)])
+            let target = floatFrames[wid].flatMap { remembered -> Frame? in
+                // Ignore geometry from a screen this window is no longer on.
+                let cx = remembered.x + remembered.width / 2
+                let cy = remembered.y + remembered.height / 2
+                return uScreen.contains(x: cx, y: cy) ? remembered : nil
+            } ?? Frame(
+                x: uScreen.x + uScreen.width * 0.15,
+                y: uScreen.y + uScreen.height * 0.15,
+                width: uScreen.width * 0.70,
+                height: uScreen.height * 0.70
+            )
+            applyFrames([wid: target])
             raiseFronts([wid])
             if let pid = pids[wid] {
                 focusAndWarp(window: wid, pid: pid)
@@ -1084,6 +1319,53 @@ final class Daemon: @unchecked Sendable {
             bus.emit(stateChangedEvent())
             return IPCResponse(ok: true, output: "window \(wid) floating")
         }
+    }
+
+    /// Focus one window by id, from anywhere.
+    ///
+    /// The reducer's `setFocus` only ever looked inside the *current* space's
+    /// layout and did nothing otherwise, which is most of what the window
+    /// switcher lists: picking a window on another desktop silently did
+    /// nothing at all. Switch to its space first, then focus it — and handle
+    /// floats and unmanaged windows, which are in no layout to be found in.
+    private func handleFocusWindow(_ wid: WindowID) -> IPCResponse {
+        let sp = readSpaces()
+        // Which space holds it: layouts first (cheap), then the WindowServer
+        // for windows weft does not manage.
+        var home: SpaceID? = sp.layouts.first { $0.value.windows.contains(wid) }?.key
+        if home == nil {
+            home = WorldReader.snapshot().windows
+                .first { $0.id == wid }?.spaces.first
+        }
+        guard let sid = home else {
+            return IPCResponse(ok: false, error: "no such window \(wid)")
+        }
+        if !sp.currentByDisplay.values.contains(sid) {
+            let label = sp.labels[sid] ?? "\(sid)"
+            let switched = handleSpace(.focus(label))
+            guard switched.ok else { return switched }
+        }
+        guard let pid = pid(of: wid) else {
+            return IPCResponse(ok: false, error: "window \(wid) has no process")
+        }
+        updateSpaces { s in
+            guard let layout = s.layouts[sid] else { return }
+            switch layout {
+            case .tiling(let t) where t.windows.contains(wid):
+                s.layouts[sid] = .tiling(t.focusing(wid))
+            case .scroll(let sc) where sc.windows.contains(wid):
+                s.layouts[sid] = .scroll(sc.focusing(wid))
+            case .float(let f) where f.windows.contains(wid):
+                s.layouts[sid] = .float(f.focusing(wid))
+            default:
+                break
+            }
+        }
+        applySpaceLayout(sid)
+        raiseFronts([wid])
+        focusAndWarp(window: wid, pid: pid)
+        bus.emit(stateChangedEvent())
+        return IPCResponse(ok: true, output: "focused \(wid)")
     }
 
     private func handleCommand(_ text: String) -> IPCResponse {
@@ -1128,6 +1410,16 @@ final class Daemon: @unchecked Sendable {
         if case .query = command {
             return handleQuery(text)
         }
+        return dispatch(command)
+    }
+
+    /// Everything past parsing. Split out so the mouse paths — which know
+    /// exactly what they mean — can call it without building a string and
+    /// parsing it back. A drag emits one of these per mouse event, and
+    /// `resize right 3.0` → tokenize → parse → enum was pure overhead on the
+    /// one path where it happened a hundred times a second.
+    private func dispatch(_ command: Command) -> IPCResponse {
+        dispatchPrecondition(condition: .notOnQueue(core))
         if case .space(let sub) = command {
             return handleSpace(sub)
         }
@@ -1146,8 +1438,11 @@ final class Daemon: @unchecked Sendable {
         if case .appToggle(let bundleID) = command {
             return handleAppToggle(bundleID)
         }
-        if command == .toggleFloat {
-            return handleToggleFloat()
+        if case .float(let mode) = command {
+            return handleFloat(mode)
+        }
+        if case .setFocus(let wid) = command {
+            return handleFocusWindow(wid)
         }
 
         let (nextKind, mutations): (LayoutKind, [Mutation]) = core.sync {
@@ -1195,6 +1490,9 @@ final class Daemon: @unchecked Sendable {
         if let focus, let pid = pid(of: focus) {
             focusAndWarp(window: focus, pid: pid)
         }
+        // The borders moved with the windows. A stale grab zone is a click
+        // swallowed where there is nothing to drag.
+        if !frames.isEmpty { refreshDividerZones() }
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
     }
@@ -1326,6 +1624,12 @@ final class Daemon: @unchecked Sendable {
         guard SpaceControl.moveWindowToSpace(wid, sid) else {
             return IPCResponse(ok: false, error: "WindowServer ignored the move (needs weft-sa) — nothing changed")
         }
+        // Re-read display geometry before sizing anything against it. macOS
+        // puts the menu bar on whichever display has focus, so the other
+        // display's `visibleFrame` is a full-height rect until focus lands
+        // there — and a window sent to a space on that display was laid out
+        // into a rect 22 points taller than the one it would actually get.
+        refreshScreens()
         let targetScreen = usableScreen(for: sid)
         let tile = currentConfig().general.asTilingConfig()
         updateSpaces { sp in
@@ -1362,6 +1666,34 @@ final class Daemon: @unchecked Sendable {
         if readSpaces().visibleSpaces.contains(sid) {
             applier.bind(windows: pid(of: wid).map { [(wid: wid, pid: $0)] } ?? [])
             applySpaceLayout(sid, raiseFocus: false)
+        }
+        // And once more when the app has finished changing spaces.
+        //
+        // The frame written above is correct and does not always land: the
+        // app is mid-transition, and a size write during it is the one an app
+        // is most likely to drop. Position usually sticks and size does not,
+        // so the window arrives in the right corner at its old size — most
+        // visibly when the destination is on another display, where the old
+        // size is wrong by a whole monitor. Nothing else would have corrected
+        // it: moving a window between spaces produces no event, so no sweep
+        // follows, and it stayed wrong until something else happened to
+        // retile. One trailing pass, cancelled by the next move.
+        // Scheduled from the sync queue, which is the only queue that touches
+        // the pending-work items — this runs on `incoming`.
+        syncQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingMoveSettle?.cancel()
+            let settle = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.refreshScreens()
+                if self.readSpaces().visibleSpaces.contains(sid) {
+                    self.applySpaceLayout(sid, raiseFocus: false)
+                }
+                if let cur = self.currentSID() { self.applySpaceLayout(cur) }
+                self.bus.emit(self.stateChangedEvent())
+            }
+            self.pendingMoveSettle = settle
+            self.syncQueue.asyncAfter(deadline: .now() + 0.25, execute: settle)
         }
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "moved \(wid) to \(label)")
@@ -1655,6 +1987,16 @@ final class Daemon: @unchecked Sendable {
     /// sweep. Layer-0 and bigger-than-100px is not enough on its own — a
     /// menu-bar extra's panel passes both.
     private var standardWindow: [WindowID: Bool] = [:]
+
+    /// The log line for a classification refusal, in the user's terms rather
+    /// than the AX attribute's.
+    private static func reason(_ why: AXApplier.NotTileable) -> String {
+        switch why {
+        case .subrole: return "it is a dialog or panel, not a window"
+        case .fixedSize: return "the app will not let it be resized"
+        case .panelChrome: return "it is a small window with no title-bar buttons (a popup)"
+        }
+    }
     /// wid → when AX first failed to produce an element for it while its space
     /// was visible. A real window binds immediately (measured: Ghostty binds on
     /// the first sweep, and even windows on *other* spaces bind), so staying
@@ -1711,6 +2053,8 @@ final class Daemon: @unchecked Sendable {
         configLock.withLock { _config = next }
         input.updateKeymap(next.keymap)
         input.updateMouseModifier(next.general.mouseModifier)
+        input.setBorderDragEnabled(next.general.mouseBorderResize)
+        refreshDividerZones()
         WorldReader.manageMenubarApps = next.general.manageMenubarApps
         bordersBridge.applyConfig(next.integrations.borders, currentLayout: currentSpaceLayoutKind(), currentMode: input.currentMode)
         sketchybarBridge.updateConfig(next.integrations.sketchybar)
@@ -1919,7 +2263,8 @@ final class Daemon: @unchecked Sendable {
                 inputMonitoring: Permissions.inputMonitoringPreflight(),
                 keybindsLive: input.ensureTap(),
                 screenRecording: Permissions.screenRecording(),
-                stableIdentity: Permissions.hasStableSigningIdentity()
+                stableIdentity: Permissions.hasStableSigningIdentity(),
+                needsRestart: !launchedTrusted && Permissions.accessibility()
             ))
         case "displays":
             // Geometry included: "which rect is weft tiling this space into"
@@ -1942,7 +2287,28 @@ final class Daemon: @unchecked Sendable {
             // Diagnostic path: pays the per-app AX round trip so `bound`
             // reflects the S0 cold-start gap. Never used by the hot paths.
             let world = WorldReader.snapshot(includeAXBinding: true)
-            return parts[1] == "windows" ? emit(world.windows) : emit(world)
+            guard parts[1] == "windows" else { return emit(world) }
+            // Why each window is or is not tiled, alongside the window. A
+            // window weft has quietly decided not to manage is the single
+            // hardest thing to debug from outside, and `query windows` was
+            // the obvious place to look and the one place that did not say.
+            let reasons = core.sync { () -> [WindowID: String] in
+                var out: [WindowID: String] = [:]
+                for w in world.windows {
+                    if self.manualFloat.contains(w.id) { out[w.id] = "manual" }
+                    else if self.standardWindow[w.id] == false { out[w.id] = "popup" }
+                    else if (self.strikes[w.id] ?? 0) >= 2 { out[w.id] = "quirk" }
+                    else if self.unmanaged.contains(w.id) { out[w.id] = "rule" }
+                }
+                return out
+            }
+            return emit(world.windows.map {
+                WindowStatus(
+                    id: $0.id, app: $0.app, title: $0.title, pid: $0.pid,
+                    spaces: $0.spaces, frame: $0.frame, bound: $0.bound,
+                    floating: reasons[$0.id]
+                )
+            })
         case "spaces":
             // Enriched with labels + our per-space model (daemon only; the
             // local fallback serves raw WindowServer membership). Empty
@@ -2159,6 +2525,7 @@ final class Daemon: @unchecked Sendable {
                 }
             }
         }
+        refreshDividerZones()
     }
 
     private func applyCurrentSpace() {
@@ -2305,11 +2672,33 @@ private struct DaemonPermissions: Codable, Sendable {
     /// `Permissions.hasStableSigningIdentity()`. False means any switch that
     /// reads as on in System Settings may be granting nothing.
     var stableIdentity: Bool
+    /// Accessibility was granted *after* this process started, so its AX
+    /// connections are stale and nothing will work until it is restarted.
+    /// The one thing weft cannot fix for itself, and the one thing it can
+    /// reliably ask for.
+    var needsRestart: Bool
     /// Functional readiness, not a count of switches. Screen Recording is in
     /// here because without it `kCGWindowName` is redacted for every window
     /// weftd does not own — titles come back empty and every title-matching
     /// rule silently stops matching.
-    var allGranted: Bool { accessibility && keybindsLive && screenRecording }
+    var allGranted: Bool {
+        accessibility && keybindsLive && screenRecording && !needsRestart
+    }
+}
+
+/// `query windows`: a WindowInfo plus weft's verdict on it. `floating` is nil
+/// for a window in a layout, and otherwise names why it is not — "manual"
+/// (the user floated it), "popup" (not a tileable window), "quirk" (refused
+/// its frame twice), "rule" (a `manage = false` rule matched).
+private struct WindowStatus: Codable, Sendable {
+    var id: WindowID
+    var app: String
+    var title: String
+    var pid: Int32
+    var spaces: [SpaceID]
+    var frame: Frame
+    var bound: Bool
+    var floating: String?
 }
 
 private struct DisplayStatus: Codable, Sendable {

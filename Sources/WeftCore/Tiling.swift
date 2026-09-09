@@ -170,14 +170,23 @@ public func layout(_ tree: Tree, in screen: Frame, config: TilingConfig) -> [Win
         width: max(screen.width - config.outerGap.left - config.outerGap.right, 1),
         height: max(screen.height - config.outerGap.top - config.outerGap.bottom, 1)
     )
+    // Zoom-fullscreen fills the *tiling area*, not the display.
+    //
+    // It used to be handed the raw screen rect, so a zoomed window went
+    // edge to edge while every other window on the space kept its gaps —
+    // and, worse, ignored the `reserve` too, sliding under a bar the user had
+    // explicitly told weft to keep clear. This is a zoom within the layout,
+    // not a native fullscreen: it takes the whole tiling area and nothing
+    // more. (Native fullscreen is macOS's own, and weft skips those spaces
+    // entirely — §11 risk 6.)
     if let fs = tree.fullscreen, root.windows.contains(fs) {
         var out: [WindowID: Frame] = [:]
         if case .window(let id) = root {
-            out[id] = screen
+            out[id] = inset
             return out
         }
         layoutNode(root, in: inset, innerGap: config.innerGap, stackOffset: config.stackOffset, out: &out)
-        out[fs] = screen
+        out[fs] = inset
         return out
     }
     // Single window: no inner gap (edge-to-edge inside the outer inset).
@@ -213,9 +222,15 @@ private func layoutNode(
         // Stack: the members share one slot, so the only thing that can say
         // there is more than one window here is geometry. Each member is
         // inset from the one behind it, deepest at the back, so the active
-        // member sits on top and slightly smaller with the others showing
-        // along its top-left edges — a deck of cards rather than a single
-        // window that mysteriously swaps contents.
+        // member sits on top with the others showing as title bars along its
+        // top edge — a deck of cards rather than a single window that
+        // mysteriously swaps contents.
+        //
+        // The inset is VERTICAL ONLY. Insetting the x as well made every
+        // member a different width, so switching members visibly jogged the
+        // content sideways and the stack never lined up with the window in
+        // the split next to it. A stack occupies one column: every member
+        // gets that column's full width, and only the top edge steps down.
         if c.layout == .stack {
             let active = min(max(c.active, 0), n - 1)
             for (i, child) in c.children.enumerated() {
@@ -225,12 +240,12 @@ private func layoutNode(
                     ? min(n - 1, maxVisibleStackLayers)
                     : min(abs(i - active) - 1, maxVisibleStackLayers - 1)
                 let d = stackOffset * Double(max(depth, 0))
-                // Inset from the top-left and shrink to match, so every
-                // member's bottom-right corner stays on the slot's.
+                // Full width, inset from the top and shortened to match, so
+                // every member's bottom edge stays on the slot's.
                 let slot = Frame(
-                    x: frame.x + d,
+                    x: frame.x,
                     y: frame.y + d,
-                    width: max(frame.width - d, 1),
+                    width: frame.width,
                     height: max(frame.height - d, 1)
                 )
                 layoutNode(child, in: slot, innerGap: innerGap,
@@ -449,7 +464,7 @@ extension Tree {
     /// window: `stack split right` on the left window stacks the right one
     /// into its slot. Already in a stack → the neighbour joins it.
     public func stackSplitting(towards dir: Direction, frames: [WindowID: Frame]) -> Tree {
-        guard let root, let focused = focus else { return self }
+        guard root != nil, let focused = focus else { return self }
         guard let neighbor = Reducer.neighbour(of: focused, in: frames, towards: dir) else { return self }
         var tree = removing(neighbor)
         guard let r = tree.root else { return self }

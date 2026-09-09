@@ -213,6 +213,14 @@ public enum Migrate {
                 else if actionRaw.contains("window --swap south") || actionRaw.contains("window --warp south") { weftCmd = "move south" }
                 else if actionRaw.contains("window --toggle zoom-fullscreen") { weftCmd = "window toggle zoom-fullscreen" }
                 else if actionRaw.contains("window --toggle split") { weftCmd = "window toggle split" }
+                // `--toggle float --grid 6:6:1:1:4:4` is the standard yabai
+                // "float this one window and centre it" bind, and it used to
+                // fall through every branch here and be dropped without a
+                // word — leaving a migrated config with no way to float a
+                // single window at all. weft centres a freshly floated window
+                // itself, so the grid needs no translation.
+                else if actionRaw.contains("window --toggle float") { weftCmd = "float toggle" }
+                else if actionRaw.contains("window --toggle sticky") { weftCmd = "sticky toggle" }
                 else if actionRaw.contains("space --layout") {
                     // The `if [ … = float ]; then bsp; else float; fi` shell
                     // one-liner names both layouts; matching "bsp" first turned
@@ -357,6 +365,15 @@ public enum Migrate {
             for b in bindings {
                 toml += "\"\(b.chord)\" = \"\(b.cmd)\"\n"
             }
+            // Floating one window is not optional equipment — every dialog an
+            // app insists on tiling needs it — and a skhdrc that never bound
+            // it produced a weft with no way to reach it at all. Added only if
+            // the chord and the command are both still free.
+            if !bindings.contains(where: { $0.cmd == "float toggle" }),
+               !bindings.contains(where: { $0.chord == "alt-shift-space" })
+            {
+                toml += "\"alt-shift-space\" = \"float toggle\"\n"
+            }
         } else {
             // Include sensible defaults
             toml += "\"alt-h\" = \"focus west\"\n"
@@ -369,6 +386,7 @@ public enum Migrate {
             toml += "\"alt-shift-l\" = \"move east\"\n"
             toml += "\"alt-f\" = \"window toggle zoom-fullscreen\"\n"
             toml += "\"alt-backslash\" = \"window toggle split\"\n"
+            toml += "\"alt-shift-space\" = \"float toggle\"\n"
             toml += "\"alt-tab\" = \"space focus recent\"\n"
         }
 

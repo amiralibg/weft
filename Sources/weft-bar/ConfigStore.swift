@@ -71,6 +71,8 @@ final class ConfigStore: ObservableObject {
 
     // General
     @Published var innerGap = 8
+    /// How far each stacked window peeks out from the one in front of it.
+    @Published var stackOffset = 8
     @Published var outerTop = 8
     @Published var outerBottom = 8
     @Published var outerLeft = 8
@@ -82,8 +84,11 @@ final class ConfigStore: ObservableObject {
     @Published var reserveRight = 0
     @Published var defaultLayout = "bsp"
     @Published var mouseModifier = "alt"
+    @Published var mouseBorderResize = true
     @Published var mouseFollowsFocus = true
     @Published var focusFollowsMouse = false
+    @Published var manageMenubarApps = false
+    @Published var checkForUpdates = true
 
     // Integrations
     @Published var bordersEnabled = false
@@ -152,6 +157,7 @@ final class ConfigStore: ObservableObject {
     private func readGeneral() {
         let g = document.firstIndex(ofHeader: "[general]").map { document.sections[$0] }
         innerGap = g?.int("inner-gap") ?? 8
+        stackOffset = g?.int("stack-offset") ?? 8
         if let o = TomlValue.sides(g?.rawValue("outer-gap")) {
             outerTop = o.top; outerBottom = o.bottom; outerLeft = o.left; outerRight = o.right
         }
@@ -161,8 +167,11 @@ final class ConfigStore: ObservableObject {
         linkOuterGaps = outerTop == outerBottom && outerBottom == outerLeft && outerLeft == outerRight
         defaultLayout = g?.string("default-layout") ?? "bsp"
         mouseModifier = g?.string("mouse-modifier") ?? "alt"
+        mouseBorderResize = g?.bool("mouse-border-resize") ?? true
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
+        manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
+        checkForUpdates = g?.bool("check-for-updates") ?? true
     }
 
     private func readIntegrations() {
@@ -283,7 +292,10 @@ final class ConfigStore: ObservableObject {
         readAll()
         loading = false
         status = .ok("Saved — weftd reloads within 100 ms.")
-        _ = BarIPC.send("sync")
+        // Fire and forget: the daemon picks the file up from FSEvents on its
+        // own within 100 ms, so this is a nudge, not a dependency — and Save
+        // must not freeze the window while a sweep runs.
+        BarIPC.post("sync")
         return true
     }
 
@@ -291,12 +303,16 @@ final class ConfigStore: ObservableObject {
         let i = document.ensureSection("[general]")
         var s = document.sections[i]
         s.set("inner-gap", int: innerGap)
+        s.set("stack-offset", int: stackOffset)
         s.setRaw("outer-gap", TomlValue.sidesLiteral(
             top: outerTop, bottom: outerBottom, left: outerLeft, right: outerRight))
         s.set("default-layout", string: defaultLayout)
         s.set("mouse-modifier", string: mouseModifier)
+        s.set("mouse-border-resize", bool: mouseBorderResize)
         s.set("mouse-follows-focus", bool: mouseFollowsFocus)
         s.set("focus-follows-mouse", bool: focusFollowsMouse)
+        s.set("manage-menubar-apps", bool: manageMenubarApps)
+        s.set("check-for-updates", bool: checkForUpdates)
         s.setRaw("reserve", TomlValue.sidesLiteral(
             top: reserveTop, bottom: reserveBottom, left: reserveLeft, right: reserveRight))
         document.sections[i] = s

@@ -43,7 +43,9 @@ public enum Command: Sendable, Equatable {
     // Window toggles
     case toggleFullscreen
     case toggleSplit
-    case toggleFloat
+    /// Take one window out of the layout (or put it back). `on`/`off` are the
+    /// scriptable halves; `toggle` is what a keybind wants.
+    case float(StickyMode)
     // Tree membership (also produced by window-created/destroyed events).
     case insert(WindowID)
     case remove(WindowID)
@@ -146,7 +148,7 @@ extension Command {
             switch parts[1] {
             case "fullscreen", "zoom-fullscreen": return .toggleFullscreen
             case "split": return .toggleSplit
-            case "float": return .toggleFloat
+            case "float": return .float(.toggle)
             default: throw CommandParseError.badArgs(input)
             }
         case "window":
@@ -154,12 +156,18 @@ extension Command {
             switch parts[2] {
             case "fullscreen", "zoom-fullscreen": return .toggleFullscreen
             case "split": return .toggleSplit
-            case "float": return .toggleFloat
+            case "float": return .float(.toggle)
             default: throw CommandParseError.badArgs(input)
             }
         case "float":
-            if parts.count == 2 && parts[1] == "toggle" { return .toggleFloat }
-            throw CommandParseError.badArgs(input)
+            // Bare `float` is the toggle: the keybind spelling people reach
+            // for first, and there is nothing else it could mean.
+            guard parts.count <= 2 else { throw CommandParseError.badArgs(input) }
+            guard parts.count == 2 else { return .float(.toggle) }
+            guard let mode = StickyMode(rawValue: parts[1]) else {
+                throw CommandParseError.badArgs(input)
+            }
+            return .float(mode)
         case "focus":
             // `focus display <…>` switches display; plain `focus <dir>` moves
             // within the space — the display keyword disambiguates.

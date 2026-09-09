@@ -54,18 +54,64 @@ private func makeUnixAddress(path: String) -> (sockaddr_un, socklen_t) {
     return (addr, len)
 }
 
-private func readLine(fd: Int32) -> String? {
-    var bytes: [UInt8] = []
-    bytes.reserveCapacity(256)
-    var byte: UInt8 = 0
-    while true {
-        let n = read(fd, &byte, 1)
-        if n <= 0 { return bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8) }
-        if byte == UInt8(ascii: "\n") { break }
-        bytes.append(byte)
-        if bytes.count > 1_048_576 { break }  // 1MB cap per message
+/// Buffered line reader over one fd.
+///
+/// The obvious version — `read(fd, &byte, 1)` in a loop — is a syscall per
+/// byte. That is invisible for a command (`focus west` is eleven of them) and
+/// ruinous for a reply: `query windows` on a busy desktop is tens of
+/// kilobytes, so every menu open and every settings poll was tens of
+/// thousands of syscalls, on the main thread, and felt exactly like it.
+///
+/// One instance per connection, so bytes read past the newline are kept for
+/// the next line rather than dropped — that is what makes the subscribe
+/// stream work byte-for-byte the same way.
+final class LineReader {
+    private let fd: Int32
+    private var buffer: [UInt8] = []
+    private var offset = 0
+    private static let chunk = 16 * 1024
+    /// Cap per message, matching the old reader.
+    private static let limit = 1_048_576
+
+    init(fd: Int32) { self.fd = fd }
+
+    func next() -> String? {
+        var line: [UInt8] = []
+        while true {
+            // Serve from what is already buffered.
+            if offset < buffer.count {
+                if let nl = buffer[offset...].firstIndex(of: UInt8(ascii: "\n")) {
+                    line.append(contentsOf: buffer[offset..<nl])
+                    offset = nl + 1
+                    compact()
+                    return String(bytes: line, encoding: .utf8)
+                }
+                line.append(contentsOf: buffer[offset...])
+                offset = buffer.count
+                compact()
+                if line.count > Self.limit { return String(bytes: line, encoding: .utf8) }
+            }
+            var chunk = [UInt8](repeating: 0, count: Self.chunk)
+            let n = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress, Self.chunk) }
+            if n <= 0 {
+                // EOF or error: a trailing unterminated line is still a line.
+                return line.isEmpty ? nil : String(bytes: line, encoding: .utf8)
+            }
+            buffer = Array(chunk[0..<n])
+            offset = 0
+        }
     }
-    return String(bytes: bytes, encoding: .utf8)
+
+    private func compact() {
+        if offset >= buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+            offset = 0
+        }
+    }
+}
+
+private func readLine(fd: Int32) -> String? {
+    LineReader(fd: fd).next()
 }
 
 private func writeAll(fd: Int32, _ string: String) -> Bool {
@@ -239,8 +285,11 @@ public enum IPCClient {
               let line = String(data: data, encoding: .utf8),
               writeAll(fd: fd, line)
         else { return false }
-        // No half-close: the stream stays open in both directions.
-        while let event = readLine(fd: fd) {
+        // No half-close: the stream stays open in both directions. One reader
+        // for the whole stream — a fresh one per line would drop whatever it
+        // had already buffered past the newline.
+        let reader = LineReader(fd: fd)
+        while let event = reader.next() {
             onLine(event)
         }
         return true

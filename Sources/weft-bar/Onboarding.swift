@@ -36,6 +36,11 @@ struct DaemonPermissions: Decodable, Equatable {
     /// has invalidated every grant TCC still shows as on — the switch in the
     /// pane is enabled and doing nothing. Optional for older daemons.
     var stableIdentity: Bool?
+    /// weftd was already running when Accessibility was granted, so its AX
+    /// connections predate the grant and every window operation is refused
+    /// until it restarts. Optional so a newer WeftBar still reads an older
+    /// daemon (which simply never reports it).
+    var needsRestart: Bool?
 
     /// The pane will contradict us: it shows a switch that is on for a
     /// program this binary no longer is.
@@ -43,9 +48,14 @@ struct DaemonPermissions: Decodable, Equatable {
 
     /// What keybinds actually run on.
     var tapLive: Bool { keybindsLive ?? inputMonitoring }
+    /// The grants are all in place but the daemon holding them is the one
+    /// that started before they were.
+    var mustRestart: Bool { needsRestart ?? false }
     /// Functional readiness — the only thing worth gating Setup on.
     /// Screen Recording counts: without it every window title is empty.
-    var ready: Bool { accessibility && tapLive && screenRecording }
+    /// So does a pending restart: a weft that cannot move a window is not
+    /// ready, however green the switches are.
+    var ready: Bool { accessibility && tapLive && screenRecording && !mustRestart }
 }
 
 enum PermissionKind: String, CaseIterable, Identifiable {
@@ -216,6 +226,11 @@ final class SetupModel: ObservableObject {
         return p.switchesMayLie && !p.ready
     }
 
+    /// Every switch is on and the engine still cannot work, because it was
+    /// running before the switches were flipped. One button fixes it, so the
+    /// page shows one button.
+    var needsEngineRestart: Bool { perms?.mustRestart ?? false }
+
     // MARK: Polling
 
     func startPolling() {
@@ -268,6 +283,18 @@ final class SetupModel: ObservableObject {
             perms = next
         }
         guard page == .permissions else { return }
+        if needsEngineRestart {
+            // Not done, and not stuck on a switch either: the switches are all
+            // on. Stay on this page — the restart banner is on it — rather
+            // than marching to a "you are all set" screen for a weft that
+            // cannot move a window yet.
+            if activeStep != nil {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                    activeStep = nil
+                }
+            }
+            return
+        }
         if requiredGranted {
             guard !wasGranted else { return }
             withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -343,7 +370,12 @@ final class SetupModel: ObservableObject {
         isRestarting = true
         Task.detached(priority: .userInitiated) {
             ConfigEditorWindowController.restartWeftCtl()
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            // Wait for the socket to answer again rather than guessing at a
+            // sleep. `launchctl kickstart -k` returns as soon as it has
+            // signalled, and asking into that gap reads as "daemon gone" —
+            // which is how a restart button could leave the window looking
+            // worse than before it was pressed.
+            _ = await OnboardingWindowController.awaitDaemon()
             await MainActor.run {
                 self.isRestarting = false
                 self.refresh()
@@ -501,8 +533,8 @@ private struct WelcomePage: View {
                 )
                 Bullet(
                     symbol: "bolt",
-                    title: "No restart needed",
-                    text: "Weft picks up a grant within a second of the switch flipping."
+                    title: "Nothing to hunt for",
+                    text: "Weft notices each switch within a second, and asks for one restart at the end if macOS needs it."
                 )
             }
             .padding(.top, 34)
@@ -607,7 +639,11 @@ private struct PermissionsPage: View {
             .padding(.horizontal, 32)
             .padding(.top, 38)
 
-            if model.showsStaleGrantWarning {
+            if model.needsEngineRestart {
+                RestartBanner(model: model)
+                    .padding(.horizontal, 32)
+                    .padding(.top, 16)
+            } else if model.showsStaleGrantWarning {
                 StaleGrantBanner()
                     .padding(.horizontal, 32)
                     .padding(.top, 16)
@@ -665,6 +701,55 @@ private struct BlockedDismissNotice: View {
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(Color.weft.opacity(0.10))
+        )
+    }
+}
+
+/// Shown when the switches are all on and the engine still cannot use them.
+///
+/// macOS decides whether a process is Accessibility-trusted when that process
+/// opens its connections, not when you ask. A daemon that was already running
+/// when the switch flipped therefore reports the grant *and* fails every call
+/// — a state weft used to sit in silently, looking installed and doing
+/// nothing, until the user happened to restart it. There is exactly one fix
+/// and it is one click, so it goes on screen as one button.
+private struct RestartBanner: View {
+    @ObservedObject var model: SetupModel
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "arrow.clockwise.circle.fill")
+                .foregroundStyle(Color.weft)
+                .font(.system(size: 17))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("One restart and weft is ready")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Everything is granted. The engine was already running when you granted it, and macOS only hands out that access at launch — so it needs to start once more to pick it up.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    model.restartEngine()
+                } label: {
+                    HStack(spacing: 6) {
+                        if model.isRestarting { ProgressView().controlSize(.small) }
+                        Text(model.isRestarting ? "Restarting…" : "Restart the engine")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isRestarting)
+                .keyboardShortcut(.defaultAction)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.weft.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.weft.opacity(0.32), lineWidth: 1)
         )
     }
 }
@@ -1125,7 +1210,14 @@ private struct DonePage: View {
 
 /// The app icon from the bundle, so Setup and the Dock never disagree. Falls
 /// back to the accent tile when running unbundled (`swift run`).
-private struct AppIcon: View {
+/// The real app icon — the one in the Dock, the Finder and the About box —
+/// rather than a second drawing of it.
+///
+/// Shared with the Settings sidebar. A hand-rolled SF Symbol in a gradient
+/// square is a *different* mark from the one the app actually ships, so the
+/// window that is most obviously "this app's settings" was the one place the
+/// app's own icon did not appear.
+struct AppIcon: View {
     var body: some View {
         if let icon = NSImage(named: "WeftBar") ?? NSApp.applicationIconImage {
             Image(nsImage: icon)

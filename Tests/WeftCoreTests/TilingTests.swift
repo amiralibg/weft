@@ -195,9 +195,12 @@ let screen = Frame(x: 0, y: 0, width: 1000, height: 800)
     #expect(try Command.parse("split toggle") == .toggleSplit)
     #expect(try Command.parse("toggle split") == .toggleSplit)
     #expect(try Command.parse("window toggle split") == .toggleSplit)
-    #expect(try Command.parse("toggle float") == .toggleFloat)
-    #expect(try Command.parse("window toggle float") == .toggleFloat)
-    #expect(try Command.parse("float toggle") == .toggleFloat)
+    #expect(try Command.parse("toggle float") == .float(.toggle))
+    #expect(try Command.parse("window toggle float") == .float(.toggle))
+    #expect(try Command.parse("float toggle") == .float(.toggle))
+    #expect(try Command.parse("float") == .float(.toggle))
+    #expect(try Command.parse("float on") == .float(.on))
+    #expect(try Command.parse("float off") == .float(.off))
 }
 
 @Test func frameContainsPoint() {

@@ -19,10 +19,47 @@ public struct Column: Sendable, Equatable {
     public var windows: [WindowID]
     /// Fraction of usable width. Cycles the preset ring; resize adjusts.
     public var width: Double
+    /// Fraction of the column height per row, summing to 1.
+    ///
+    /// Rows used to divide the column equally with no way to change it, so
+    /// `resize up`/`resize down` — and dragging a horizontal border with the
+    /// mouse — did nothing at all on a scroll space. Kept count-matched with
+    /// `windows` by `normalized()`; a column that has never been resized
+    /// holds equal shares and lays out exactly as before.
+    public var heights: [Double]
 
-    public init(windows: [WindowID], width: Double = ScrollState.defaultWidth) {
+    public init(
+        windows: [WindowID],
+        width: Double = ScrollState.defaultWidth,
+        heights: [Double] = []
+    ) {
         self.windows = windows
         self.width = width
+        self.heights = heights
+        normalize()
+    }
+
+    /// Equal shares when the count is wrong or the stored shares are junk;
+    /// otherwise the stored shares scaled to sum to 1. New rows enter at an
+    /// equal share and the existing rows give up that space proportionally,
+    /// which is what makes adding a window to a resized column not throw the
+    /// resize away.
+    mutating func normalize() {
+        let n = windows.count
+        guard n > 0 else { heights = []; return }
+        if heights.count != n || heights.contains(where: { !($0 > 0) }) {
+            var next = heights.filter { $0 > 0 }
+            if next.count > n { next = Array(next.prefix(n)) }
+            let share = next.isEmpty ? 1.0 / Double(n) : next.reduce(0, +) / Double(next.count)
+            while next.count < n { next.append(share) }
+            heights = next
+        }
+        let total = heights.reduce(0, +)
+        guard total > 0 else {
+            heights = Array(repeating: 1.0 / Double(n), count: n)
+            return
+        }
+        heights = heights.map { $0 / total }
     }
 }
 
@@ -87,7 +124,14 @@ public struct ScrollState: Sendable, Equatable {
         var copy = self
         let wasFocused = copy.focusedWindow == id
         copy.columns = copy.columns.map { col in
-            Column(windows: col.windows.filter { $0 != id }, width: col.width)
+            // Keep the surviving rows' shares; `normalize` rescales them back
+            // to 1 so the removed row's height is redistributed in proportion.
+            let keep = col.windows.enumerated().filter { $0.element != id }
+            return Column(
+                windows: keep.map(\.element),
+                width: col.width,
+                heights: keep.map { col.heights[safe: $0.offset] ?? 0 }
+            )
         }.filter { !$0.windows.isEmpty }
         copy.focusCol = min(copy.focusCol, max(copy.columns.count - 1, 0))
         if let col = copy.columns[safe: copy.focusCol] {
@@ -145,9 +189,13 @@ public struct ScrollState: Sendable, Equatable {
               let wid = focusedWindow
         else { return self }
         let target = focusCol + delta
-        guard columns.indices.contains(target) else { return self }
+        // Moving a window into the column it is already in is not a move; it
+        // used to take the window out and put it back at the bottom, which
+        // reordered the column and threw away its row heights.
+        guard delta != 0, columns.indices.contains(target) else { return self }
         var copy = self
         copy.columns[focusCol].windows.removeAll(where: { $0 == wid })
+        copy.columns[focusCol].normalize()
         var t = target
         // Drop the emptied column first so indices stay honest.
         copy.columns = copy.columns.enumerated().compactMap { (i, col) in
@@ -158,6 +206,7 @@ public struct ScrollState: Sendable, Equatable {
         if focusCol < target { t -= 1 }
         guard copy.columns.indices.contains(t) else { return self }
         copy.columns[t].windows.append(wid)
+        copy.columns[t].normalize()
         copy.focusCol = t
         copy.focusRow = copy.columns[t].windows.count - 1
         return copy
@@ -186,6 +235,30 @@ public struct ScrollState: Sendable, Equatable {
         return copy
     }
 
+    /// Nudge the boundary below the focused row, as a fraction of the column
+    /// height. The row below gives up exactly what the focused one gains, so
+    /// the column still fills its height. The last row in a column pushes the
+    /// boundary *above* it instead — otherwise the bottom window was the one
+    /// window in the strip that could not be resized.
+    public func adjustingHeight(_ delta: Double) -> ScrollState {
+        guard columns.indices.contains(focusCol) else { return self }
+        var col = columns[focusCol]
+        let n = col.windows.count
+        guard n > 1, col.heights.count == n else { return self }
+        let row = min(max(focusRow, 0), n - 1)
+        // Which pair of adjacent rows the boundary sits between, and which of
+        // the two grows for a positive delta.
+        let (grow, shrink) = row < n - 1 ? (row, row + 1) : (row, row - 1)
+        let minShare = 0.08
+        let d = min(max(delta, minShare - col.heights[grow]), col.heights[shrink] - minShare)
+        guard abs(d) > 1e-9 else { return self }
+        col.heights[grow] += d
+        col.heights[shrink] -= d
+        var copy = self
+        copy.columns[focusCol] = col
+        return copy
+    }
+
     /// Swap two windows' positions (may span columns). Focus stays on `a`.
     public func swapping(_ a: WindowID, _ b: WindowID) -> ScrollState {
         guard a != b, windows.contains(a), windows.contains(b) else { return self }
@@ -193,7 +266,8 @@ public struct ScrollState: Sendable, Equatable {
         copy.columns = copy.columns.map { col in
             Column(
                 windows: col.windows.map { $0 == a ? b : ($0 == b ? a : $0) },
-                width: col.width
+                width: col.width,
+                heights: col.heights
             )
         }
         return copy.focusing(a)
@@ -256,6 +330,7 @@ public struct ScrollView: Codable, Sendable, Equatable {
     public struct ColumnView: Codable, Sendable, Equatable {
         public var windows: [WindowID]
         public var width: Double
+        public var heights: [Double]
     }
 
     public var columns: [ColumnView]
@@ -266,7 +341,9 @@ public struct ScrollView: Codable, Sendable, Equatable {
 
     public static func of(_ state: ScrollState) -> ScrollView {
         ScrollView(
-            columns: state.columns.map { ColumnView(windows: $0.windows, width: $0.width) },
+            columns: state.columns.map {
+                ColumnView(windows: $0.windows, width: $0.width, heights: $0.heights)
+            },
             focusCol: state.focusCol,
             focusRow: state.focusRow,
             viewportX: state.viewportX,
@@ -321,19 +398,24 @@ public func scrollLayout(
         // Half-gap inset per side so columns don't touch (parking math stays
         // on raw strip widths — conservative, keeps marginal columns alive).
         let drawW = max(col.width * usableW - gap, 1)
-        // Rows split the column height equally, inner gaps between.
+        // Rows divide the column height by their stored shares (equal until
+        // something resizes them), inner gaps between.
         let n = max(col.windows.count, 1)
         let totalGap = gap * Double(max(n - 1, 0))
-        let rowH = max((usableH - totalGap) / Double(n), 1)
+        let avail = max(usableH - totalGap, 1)
         var y = baseY
         for (r, wid) in col.windows.enumerated() {
-            let h = (r == n - 1) ? (baseY + usableH - y) : rowH
+            let share = col.heights[safe: r] ?? 1.0 / Double(n)
+            // Last row takes the remainder so rounding never leaks a pixel.
+            let h = (r == n - 1) ? (baseY + usableH - y) : avail * share
             frames[wid] = Frame(x: drawX, y: y, width: drawW, height: max(h, 1))
             y += h + gap
         }
     }
+    // Same as the bsp path: zoom fills the tiling area, gaps and reserve
+    // included, rather than the whole display.
     if let fs = state.fullscreen, state.windows.contains(fs) {
-        frames[fs] = screen
+        frames[fs] = Frame(x: baseX, y: baseY, width: usableW, height: usableH)
     }
     return (frames, parked)
 }

@@ -252,6 +252,35 @@ AX is used **only** for: creating observers, setting position/size, raising, and
 `AXUIElement` ↔ `CGWindowID` via `_AXUIElementGetWindow`. Reading geometry through AX — which
 is where a lot of WM latency traditionally goes — never happens.
 
+### 5.1a What counts as a tileable window
+
+`CGWindowList` filtering (layer 0, both dimensions over 100px) is not enough, and neither
+is the AX subrole on its own:
+
+- A menu-bar extra's panel — Stats, iStat, a Now Playing popover — is a layer-0 window
+  bigger than 100×100. Its subrole is `AXSystemDialog` / `AXUnknown`, so the subrole test
+  catches it.
+- An Electron popup — Mattermost's in-call widget, a Slack huddle badge — reports
+  `AXStandardWindow` and is caught by nothing. It is **fixed-size**, though, and a window
+  the app will not resize cannot hold a tile: given a slot it keeps its own 470×180, ignores
+  the frame, and the layout has silently handed a quarter of the screen to a badge.
+
+So `AXApplier.classify` asks three questions, in one batch on the app's own queue:
+subrole is `AXStandardWindow`; `AXSize` is settable; and — for windows under 480×320 only —
+at least one title-bar button exists (close, minimise or full-screen). The size gate on the
+last test matters: a legitimately chromeless window (a game, a kiosk view) is always large,
+and floating one of those is much worse than tiling a badge.
+
+`nil` means *cannot tell* — the app is not AX-enumerable right now (S0), the window is on an
+unvisited space. Callers must re-ask, never read it as "no": answering no on a cold read
+would unmanage every window on every space the user has not visited yet. The answer is
+cached for the window's lifetime and `weftctl retile` forgives it, because every part of it
+is a heuristic and a heuristic needs a way back.
+
+`weftctl query windows` reports the verdict per window in a `floating` field
+(`manual` / `popup` / `quirk` / `rule`, absent when the window is tiled). Nothing was
+harder to debug from outside than a window weft had quietly decided not to manage.
+
 ### 5.2 AX hardening
 
 - `AXUIElementSetMessagingTimeout(appRef, 0.15)` on **every** app element at creation. Without
@@ -317,6 +346,32 @@ is where a lot of WM latency traditionally goes — never happens.
   / `...ByUserInput`, which is a footgun almost every event-tap implementation hits once.
 - Modes (`default`, `resize`, arbitrary user modes), leader/chord sequences, per-space and
   per-app conditional binds.
+- **Mouse.** The tap also carries `left/rightMouseDown|Dragged|Up`. Two ways in:
+  - *Modifier drag* (`mouse-modifier`, default `alt`): left drags a floating window's
+    body, right resizes.
+  - *Border drag* (`mouse-border-resize`, default on): a **plain** click is claimed only
+    when it lands inside a border's grab strip. The daemon publishes those strips as a flat
+    `[Frame]` to the tap on every layout apply, and the callback point-tests them and
+    returns — it may not ask the daemon, because it may not block. Every other unmodified
+    click passes through untouched, which is the property that makes claiming bare clicks
+    acceptable at all.
+- Border geometry is pure (`WeftCore/Dividers.swift`) and derived from the computed frames
+  rather than the tree, so it works identically for `bsp` and `scroll`: adjacency in a tiled
+  layout *is* "two frames separated by at most the inner gap, overlapping on the other
+  axis". Overlapping frames — stack members sharing a slot — are never adjacent, which is
+  correct: there is no border between two windows in the same place.
+- Dragging a border uses `Tree.resizing(divider:_:axis:deltaPoints:frames:)`, not the
+  keybind resize. The keybind one walks down from the root and adjusts the first container
+  matching the axis, which is right for "resize my window" and wrong for a drag: in
+  `splitV[splitV[A, B], C]` it moves the (AB)|C divider while the cursor is holding A|B.
+  The divider version finds the deepest container separating the pair and measures the ratio
+  delta against those two children's on-screen extent, so N points of mouse is N points of
+  border however deep it sits.
+- Drag frame writes are **latest-wins coalesced**: at most one apply in flight, newest
+  target replaces any waiting. A mouse reports every 8 ms and an AX frame write costs
+  single-digit milliseconds, so one apply per event builds a backlog the drag never catches
+  up with — the window keeps resizing after the button comes up. Intermediate frames of a
+  drag are worth nothing once a newer one exists.
 - vs. skhd: no `fork`+`exec` per keypress. Keypress → command dispatch is sub-millisecond.
 - A `weftctl` socket path still exists so Raycast/scripts/skhd can drive the same commands.
 
