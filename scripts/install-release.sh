@@ -41,10 +41,35 @@ if [ -d "$HERE/bin" ] && [ -d "$HERE/WeftBar.app" ]; then
 else
     command -v curl >/dev/null || die "curl is required."
 
+    # Retry, always. A release asset is served from a CDN that is reachable
+    # from most places most of the time and from some places only some of the
+    # time — one transient `SSL_ERROR_SYSCALL` used to end the install with a
+    # bare "could not download". Measured from a connection that fails this way
+    # roughly one attempt in three: the retries turn that into a success.
+    # --retry-all-errors is what covers connection resets; plain --retry only
+    # covers HTTP 5xx and would not have helped here.
+    #
+    # Quiet by default: a recovered attempt printing `curl: (35) ...` mid
+    # install reads as a failure to anyone who is not already debugging one,
+    # and the whole point is that it recovered. WEFT_VERBOSE=1 puts it back for
+    # a support conversation; a total failure explains itself either way.
+    fetch() {
+        if [ "${WEFT_VERBOSE:-0}" = 1 ]; then
+            curl -fsSL --connect-timeout 20 --max-time 600 \
+                 --retry 5 --retry-delay 2 --retry-all-errors "$@"
+        else
+            curl -fsL --connect-timeout 20 --max-time 600 \
+                 --retry 5 --retry-delay 2 --retry-all-errors "$@" 2>/dev/null
+        fi
+    }
+
     TAG="${WEFT_VERSION:-}"
+    RELEASE_JSON=""
     if [ -z "$TAG" ]; then
         say "looking up the latest release"
-        TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+        RELEASE_JSON=$(fetch -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/latest" || true)
+        TAG=$(printf '%s\n' "$RELEASE_JSON" \
               | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
         [ -n "$TAG" ] || die "could not determine the latest release. Set WEFT_VERSION=vX.Y.Z, or build from source: https://github.com/$REPO"
     fi
@@ -52,14 +77,45 @@ else
     ASSET="weft-$VERSION-macos-universal.tar.gz"
     BASE="https://github.com/$REPO/releases/download/$TAG"
 
+    # The id of a named asset, for the api.github.com download route.
+    asset_id() {
+        [ -n "$RELEASE_JSON" ] || RELEASE_JSON=$(fetch -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/tags/$TAG" || true)
+        printf '%s\n' "$RELEASE_JSON" | awk -v want="$1" '
+            /"id":/   { if (match($0, /[0-9]+/)) id = substr($0, RSTART, RLENGTH) }
+            /"name":/ { if (index($0, "\"" want "\"")) { print id; exit } }'
+    }
+
+    # Two routes to the same bytes. The plain download URL redirects to the
+    # asset CDN; api.github.com streams the asset itself and, where the CDN is
+    # unreliable, is markedly steadier — so it is the fallback rather than a
+    # second try at the host that just failed.
+    download() {
+        name="$1" out="$2"
+        fetch -o "$out" "$BASE/$name" && return 0
+        id=$(asset_id "$name")
+        [ -n "$id" ] || return 1
+        warn "asset CDN unreachable; retrying via api.github.com"
+        fetch -H "Accept: application/octet-stream" -o "$out" \
+            "https://api.github.com/repos/$REPO/releases/assets/$id"
+    }
+
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
     say "downloading weft $VERSION"
-    curl -fsSL "$BASE/$ASSET" -o "$TMP/$ASSET" \
-        || die "could not download $BASE/$ASSET"
+    download "$ASSET" "$TMP/$ASSET" || die "could not download $ASSET.
+
+  Both routes failed, which usually means the network is blocking or throttling
+  GitHub rather than that the release is missing. Options:
+    - try again in a moment, or on a different connection
+    - download it by hand and run ./install.sh from the unpacked folder:
+        $BASE/$ASSET
+    - build from source: https://github.com/$REPO
+
+  Re-run with WEFT_VERBOSE=1 to see what curl reported."
 
     # Verify before unpacking anything, not after.
-    if curl -fsSL "$BASE/$ASSET.sha256" -o "$TMP/$ASSET.sha256" 2>/dev/null; then
+    if download "$ASSET.sha256" "$TMP/$ASSET.sha256" 2>/dev/null; then
         say "verifying checksum"
         expected=$(cut -d' ' -f1 < "$TMP/$ASSET.sha256")
         actual=$(shasum -a 256 "$TMP/$ASSET" | cut -d' ' -f1)

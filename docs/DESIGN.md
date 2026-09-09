@@ -1531,3 +1531,33 @@ horizontally as well as vertically. Any future pane that wants more width than
 it has now scrolls inside its own column instead of shoving the navigation off
 screen. The identical four-field group under "Screen reserve" was one edit away
 from the same bug and now shares the wrapping component.
+
+### 21.4 One dropped connection ended the install
+
+The first real `curl | bash` install failed on the release asset:
+
+```
+curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to release-assets.githubusercontent.com:443
+ERROR: could not download .../weft-0.1.0-macos-universal.tar.gz
+```
+
+Not a block — measured from the same connection, the download succeeded twice
+in three attempts. The installer simply had no retry anywhere: one `curl -fsSL`
+per file, and any transient reset ended the install with a bare "could not
+download" and nothing to do about it.
+
+Every fetch now retries with backoff. `--retry-all-errors` is the flag that
+matters: plain `--retry` covers HTTP 5xx and would not have caught a connection
+reset, which is the failure that actually happens. Retries are silent, because
+a recovered attempt printing `curl: (35)` mid-install reads as a failure to
+exactly the audience this is for; `WEFT_VERBOSE=1` puts it back.
+
+There is also a second route. The download URL redirects to the asset CDN;
+`api.github.com` streams the asset itself and, from a connection where the CDN
+is unreliable, is markedly steadier — three for three where the CDN managed two.
+So it is a fallback rather than another try at the host that just failed.
+Verified by pointing the primary route at a repository that does not exist: the
+install fell through to the API, verified the checksum and completed.
+
+Because `curl | bash` fetches this script from `main`, the fix reaches users
+without re-cutting the release.
