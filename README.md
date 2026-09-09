@@ -375,6 +375,7 @@ recorded, not by guessing. Your `~/.config/weft` is left alone.
 | `Sources/weft-bar` | The menu-bar app, Settings, cheatsheet, switcher. |
 | `docs/DESIGN.md` | Why things are the way they are, including the mistakes. |
 | `docs/TESTING.md` | The manual test matrix. |
+| `docs/TODO.md` | What is queued next, and what each item already has in place. |
 
 ## License
 
