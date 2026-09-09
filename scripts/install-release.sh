@@ -97,12 +97,22 @@ else
     # second try at the host that just failed.
     download() {
         name="$1" out="$2"
-        fetch -o "$out" "$BASE/$name" && return 0
+        progress=()
+        if [ "${WEFT_VERBOSE:-0}" = 1 ]; then
+            progress=("-v")
+        else
+            progress=("--progress-bar")
+        fi
+        curl -fL "${progress[@]}" --connect-timeout 20 --max-time 600 \
+             --retry 5 --retry-delay 2 --retry-all-errors \
+             -o "$out" "$BASE/$name" && return 0
         id=$(asset_id "$name")
         [ -n "$id" ] || return 1
         warn "asset CDN unreachable; retrying via api.github.com"
-        fetch -H "Accept: application/octet-stream" -o "$out" \
-            "https://api.github.com/repos/$REPO/releases/assets/$id"
+        curl -fL "${progress[@]}" --connect-timeout 20 --max-time 600 \
+             --retry 5 --retry-delay 2 --retry-all-errors \
+             -H "Accept: application/octet-stream" -o "$out" \
+             "https://api.github.com/repos/$REPO/releases/assets/$id"
     }
 
     TMP="$(mktemp -d)"
