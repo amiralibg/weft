@@ -116,6 +116,15 @@ extension Node {
 public struct TilingConfig: Sendable, Equatable {
     public var innerGap: Double
     public var outerGap: OuterGap
+    /// How far each stacked window is inset from the one behind it.
+    ///
+    /// A stack used to give every member the identical frame, which is
+    /// correct and unreadable: the slot looks exactly like a single window,
+    /// and nothing on screen says the other members are there. Insetting each
+    /// layer leaves the ones behind peeking out along two edges — the same
+    /// affordance AeroSpace uses, and the reason a stack is discoverable at
+    /// all. 0 restores the flat behaviour.
+    public var stackOffset: Double
 
     public struct OuterGap: Sendable, Equatable {
         public var top: Double
@@ -131,14 +140,23 @@ public struct TilingConfig: Sendable, Equatable {
         }
     }
 
-    public init(innerGap: Double = 8, outerGap: OuterGap = OuterGap(top: 8, bottom: 8, left: 8, right: 8)) {
+    public init(
+        innerGap: Double = 8,
+        outerGap: OuterGap = OuterGap(top: 8, bottom: 8, left: 8, right: 8),
+        stackOffset: Double = 8
+    ) {
         self.innerGap = innerGap
         self.outerGap = outerGap
+        self.stackOffset = stackOffset
     }
 
+    /// Every spacing knob at zero — gaps and the stack offset alike. Used by
+    /// tests that assert exact geometry, and by anyone who wants windows
+    /// edge to edge.
     public static let none = TilingConfig(
         innerGap: 0,
-        outerGap: OuterGap(top: 0, bottom: 0, left: 0, right: 0)
+        outerGap: OuterGap(top: 0, bottom: 0, left: 0, right: 0),
+        stackOffset: 0
     )
 }
 
@@ -158,31 +176,65 @@ public func layout(_ tree: Tree, in screen: Frame, config: TilingConfig) -> [Win
             out[id] = screen
             return out
         }
-        layoutNode(root, in: inset, innerGap: config.innerGap, out: &out)
+        layoutNode(root, in: inset, innerGap: config.innerGap, stackOffset: config.stackOffset, out: &out)
         out[fs] = screen
         return out
     }
     // Single window: no inner gap (edge-to-edge inside the outer inset).
     if case .window(let id) = root { return [id: inset] }
     var out: [WindowID: Frame] = [:]
-    layoutNode(root, in: inset, innerGap: config.innerGap, out: &out)
+    layoutNode(root, in: inset, innerGap: config.innerGap,
+               stackOffset: config.stackOffset, out: &out)
     return out
 }
 
-private func layoutNode(_ node: Node, in frame: Frame, innerGap: Double, out: inout [WindowID: Frame]) {
+/// How many layers of a stack are drawn peeking out behind the active one.
+///
+/// Without a cap, a six-window stack shrinks its active member by six offsets
+/// and the slot visibly shrinks as you add windows. Three edges is enough to
+/// read as "there is a pile here"; past that it is just lost space.
+private let maxVisibleStackLayers = 3
+
+private func layoutNode(
+    _ node: Node, in frame: Frame, innerGap: Double, stackOffset: Double,
+    out: inout [WindowID: Frame]
+) {
     switch node {
     case .window(let id):
         out[id] = frame
     case .container(let c):
         let n = c.children.count
         guard n > 0 else { return }
-        if n == 1 { layoutNode(c.children[0], in: frame, innerGap: innerGap, out: &out); return }
-        // Stack: every member gets the *same* frame (the slot). Members fill
-        // it edge-to-edge — no inner gap between overlapped windows. Only
-        // z-order (the active index) distinguishes them at render time.
+        if n == 1 {
+            layoutNode(c.children[0], in: frame, innerGap: innerGap,
+                       stackOffset: stackOffset, out: &out)
+            return
+        }
+        // Stack: the members share one slot, so the only thing that can say
+        // there is more than one window here is geometry. Each member is
+        // inset from the one behind it, deepest at the back, so the active
+        // member sits on top and slightly smaller with the others showing
+        // along its top-left edges — a deck of cards rather than a single
+        // window that mysteriously swaps contents.
         if c.layout == .stack {
-            for child in c.children {
-                layoutNode(child, in: frame, innerGap: innerGap, out: &out)
+            let active = min(max(c.active, 0), n - 1)
+            for (i, child) in c.children.enumerated() {
+                // Distance from the back of the pile, capped: the active
+                // member is frontmost regardless of its index.
+                let depth = i == active
+                    ? min(n - 1, maxVisibleStackLayers)
+                    : min(abs(i - active) - 1, maxVisibleStackLayers - 1)
+                let d = stackOffset * Double(max(depth, 0))
+                // Inset from the top-left and shrink to match, so every
+                // member's bottom-right corner stays on the slot's.
+                let slot = Frame(
+                    x: frame.x + d,
+                    y: frame.y + d,
+                    width: max(frame.width - d, 1),
+                    height: max(frame.height - d, 1)
+                )
+                layoutNode(child, in: slot, innerGap: innerGap,
+                           stackOffset: stackOffset, out: &out)
             }
             return
         }
@@ -198,7 +250,7 @@ private func layoutNode(_ node: Node, in frame: Frame, innerGap: Double, out: in
                 layoutNode(
                     child,
                     in: Frame(x: x, y: frame.y, width: max(w, 1), height: frame.height),
-                    innerGap: innerGap, out: &out
+                    innerGap: innerGap, stackOffset: stackOffset, out: &out
                 )
                 x += w + innerGap
             }
@@ -211,7 +263,7 @@ private func layoutNode(_ node: Node, in frame: Frame, innerGap: Double, out: in
                 layoutNode(
                     child,
                     in: Frame(x: frame.x, y: y, width: frame.width, height: max(h, 1)),
-                    innerGap: innerGap, out: &out
+                    innerGap: innerGap, stackOffset: stackOffset, out: &out
                 )
                 y += h + innerGap
             }
@@ -361,11 +413,20 @@ extension Tree {
         return copy.focusing(a)
     }
 
-    /// i3-style `layout stacked`: convert the focused window's parent
-    /// container into a stack. Already in a stack → no-op. Lone root leaf →
-    /// a 1-member stack (setup for future inserts, which join stacks).
-    public func wrappingInStack() -> Tree {
+    /// i3-style `layout stacked`, as a toggle: the focused window's parent
+    /// container becomes a stack, and a focused window that is *already* in a
+    /// stack comes back out of it.
+    ///
+    /// The no-op it used to be on an existing stack is what made stacking feel
+    /// like a trapdoor — one key in, and no obvious key back out, so the
+    /// honest thing for one key to do is undo itself. `stack unstack` is still
+    /// there for anyone who wants the one-way version bound separately.
+    ///
+    /// Lone root leaf → a 1-member stack (setup for future inserts, which
+    /// join stacks).
+    public func togglingStack() -> Tree {
         guard let root, let focused = focus, root.windows.contains(focused) else { return self }
+        if stackPath(in: root, target: focused) != nil { return unstacking() }
         guard let path = pathTo(root, target: focused) else { return self }
         if path.isEmpty {
             var copy = self

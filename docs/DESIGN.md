@@ -1167,3 +1167,367 @@ Two bugs fell out of writing the tests:
   declaring none, the failure mode is a *number* past the last desktop —
   `space focus 4` on a two-desktop Mac — which was invisible to it. It now
   reports both, and no longer returns early when the config declares no spaces.
+
+## 18. The green wall — 2026-09-08
+
+Install, grant Accessibility in the one modal macOS shows, and Setup jumped
+straight to **"Everything required is granted"** — for an Input Monitoring
+switch the user had never seen, let alone flipped. Pressing Finish relaunched
+WeftBar into the same screen. Then again. There was no way out of the flow
+except closing the window.
+
+Two bugs, and they compound: the first makes Setup *lie*, the second makes it
+say so *forever*.
+
+### 18.1 A live event tap is not an Input Monitoring grant
+
+§17.1 made `query permissions` report Input Monitoring from `input.ensureTap()`
+rather than a preflight, and for its own purpose that is right: the tap is what
+keybinds run on, and it can fail where a preflight passes. What it missed is
+that the reverse also holds. macOS lets a process that already holds
+Accessibility create a `CGEventTap` — Input Monitoring is a second, independent
+route to the same capability, not a prerequisite. So on a machine where
+Accessibility had just been granted:
+
+```
+accessibility:    true
+inputMonitoring:  ensureTap() -> true    # the switch is off
+```
+
+Both required rows went green off one grant. Every downstream consumer inherited
+it: the progress bar read 2 of 2, `advanceStep()` found nothing left to ask for
+and fell through to the done page, `weftctl doctor` printed a checkmark, and the
+Settings sidebar said the engine was healthy. All of them correct about whether
+weft *works*, all of them wrong about what the user had done — and the user is
+the one who has to go find that switch when it matters.
+
+The fix is to stop answering two questions with one field. `DaemonPermissions`
+now carries both:
+
+| field | source | question it answers |
+|---|---|---|
+| `inputMonitoring` | `CGPreflightListenEventAccess()` | is the switch on? |
+| `keybindsLive` | `input.ensureTap()` | do keybinds fire? |
+
+`SetupModel` splits along the same seam. `granted(_:)` is the switch and feeds
+every label; `satisfied(_:)` is the capability and drives every decision — which
+step is next, when the flow advances, what the progress bar counts. Nobody is
+stopped on a step that already works, and nobody is told they granted something
+they did not. Where the two disagree the card says **Covered**, not *Granted*,
+with the reason in the subtitle. `keybindsLive` decodes as optional so a newer
+WeftBar still reads an older daemon.
+
+The done page lost its summary sentence in the process. "Everything required is
+granted" is the one claim on that screen a user cannot check, and when it was
+wrong nothing on the page contradicted it. Three rows naming each permission and
+what it currently reads cost the same vertical space and cannot lie.
+
+### 18.2 Finish restarted the daemon, then asked it a question
+
+`finish()` writes `~/.config/weft/.onboarded`, restarts weftd, and relaunches
+WeftBar so its Carbon hotkeys re-register under the new grants. The relaunched
+instance then decides whether to show Setup:
+
+```swift
+if !FileManager.default.fileExists(atPath: flagURL.path) { return true }
+return !shared.allGreen()          // one blocking round trip, no retry
+```
+
+`launchctl kickstart -k` returns as soon as it has signalled. For a second or so
+after it there is no socket to connect to — and that second is precisely when
+the relaunched WeftBar asks. `allGreen()` got nothing back, could not tell "the
+daemon says a permission is missing" from "the daemon has not opened its socket
+yet", and returned false for both. Setup reopened. Finish restarted the daemon
+again. The loop was self-sustaining and had nothing to do with permissions:
+granting the missing switch would not have broken it, because the query never
+reached a daemon either way.
+
+Silence is not an answer, so it no longer counts as one:
+
+- `awaitDaemon(timeout:)` polls the socket every 300 ms until weftd replies,
+  giving it six seconds to finish coming up. `finish()` waits on it before
+  relaunching, so the successor starts against a daemon that can talk.
+- `shouldShow()` is async and reopens Setup only when weftd *answers* and
+  reports something missing. A daemon that never answers means the engine is
+  down, which is a service problem Setup has no fix for — `weftctl doctor` and
+  the Settings sidebar both say so plainly.
+
+The first-run path is untouched: with no flag on disk, Setup always shows.
+
+## 19. The grant that was never really there — 2026-09-08
+
+Reported as "onboarding lied and then looped". §18 fixed the lying and the
+looping. Reinstalling to test the fix reproduced the *original* complaint
+instead — windows floating free, no keybinds, nothing tiling — with a fully
+green doctor sitting next to it. The onboarding was never the disease.
+
+### 19.1 The log named a cause it had not checked
+
+Every failure printed the same line:
+
+```
+weftd: frame-set failed for [238, 1603] (app ignored/timeout)
+```
+
+"app ignored/timeout" was a guess baked into the format string. The frame-set
+protocol has four distinct ways to fail — the WindowServer refusing
+`SLSMoveWindow`, no AX element, unreadable bounds, an app that kept its own
+geometry — and only one of them is a timeout. It was reporting the wrong one,
+and that sent the first hour of diagnosis at app quirks.
+
+`setFrameOnQueue` now returns a `FailureReason?` instead of a `Bool`; it always
+knew which step it failed at, it just was not saying. The line became:
+
+```
+weftd: frame-set failed — 238: no AX element and the WindowServer move did not land
+weftd: accessibility permission missing — requesting prompt
+```
+
+Which is a different bug entirely.
+
+### 19.2 Every rebuild silently revoked weft's permissions
+
+macOS stores a TCC grant against a program's **designated requirement**.
+`swift build` leaves binaries ad-hoc, linker-signed — no identity to name — so
+the requirement degrades to the code directory hash:
+
+```
+designated => cdhash H"3c959e1f…"      # different after every build
+```
+
+`install.sh` rebuilds weftd. So every install, and every update, produced a
+program that macOS considered unrelated to the one the user had granted. That
+alone would be survivable if TCC cleared the row. It does not: **the switch in
+System Settings stays visibly ON**. The user opens the pane they were sent to,
+finds weftd already enabled, and has nothing to do — while weftd is trusted for
+nothing, every AX frame-set is refused, and weft auto-floats each window as a
+"refuser quirk". The visible result is a window manager that does not manage
+windows, with no error anywhere pointing at permissions.
+
+Signing with a certificate — any certificate, including one we generate — moves
+the requirement off the bytes:
+
+```
+designated => identifier "com.weft.weftd" and certificate leaf = H"a012e0d5…"
+```
+
+`scripts/lib-codesign.sh` creates one self-signed code-signing identity on first
+install and signs every binary with it, passing an explicit `--identifier` so
+the requirement does not vary with the file's path. Three details that took a
+try each to get right:
+
+- **Its own keychain, not the login keychain.** `codesign` must reach the
+  private key without a GUI authorization dialog, which needs
+  `security set-key-partition-list` — which needs the keychain's password. We
+  know the password of a keychain we created; the alternative is prompting for
+  the user's login password mid-install.
+- **The certificate is deliberately not trusted.** `codesign` signs happily
+  with an untrusted self-signed cert (`find-identity -v` lists zero identities,
+  which is expected and misleading). Trusting it needs an admin prompt and buys
+  nothing: TCC matches the requirement, it does not walk a trust chain.
+- **`--identifier` is not optional.** Left alone, `codesign` derives the
+  identifier from the file name, so the same binary at `.build/release/weftd`
+  and at `~/.local/bin/weftd` would satisfy two different requirements.
+
+Verified end to end against live TCC rather than by argument: grant all three
+permissions, change a string in `weftd`, reinstall, confirm the new binary is
+the one running (`cdhash 3c959e1f…` → `e381b86f…`, probe string in the log) —
+and all three grants still read `true`. Before this change that sequence
+revoked every one of them.
+
+`weftd` reports `stableIdentity` alongside the grants, from
+`Permissions.hasStableSigningIdentity()` (ad-hoc signatures carry no
+certificates, so a certificate chain is the whole test). When it is false and
+something is missing, Setup leads with the only instruction that works —
+*the switch is probably already on; turn it off, then on again* — and `doctor`
+says the same before its per-permission verdicts, because that fact changes how
+to read all of them.
+
+### 19.3 Reinstalling did not reinstall
+
+`weftctl service install` ran `launchctl bootstrap` on a service that was
+already loaded, which fails with `5: Input/output error` and does nothing. The
+previous weftd kept running from the previous binary — so an install over an
+existing install put new binaries on disk and left the old one driving the
+windows. It boots the service out first now.
+
+### 19.4 Screen Recording is not optional
+
+It had been waved through as "only the focus highlight. Tiling works without
+it." What it actually gates is `kCGWindowName`: without it macOS redacts the
+title of every window weftd does not own, and `query windows` returns
+`"title": ""` across the board. Every title-matching rule then matches nothing,
+silently, and the window switcher lists blank rows — which reads as "weft
+ignores my rules", not as a missing permission. It is required in `isRequired`,
+in `DaemonPermissions.ready`, and in `doctor`.
+
+## 20. Four things that were not the window manager's fault — 2026-09-09
+
+A round of "it does not feel finished" reports, each with a different cause.
+
+### 20.1 Dragging to resize a tiled window did nothing
+
+The tiled branch of a modifier + right-drag emitted a resize only when a
+*single* drag event carried more than 8 points, and threw the rest away:
+
+```swift
+if abs(dx) >= 8 { _ = handleCommand("resize \(dir) \(abs(dx))") }
+```
+
+A mouse reports one to five points per event. Nothing ever cleared the bar
+except a flick, so the feature read as unimplemented. The remainder is carried
+in the drag state now, so slow drags resize smoothly and fast ones behave as
+before. Floating windows were never affected — they take the delta directly,
+which is why this looked like "resize works sometimes".
+
+### 20.2 The focus highlight stayed on the window you just left
+
+Reported as a JankyBorders bug. It was three, in the same call.
+
+`focusWindow` raised the window and activated the app, and did nothing else.
+Neither tells the *application* which of its windows is now focused, so its
+`AXFocusedWindow` never moved: focusing the second of two Ghostty windows
+raised the right one and left the app focused on the first. Anything reading
+real focus — borders, sketchybar, `mouse-follows-focus` — followed the app, not
+weft. Setting `AXMain` then `AXFocused` on the element is what moves it.
+
+Then two smaller ones underneath:
+
+- The element was looked up in `windowElements`, never resolved. That cache is
+  populated as a side effect of *writing a frame*, so a window that had never
+  been laid out had no entry and focusing it did nothing at all, silently.
+- `activate()` went out on its own queue, in parallel with the AX writes.
+  Activating an app makes macOS restore that app's own key window, so when it
+  won the race it undid the `AXMain` write that had just landed. It is
+  sequenced after the writes now.
+
+### 20.3 Stacks were invisible, and one-way
+
+A stack gave every member the identical frame. That is what a stack *is*, and
+it is unreadable: the slot looks exactly like a single window, with nothing on
+screen to say the others are there. Members are now inset from the one behind
+them (`stack-offset`, default 8, capped at three visible layers so a deep stack
+does not shrink its own slot away) — the ones behind peek out along two edges,
+the same affordance AeroSpace uses.
+
+`stack wrap` was also a documented no-op on a window already in a stack: one
+key in, no key out unless you had separately bound `stack unstack`. It is
+`stack toggle` now, and `wrap` still parses to it because that is what every
+existing config says.
+
+### 20.4 Menu-bar panels were being tiled
+
+A Stats or Ice dropdown is layer 0 and larger than 100×100, so the geometry
+filter in `readWindows` waved it straight through: it took a slot in the
+layout, and because weft focused and raised it, the click-outside that normally
+dismisses such a panel never reached it — the only way to close it was to click
+its menu bar icon again.
+
+Every one of these belongs to an agent app: `LSUIElement`, no Dock icon,
+`.accessory` activation policy. That is the whole test, and it costs a cached
+`NSRunningApplication` lookup rather than the AX subrole round trip this path is
+not allowed to make. `manage-menubar-apps = true` opts back in, for the rare
+real app that runs as an agent.
+
+### 20.5 Setup could be closed with nothing granted
+
+A half-granted weft is not a degraded weft: windows float free, keybinds do
+nothing, and window titles come back empty, with nothing anywhere naming a
+permission as the reason. The one window that explains that had a Close button
+on every page. It is gone until `ready`, along with the title bar's close
+button and ⌘W; a refused dismiss says why rather than silently not closing.
+A daemon that is not answering is still dismissable — there is nothing to grant
+against, and trapping someone in a window that cannot help them is its own bug.
+
+### 20.6 A rule-placed window was laid out by the wrong space
+
+Two terminals opened one after the other landed on exactly the same pixels, one
+invisible underneath the other, and the focus highlight appeared to follow only
+the newer one. `query windows` told the story:
+
+```
+id=2376  sp=[6]                 # where SLS says the window is
+space 5 'web'  windows=[156, 2376]   # where weft was laying it out from
+```
+
+The two phases of `syncFromSnapshot` disagree by construction. Phase 2, on the
+core queue, files every window under the space the snapshot reported for it.
+Phase 3, off it, performs the space-placement rules — a socket round trip and a
+settle sleep, which is exactly why it is not on the core queue. So a window a
+rule relocates has already been filed under the space it was *created* on, and
+the layout that owns it is the wrong one from that moment forward.
+
+Nothing brought it back: moving a window between spaces produces no event weft
+observes, so on an otherwise idle desktop no further sweep ever ran and the
+membership stayed wrong for the life of the window. Both terminals then
+computed the east half of their own space's layout — same screen, same split,
+same coordinates.
+
+A successful rule move now schedules one follow-up sweep, 250 ms later, which
+re-runs the real membership logic against where the windows actually are.
+`spaceMoveAttempts` already caps each window at one move per lifetime, so the
+extra pass cannot move anything again and cannot feed itself.
+
+## 21. Shipping 0.1.0 — 2026-09-09
+
+### 21.1 Nothing would ever tell a user a fix existed
+
+weft installs from `curl | bash` or a clone. There is no App Store, no Sparkle
+feed, no package manager — so an install stays on whatever version it started
+on until its owner independently decides to revisit the repository, which is to
+say forever. Every fix in §18–§20 would have reached nobody.
+
+`UpdateCheck` asks GitHub's releases API once a day, caches the answer in
+`~/.config/weft/.update-check.json`, and WeftBar shows one menu item when the
+published tag is newer than the running build. It is deliberately a *notifier*,
+not an updater: it downloads nothing and replaces nothing. Swapping a running
+window manager's binaries underneath itself — while it holds an event tap and
+every window on the desktop — is a much larger promise than a menu line, and
+not one worth making for a first release.
+
+Three details that matter more than the feature:
+
+- **Versions compare numerically.** The bug every hand-rolled update check
+  ships with is `String` comparison, where `"0.10.0" < "0.9.0"` and the tenth
+  release is never offered to anyone. `WeftVersion.isNewer` splits and compares
+  component-wise, treats a missing component as 0 so `0.2` and `0.2.0` are one
+  release, and drops pre-release suffixes rather than throwing on them. Four
+  tests, because this is exactly the code nobody notices is broken until the
+  release that breaks it.
+- **Failure is silent.** No network, a rate limit, GitHub down — none of these
+  are the user's problem and none should produce a dialog in a window manager.
+  The stale answer is kept and the next check happens on schedule.
+- **`check-for-updates = false`** turns it off. It is a network call a window
+  manager makes without being asked, so it gets a switch.
+
+### 21.2 The release installer left users where §19 started
+
+§19 gave `install.sh` a stable signing identity so a rebuild stops silently
+revoking weft's permissions. `install-release.sh` — the path almost every
+actual user takes — still installed whatever the workflow produced, and without
+Developer ID secrets configured that is ad-hoc signed. So the source install was
+fixed and the *shipped* install was not: every release would have dropped the
+grants again, with the switches still reading as on.
+
+It now applies the same self-signed identity, but only when the build does not
+already carry a certificate-based designated requirement — re-signing a
+notarised build would break the notarisation and buy nothing. `lib-codesign.sh`
+ships inside the release archive so the standalone `curl | bash` path has it.
+
+### 21.3 Unchecking a checkbox pushed the sidebar out of the window
+
+Settings › General › Gaps: "Same on all sides" off swaps one spin field for
+four. Four fields need ~356pt, the row spends 164 on its label, and the layout
+preview beside it takes 236 — about 1050pt of intrinsic width inside a window
+whose minimum is 880. Nothing in that column could shrink, so the `HStack`
+overflowed, and what spilled off the edge was the fixed-width sidebar: the
+navigation left the window.
+
+The fields wrap to two rows when one will not fit (`ViewThatFits`), which fixes
+the reported case. The structural guard matters more, because this was a class
+of bug rather than one instance: the sidebar takes layout priority, the detail
+column is explicitly allowed to shrink, and its `ScrollView` scrolls
+horizontally as well as vertically. Any future pane that wants more width than
+it has now scrolls inside its own column instead of shoving the navigation off
+screen. The identical four-field group under "Screen reserve" was one edit away
+from the same bug and now shares the wrapping component.

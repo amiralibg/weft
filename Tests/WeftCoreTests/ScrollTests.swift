@@ -135,7 +135,7 @@ private func strip(_ ids: WindowID...) -> ScrollState {
     let (s2, _) = Reducer.reduceScroll(s1, screen: scrollScreen, config: noGaps, command: .scroll(.widthCycle))
     #expect(abs(s2.columns[s2.focusCol].width - 0.667) < 1e-9)
     // Tiling-only commands are safe no-ops.
-    let (s3, m3) = Reducer.reduceScroll(s2, screen: scrollScreen, config: noGaps, command: .stack(.wrap))
+    let (s3, m3) = Reducer.reduceScroll(s2, screen: scrollScreen, config: noGaps, command: .stack(.toggle))
     #expect(s3 == s2 && m3.isEmpty)
 }
 

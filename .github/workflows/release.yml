@@ -148,7 +148,7 @@ jobs:
           cp -R build/WeftBar.app "$stage/"
           cp examples/weft.toml "$stage/weft.toml.example"
           cp README.md LICENSE "$stage/"
-          cp scripts/lib-agents.sh scripts/uninstall.sh "$stage/"
+          cp scripts/lib-agents.sh scripts/uninstall.sh scripts/lib-codesign.sh "$stage/"
           cp scripts/install-release.sh "$stage/install.sh"
           # No symlink dereferencing surprises, and a stable file order so the
           # checksum only changes when the contents do.
@@ -176,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           signed="ad-hoc signed"
-          caveat=$'\n> **Not notarised.** macOS quarantines anything downloaded from the internet, so\n> the installer clears that flag on the files it installs. If you prefer, inspect\n> `install.sh` in the archive before running it — it is the same script as in the repo.\n> Because the binaries are ad-hoc signed, **macOS forgets their Accessibility and\n> Input Monitoring grants on every update**: after upgrading, Setup reopens by itself\n> and you toggle `weftd` off and on again in System Settings.\n'
+          caveat=$'\n> **Not notarised.** macOS quarantines anything downloaded from the internet, so\n> the installer clears that flag on the files it installs. If you prefer, inspect\n> `install.sh` in the archive before running it — it is the same script as in the repo.\n> The installer also gives weft a stable self-signed identity on first run, so the\n> permissions you grant survive later updates rather than being silently dropped.\n'
           if [ -n "${{ steps.signing.outputs.identity }}" ]; then
             signed="signed with a Developer ID"
             caveat=""
@@ -191,8 +191,10 @@ jobs:
 
           Or download the archive below, unpack it, and run \`./install.sh\`.
 
-          Then open **WeftBar** and grant \`weftd\` Accessibility and Input Monitoring.
-          Check anything with \`weftctl doctor\`.
+          Then open **WeftBar**, which walks you through granting \`weftd\` three macOS
+          permissions: Accessibility, Input Monitoring and Screen Recording (that last
+          one is how weft reads window titles — without it, title-matching rules match
+          nothing). Check anything with \`weftctl doctor\`.
           $caveat
           ## This build
 

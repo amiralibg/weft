@@ -27,6 +27,26 @@ inner-gap = 8
 #   outer-gap = { top = 8, bottom = 8, left = 8, right = 8 }
 outer-gap = 8
 
+# How far each window in a stack sits inset from the one behind it. Stacked
+# windows share a slot, so without this a stack looks exactly like a single
+# window and there is nothing on screen to say the others are there. Set 0 for
+# flat stacks.
+stack-offset = 8
+
+# Whether to tile windows belonging to menu-bar-only apps (Stats, Ice, and
+# anything else with no Dock icon). Off, because their windows are dropdown
+# panels: tiling one gives it a slot in the layout and takes the focus that
+# clicking away would otherwise use to dismiss it, so the panel can only be
+# closed by clicking its menu bar icon again. Turn on only if you run a real
+# app as an agent and want its windows tiled.
+manage-menubar-apps = false
+
+# Ask GitHub once a day whether a newer weft has been released, and show a
+# menu-bar item when there is one. weft installs from a script or a clone, so
+# nothing else would ever tell you a fix exists. It downloads and installs
+# nothing — it shows the version and the command to run. Set false to disable.
+check-for-updates = true
+
 # Layout for any space that does not name one of its own, below.
 #   bsp    — binary split; new windows halve the focused one
 #   scroll — one window per column, scrolling sideways
@@ -90,7 +110,8 @@ reserve = 0
 "alt-b" = "balance"
 
 # Stacks: several windows sharing one slot, one visible at a time.
-"alt-w" = "stack wrap"
+# Toggle: stacks the focused window's neighbours, and takes it back out.
+"alt-w" = "stack toggle"
 "alt-bracketright" = "stack next"
 "alt-bracketleft" = "stack prev"
 "alt-u" = "stack unstack"

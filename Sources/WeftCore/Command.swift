@@ -53,8 +53,11 @@ public enum Command: Sendable, Equatable {
 }
 
 public enum StackCommand: Sendable, Equatable {
-    /// i3-style: convert the parent container into a stack.
-    case wrap
+    /// i3-style: convert the parent container into a stack, and take the
+    /// focused window back out of one it is already in. `wrap` parses to this
+    /// too — it named the half of the behaviour that existed at the time, and
+    /// every config in the wild spells it that way.
+    case toggle
     /// Pull the neighbour in `dir` into a stack with the focused window.
     case split(Direction)
     /// Cycle the active member of the focused stack.
@@ -281,7 +284,7 @@ extension Command {
         case "stack":
             guard parts.count >= 2 else { throw CommandParseError.badArgs(input) }
             switch parts[1] {
-            case "wrap": return .stack(.wrap)
+            case "toggle", "wrap": return .stack(.toggle)
             case "next": return .stack(.next)
             case "prev": return .stack(.prev)
             case "unstack": return .stack(.unstack)

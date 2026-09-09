@@ -150,11 +150,24 @@ public enum WorldReader {
             guard owner != "borders" && owner != "WeftBar" && owner != "weft-bar" else { continue }
             let wid = WindowID(w[kCGWindowNumber as String] as? Int ?? 0)
             guard wid != 0 else { continue }
+            let pid = Int32(w[kCGWindowOwnerPID as String] as? Int ?? 0)
+            // Menu-bar extras. A Stats or Ice panel is layer 0 and larger than
+            // 100×100, so the geometry filter waves it straight through and
+            // weft tiles it: it takes a slot in the layout, and because weft
+            // then focuses and raises it, the click-outside that would
+            // normally dismiss it never reaches it — the panel can only be
+            // closed by clicking its menu bar icon again.
+            //
+            // Every one of these belongs to an agent app: LSUIElement, no Dock
+            // icon, `.accessory` activation policy. That is the whole test,
+            // and it costs a cached lookup rather than the AX subrole round
+            // trip this path is not allowed to make.
+            guard manageMenubarApps || isManageableOwner(pid: pid) else { continue }
             candidates.append(Candidate(
                 wid: wid,
                 app: owner,
                 title: w[kCGWindowName as String] as? String ?? "",
-                pid: Int32(w[kCGWindowOwnerPID as String] as? Int ?? 0)
+                pid: pid
             ))
         }
 
@@ -180,6 +193,38 @@ public enum WorldReader {
             ))
         }
         return out.sorted { $0.id < $1.id }
+    }
+
+    /// Owners whose windows weft manages: apps with a Dock icon.
+    ///
+    /// Cached per pid because this runs for every window on every snapshot and
+    /// an app's activation policy does not change under us; the cache is
+    /// bounded by dropping pids that are no longer running.
+    private static let ownerPolicyLock = NSLock()
+    private nonisolated(unsafe) static var ownerIsRegular: [Int32: Bool] = [:]
+
+    /// Set from config. Opt-in, for the rare agent app with a real window.
+    private nonisolated(unsafe) static var _manageMenubarApps = false
+    public static var manageMenubarApps: Bool {
+        get { ownerPolicyLock.withLock { _manageMenubarApps } }
+        set { ownerPolicyLock.withLock { _manageMenubarApps = newValue } }
+    }
+
+    static func isManageableOwner(pid: Int32) -> Bool {
+        if let known = ownerPolicyLock.withLock({ ownerIsRegular[pid] }) { return known }
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        let regular = app.activationPolicy == .regular
+        ownerPolicyLock.withLock {
+            if ownerIsRegular.count > 512 { ownerIsRegular.removeAll() }
+            ownerIsRegular[pid] = regular
+        }
+        return regular
+    }
+
+    /// Drop a terminated app's cached verdict, so a pid reused by a different
+    /// app is classified afresh.
+    public static func forgetOwner(pid: Int32) {
+        ownerPolicyLock.withLock { _ = ownerIsRegular.removeValue(forKey: pid) }
     }
 
     static func spacesForWindow(cid: SLConnectionID, wid: WindowID) -> [SpaceID] {

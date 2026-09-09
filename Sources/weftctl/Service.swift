@@ -84,6 +84,15 @@ public enum ServiceManager {
             try plistContent.write(to: plistURL, atomically: true, encoding: .utf8)
             print("weftctl: wrote launchd plist to \(plistURL.path)")
             let uid = getuid()
+            // Bootout first, so installing over an existing install actually
+            // installs. `bootstrap` on an already-loaded service fails with
+            // "5: Input/output error" and changes nothing — which left the
+            // PREVIOUS weftd running from the previous binary. Every reinstall
+            // and every upgrade then appeared to do nothing at all: new
+            // binaries on disk, the old one still driving the windows.
+            // Harmless when nothing is loaded; launchctl just reports no such
+            // service, which is the state we want anyway.
+            _ = runLaunchctl(["bootout", "gui/\(uid)/\(label)"])
             let (code, out) = runLaunchctl(["bootstrap", "gui/\(uid)", plistURL.path])
             if code == 0 {
                 print("weftctl: service \(label) installed and bootstrapped")

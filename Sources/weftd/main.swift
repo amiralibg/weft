@@ -61,8 +61,22 @@ final class Daemon: @unchecked Sendable {
         var lastPoint: CGPoint
         var startFrame: Frame
         var isFloating: Bool
+        /// Motion seen since the last resize step was emitted.
+        ///
+        /// A tiled resize is quantised — it only fires past a threshold — and
+        /// the threshold used to be applied to a single drag event's delta and
+        /// the remainder thrown away. A normal mouse reports one to five
+        /// points per event, so nothing ever cleared the bar: resizing a tiled
+        /// window by dragging did nothing at all unless you flicked the mouse.
+        /// Carrying the remainder makes a slow drag resize smoothly and a fast
+        /// one behave as it always did.
+        var pendingX: Double = 0
+        var pendingY: Double = 0
     }
     private var currentDrag: DragState?
+    /// Points of accumulated drag before a tiled resize step is emitted. Small
+    /// enough to feel continuous, large enough not to send a command per event.
+    private static let resizeStep: Double = 8
 
     init?() {
         core.setSpecific(key: coreKey, value: 1)
@@ -113,6 +127,7 @@ final class Daemon: @unchecked Sendable {
             fputs("weftd: mode \(mode)\n", stderr)
         }
         input.updateMouseModifier(currentConfig().general.mouseModifier)
+        WorldReader.manageMenubarApps = currentConfig().general.manageMenubarApps
         input.onMouseGesture = { [weak self] gesture in
             self?.handleMouseGesture(gesture)
         }
@@ -254,14 +269,21 @@ final class Daemon: @unchecked Sendable {
                         applyFrames([drag.windowID: newF])
                     }
                 } else {
-                    if abs(dx) >= 8 {
-                        let dir: ResizeDirection = dx > 0 ? .right : .left
-                        _ = handleCommand("resize \(dir.rawValue) \(abs(dx))")
+                    drag.pendingX += dx
+                    drag.pendingY += dy
+                    if abs(drag.pendingX) >= Self.resizeStep {
+                        let amount = drag.pendingX
+                        let dir: ResizeDirection = amount > 0 ? .right : .left
+                        _ = handleCommand("resize \(dir.rawValue) \(abs(amount))")
+                        drag.pendingX = 0
                     }
-                    if abs(dy) >= 8 {
-                        let dir: ResizeDirection = dy > 0 ? .down : .up
-                        _ = handleCommand("resize \(dir.rawValue) \(abs(dy))")
+                    if abs(drag.pendingY) >= Self.resizeStep {
+                        let amount = drag.pendingY
+                        let dir: ResizeDirection = amount > 0 ? .down : .up
+                        _ = handleCommand("resize \(dir.rawValue) \(abs(amount))")
+                        drag.pendingY = 0
                     }
+                    currentDrag = drag
                 }
             }
         case .up(let button, let location):
@@ -714,8 +736,27 @@ final class Daemon: @unchecked Sendable {
             pendingClassify = work
             syncQueue.asyncAfter(deadline: .now() + 1.1, execute: work)
         }
+        // Rule moves happen here, in phase 3 — *after* phase 2 has already
+        // filed each window under the space SLS reported for it. So a window a
+        // rule relocates is, from this moment, laid out by the wrong space's
+        // tree, and moving a window between spaces produces no event that would
+        // bring us back. The membership stayed wrong for the life of the
+        // window: two terminals filed under different spaces both computed the
+        // east half of their own layout and landed on exactly the same pixels,
+        // one invisible underneath the other.
+        //
+        // Re-sync once the moves have settled. `spaceMoveAttempts` already caps
+        // each window at one move for its lifetime, so the extra pass cannot
+        // move anything again and cannot feed itself.
+        var moved = false
         for m in pendingMoves {
-            attemptRuleMoveToSid(wid: m.wid, app: m.app, sid: m.sid, label: m.label)
+            moved = attemptRuleMoveToSid(wid: m.wid, app: m.app, sid: m.sid, label: m.label) || moved
+        }
+        if moved {
+            pendingRuleResync?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.syncFromSnapshot() }
+            pendingRuleResync = work
+            syncQueue.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
         applier.bind(windows: visible.map { (wid: $0.id, pid: $0.pid) })
         applier.forget(keeping: worldWids)
@@ -803,6 +844,9 @@ final class Daemon: @unchecked Sendable {
     private var pendingDragApply: DispatchWorkItem?
     /// One-shot re-check for windows still inside the unbindable grace period.
     private var pendingClassify: DispatchWorkItem?
+    /// Follow-up sweep after a rule relocates a window, so layout membership
+    /// catches up with where the window actually is.
+    private var pendingRuleResync: DispatchWorkItem?
 
     /// Request a world resync. `fast` collapses the current burst into a single
     /// sweep ~20 ms out; the 0.3 s trailing sweep always follows, because a
@@ -896,6 +940,7 @@ final class Daemon: @unchecked Sendable {
             bus.emit(DaemonEvent(kind: .appTerminated, app: "\(bundleID) pid=\(pid)"))
             applier.forgetApp(pid: pid)
             observers.forgetApp(pid: pid)
+            WorldReader.forgetOwner(pid: pid)
             scheduleSync()  // same dead-wid-lingers race as windowDestroyed
         case .spaceChanged:
             // Closes the S0 cold-start gap: windows on a newly visited space
@@ -1666,6 +1711,7 @@ final class Daemon: @unchecked Sendable {
         configLock.withLock { _config = next }
         input.updateKeymap(next.keymap)
         input.updateMouseModifier(next.general.mouseModifier)
+        WorldReader.manageMenubarApps = next.general.manageMenubarApps
         bordersBridge.applyConfig(next.integrations.borders, currentLayout: currentSpaceLayoutKind(), currentMode: input.currentMode)
         sketchybarBridge.updateConfig(next.integrations.sketchybar)
         applyDeclaredLayouts()
@@ -1855,17 +1901,25 @@ final class Daemon: @unchecked Sendable {
             // than the one that matters — and both used to, which is how a
             // fully green Setup window sat next to a weftd that could not move
             // a single window.
+            //
+            // Two separate answers for one pane, deliberately. `ensureTap`,
+            // not `tapInstalled`: a query is the one moment we know someone
+            // is watching for the answer to change, and the tap only ever
+            // changes when something retries it — that is what makes flipping
+            // a switch take effect while the Setup window is open. But a live
+            // tap does NOT mean the Input Monitoring switch is on: macOS lets
+            // an Accessibility-trusted process create an event tap, so
+            // reporting the tap AS Input Monitoring told users they had
+            // granted something they never touched. The switch gets its own
+            // field, read from TCC.
             return emit(DaemonPermissions(
                 binary: Bundle.main.executablePath
                     ?? ProcessInfo.processInfo.arguments.first ?? "weftd",
                 accessibility: Permissions.accessibility(),
-                // `ensureTap`, not `tapInstalled`: a query is the one moment
-                // we know someone is watching for the answer to change, and
-                // the tap only ever changes when something retries it. This
-                // is what makes flipping the switch take effect while the
-                // Setup window is open, instead of at the next restart.
-                inputMonitoring: input.ensureTap(),
-                screenRecording: Permissions.screenRecording()
+                inputMonitoring: Permissions.inputMonitoringPreflight(),
+                keybindsLive: input.ensureTap(),
+                screenRecording: Permissions.screenRecording(),
+                stableIdentity: Permissions.hasStableSigningIdentity()
             ))
         case "displays":
             // Geometry included: "which rect is weft tiling this space into"
@@ -1970,7 +2024,15 @@ final class Daemon: @unchecked Sendable {
             }
         }
         guard !result.failedIDs.isEmpty else { return }
-        fputs("weftd: frame-set failed for \(result.failedIDs) (app ignored/timeout)\n", stderr)
+        // With the actual fault, not a guess. "frame-set failed for [238,
+        // 1603] (app ignored/timeout)" named a cause it had never checked,
+        // and it was the wrong one — every failure looked identical whether
+        // the app was fighting back or the WindowServer had refused the move.
+        let detail = result.failedIDs.map { wid -> String in
+            let why = result.failureReasons[wid].map(String.init(describing:)) ?? "unknown"
+            return "\(wid): \(why)"
+        }.joined(separator: "; ")
+        fputs("weftd: frame-set failed — \(detail)\n", stderr)
         // Without Accessibility EVERY write fails, so strike accounting would
         // auto-float the entire desktop within two sweeps and keep it floated
         // after the grant arrives. A blanket denial is not evidence about any
@@ -2119,12 +2181,17 @@ final class Daemon: @unchecked Sendable {
 
     /// Space-placement rule, attempted once per window lifetime. Pre-SA this
     /// always reports the honest error; post-SA it just starts working.
-    private func attemptRuleMoveToSid(wid: WindowID, app: String, sid: SpaceID, label: String) {
+    /// Returns whether the window actually moved.
+    @discardableResult
+    private func attemptRuleMoveToSid(
+        wid: WindowID, app: String, sid: SpaceID, label: String
+    ) -> Bool {
         if SpaceControl.moveWindowToSpace(wid, sid) {
             fputs("weftd: rule moved \(app) (\(wid)) to \(label)\n", stderr)
-        } else {
-            fputs("weftd: rule cannot place \(app) (\(wid)) on \(label) (needs weft-sa)\n", stderr)
+            return true
         }
+        fputs("weftd: rule cannot place \(app) (\(wid)) on \(label) (needs weft-sa)\n", stderr)
+        return false
     }
 
     /// Diff the computed parked set against the tracked one: SLS-park newly
@@ -2225,12 +2292,24 @@ private struct DaemonPermissions: Codable, Sendable {
     /// WeftBar's. Shown verbatim so it can be pasted or revealed in Finder.
     var binary: String
     var accessibility: Bool
-    /// Reported from the live event tap rather than a preflight: the tap is
-    /// what keybinds actually need, and it can fail for reasons a preflight
-    /// says nothing about.
+    /// The Input Monitoring switch itself, as TCC has it. Says nothing about
+    /// whether keybinds work — see `keybindsLive` for that.
     var inputMonitoring: Bool
+    /// The live event tap: what keybinds and mouse gestures actually run on.
+    /// It can be up with `inputMonitoring` off (Accessibility covers it), and
+    /// down with it on (a tap that failed and has not been retried), so the
+    /// two are reported apart and never collapsed into one checkmark.
+    var keybindsLive: Bool
     var screenRecording: Bool
-    var allGranted: Bool { accessibility && inputMonitoring }
+    /// Whether a rebuild will keep these grants — see
+    /// `Permissions.hasStableSigningIdentity()`. False means any switch that
+    /// reads as on in System Settings may be granting nothing.
+    var stableIdentity: Bool
+    /// Functional readiness, not a count of switches. Screen Recording is in
+    /// here because without it `kCGWindowName` is redacted for every window
+    /// weftd does not own — titles come back empty and every title-matching
+    /// rule silently stops matching.
+    var allGranted: Bool { accessibility && keybindsLive && screenRecording }
 }
 
 private struct DisplayStatus: Codable, Sendable {

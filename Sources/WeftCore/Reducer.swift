@@ -124,8 +124,8 @@ public enum Reducer {
     static func reduceStack(_ state: State, _ sub: StackCommand) -> (State, [Mutation]) {
         let tree: Tree
         switch sub {
-        case .wrap:
-            tree = state.tree.wrappingInStack()
+        case .toggle:
+            tree = state.tree.togglingStack()
         case .split(let dir):
             let frames = layout(state.tree, in: state.screen, config: state.config)
             tree = state.tree.stackSplitting(towards: dir, frames: frames)

@@ -104,6 +104,48 @@ mkdir -p "$APPDIR"
 rm -rf "$APPDIR/WeftBar.app"
 cp -R "$STAGE/WeftBar.app" "$APPDIR/WeftBar.app"
 
+# ------------------------------------------------------------------- signing
+# Give the binaries a stable identity, unless this build already has one.
+#
+# macOS keys a permission to a program's designated requirement. For an ad-hoc
+# signed build that requirement is the code directory hash, so the NEXT release
+# is a different program and every grant silently stops applying — while the
+# switches in System Settings stay visibly on, granting nothing. Signing with a
+# self-signed certificate moves the requirement onto the identity, and it then
+# survives every future update.
+#
+# A build signed with a Developer ID already has a stable identity and may be
+# notarised; re-signing would break the notarisation and buy nothing, so the
+# check is for a certificate in the requirement, not for the absence of one.
+if [ -f "$STAGE/lib-codesign.sh" ]; then
+    # shellcheck source=lib-codesign.sh
+    . "$STAGE/lib-codesign.sh"
+    if codesign -d -r- "$BINDIR/weftd" 2>&1 | grep -q "certificate leaf"; then
+        say "release is signed with a certificate — permissions will survive updates"
+    else
+        say "signing with a local identity so permissions survive updates"
+        # Never fatal. An unsigned weft works perfectly; it just loses its
+        # permissions on the next update. Aborting here would leave binaries
+        # installed and no service running, which is strictly worse.
+        IDENT="$(weft_signing_identity || true)"
+        SIGNED=1
+        if [ -n "$IDENT" ]; then
+            weft_codesign com.weft.weftd   "$BINDIR/weftd"        "$IDENT" || SIGNED=0
+            weft_codesign com.weft.weftctl "$BINDIR/weftctl"      "$IDENT" || SIGNED=0
+            weft_codesign com.weft.bar     "$APPDIR/WeftBar.app"  "$IDENT" || SIGNED=0
+        else
+            SIGNED=0
+        fi
+        if [ "$SIGNED" = 1 ]; then
+            echo "    identity fingerprint: $(weft_signing_fingerprint "$BINDIR/weftd")"
+        else
+            warn "could not sign weft with a stable identity — it will still run, but
+  macOS will drop its permissions the next time you update, and the switches in
+  System Settings will still read as on. Re-granting them fixes it each time."
+        fi
+    fi
+fi
+
 # macOS quarantines anything that arrived over the network. On an ad-hoc signed
 # build that means Gatekeeper refuses to launch it at all ("damaged and can't be
 # opened"), which is a lie — it is unsigned, not damaged. Clearing the flag on
@@ -193,14 +235,16 @@ EOF
 else
     cat <<'EOF'
 --------------------------------------------------------------------------
-Two permissions, and BOTH belong to `weftd` — the engine — not to WeftBar,
+Three permissions, and ALL belong to `weftd` — the engine — not to WeftBar,
 the menu-bar app you can see. macOS grants these per binary.
 
   Accessibility     moving, resizing and focusing windows
   Input Monitoring  keybinds and mouse gestures
+  Screen Recording  reading window titles, for rules and the switcher
 
 Setup opens each pane in turn. In each one, find the row named `weftd` and
-turn its switch on. Weft notices within a second; nothing needs restarting.
+turn its switch on — and if it is ALREADY on, turn it off and on again.
+Weft notices within a second; nothing needs restarting.
 --------------------------------------------------------------------------
 EOF
 fi

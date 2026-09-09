@@ -50,7 +50,7 @@ import Testing
     func action(_ mode: String, _ chord: String) throws -> KeyAction? {
         map.modes[mode]?[try parseChord(chord)]
     }
-    #expect(try action("default", "alt-s") == .send("stack wrap"))
+    #expect(try action("default", "alt-s") == .send("stack toggle"))
     #expect(try action("default", "alt-shift-s") == .send("stack split east"))
     #expect(try action("default", "alt-bracketleft") == .send("stack prev"))
     #expect(try action("default", "alt-bracketright") == .send("stack next"))

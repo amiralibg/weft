@@ -166,6 +166,42 @@ public final class AXApplier: @unchecked Sendable {
 
     // MARK: - Apply
 
+    /// Why one window refused its frame.
+    ///
+    /// The log line used to guess — every failure was reported as "app
+    /// ignored/timeout", which is one of four quite different faults and was
+    /// the wrong one often enough to send a diagnosis down the wrong path.
+    /// The frame-set protocol knows exactly which step it failed at; it just
+    /// was not saying.
+    public enum FailureReason: Sendable, CustomStringConvertible {
+        /// `SLSMoveWindow` refused. The window is another app's and the
+        /// WindowServer connection was not allowed to move it.
+        case windowServerRefused(Int32)
+        /// No AX element for the window, and the SLS-only path did not land.
+        case noAXElement
+        /// The bounds read back after the move failed outright.
+        case boundsUnreadable
+        /// The move was accepted, the window is not where it was put — an app
+        /// enforcing its own geometry, or one that ignored the message.
+        case positionRejected(want: CGPoint, got: CGPoint)
+
+        public var description: String {
+            switch self {
+            case .windowServerRefused(let status):
+                return "WindowServer refused the move (SLSMoveWindow \(status))"
+            case .noAXElement:
+                return "no AX element and the WindowServer move did not land"
+            case .boundsUnreadable:
+                return "could not read the window's bounds back"
+            case .positionRejected(let want, let got):
+                return String(
+                    format: "app kept its own position (wanted %.0f,%.0f — got %.0f,%.0f)",
+                    want.x, want.y, got.x, got.y
+                )
+            }
+        }
+    }
+
     public struct ApplyResult: Sendable {
         public var applied: Int
         public var skipped: Int
@@ -178,16 +214,20 @@ public final class AXApplier: @unchecked Sendable {
         /// count that only ever rises turns one bad moment into a permanent
         /// verdict.
         public var appliedIDs: [WindowID]
+        /// Why each entry in `failedIDs` failed, from the last attempt.
+        public var failureReasons: [WindowID: FailureReason]
 
         public init(
             applied: Int, skipped: Int, errors: Int,
-            failedIDs: [WindowID] = [], appliedIDs: [WindowID] = []
+            failedIDs: [WindowID] = [], appliedIDs: [WindowID] = [],
+            failureReasons: [WindowID: FailureReason] = [:]
         ) {
             self.applied = applied
             self.skipped = skipped
             self.errors = errors
             self.failedIDs = failedIDs
             self.appliedIDs = appliedIDs
+            self.failureReasons = failureReasons
         }
     }
 
@@ -230,23 +270,24 @@ public final class AXApplier: @unchecked Sendable {
                     // One immediate retry: transient timeouts (Gecko relayout,
                     // JetBrains) are the common failure, not dead apps — the
                     // 0.15s messaging timeout bounds both attempts.
-                    var ok = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
-                    if !ok {
-                        ok = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
+                    var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
+                    if reason != nil {
+                        reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
                     }
-                    counter.add(ok: ok, wid: item.wid)
+                    counter.add(reason: reason, wid: item.wid)
                 }
                 group.leave()
             }
         }
         group.notify(queue: .global(qos: .utility)) {
-            let (a, e, failed, ok) = counter.snapshot()
+            let (a, e, failed, ok, reasons) = counter.snapshot()
             completion?(ApplyResult(
                 applied: a,
                 skipped: frames.count - todo.count,
                 errors: e,
                 failedIDs: failed.sorted(),
-                appliedIDs: ok.sorted()
+                appliedIDs: ok.sorted(),
+                failureReasons: reasons
             ))
         }
     }
@@ -261,14 +302,48 @@ public final class AXApplier: @unchecked Sendable {
     /// measured as a 1.2 s `zoom-fullscreen`.
     public func focusWindow(_ wid: WindowID, pid: Int32) {
         queue(for: pid).async {
-            let el: AXUIElement? = self.lock.withLock { self.windowElements[wid] }
+            // Resolve, do not merely look up. The cache is populated as a side
+            // effect of writing a frame, so a window that has never been laid
+            // out — a brand new one, or one whose frame-set failed — had no
+            // entry, and focusing it did nothing whatsoever: no raise, no
+            // attribute write, silently.
+            let el: AXUIElement? = self.resolveElement(for: wid, pid: pid)
             if let el {
+                Self.makeFocused(el)
                 AXUIElementPerformAction(el, kAXRaiseAction as CFString)
             }
+            // Activate AFTER the attribute writes, not alongside them.
+            //
+            // These used to go out on two independent queues, so `activate()`
+            // routinely won the race — and activating an app makes macOS
+            // restore that app's *own* idea of its key window, undoing the
+            // AXMain write that had just named a different one. Focusing the
+            // second of two windows in the same app therefore left the app
+            // focused on the first, which is what anything tracking real focus
+            // (JankyBorders, sketchybar) then drew.
+            self.activateQueue.async {
+                NSRunningApplication(processIdentifier: pid)?.activate()
+            }
         }
-        activateQueue.async {
-            NSRunningApplication(processIdentifier: pid)?.activate()
-        }
+    }
+
+    /// Tell the *app* which of its windows is now the focused one.
+    ///
+    /// `AXRaise` changes z-order and `activate()` brings the app forward, but
+    /// neither tells the application anything: its `AXFocusedWindow` stays
+    /// whatever it was. Focusing the second of two Ghostty windows therefore
+    /// raised the right window and then activated the app onto the *old* one —
+    /// weft's own focus and the system's disagreed, `mouse-follows-focus`
+    /// warped to a window that was not focused, and anything tracking the real
+    /// focused window (JankyBorders, sketchybar) drew its highlight around the
+    /// previous window and stayed there. It looked like a borders bug. It was
+    /// two missing attribute writes.
+    ///
+    /// `AXMain` is the one that moves the app's notion of its front window;
+    /// `AXFocused` moves keyboard focus. Both, in that order, before the raise.
+    private static func makeFocused(_ el: AXUIElement) {
+        AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
     /// AX raise (z-order only, no resize) without blocking the caller.
@@ -280,13 +355,14 @@ public final class AXApplier: @unchecked Sendable {
     /// pending frame write.
     public func raise(_ wid: WindowID, pid: Int32) {
         queue(for: pid).async {
-            let el: AXUIElement? = self.lock.withLock { self.windowElements[wid] }
+            let el: AXUIElement? = self.resolveElement(for: wid, pid: pid)
             if let el {
+                Self.makeFocused(el)
                 AXUIElementPerformAction(el, kAXRaiseAction as CFString)
             }
-        }
-        activateQueue.async {
-            NSRunningApplication(processIdentifier: pid)?.activate()
+            self.activateQueue.async {
+                NSRunningApplication(processIdentifier: pid)?.activate()
+            }
         }
     }
 
@@ -330,7 +406,7 @@ public final class AXApplier: @unchecked Sendable {
         queue(for: pid).sync {
             let nudge = Frame(x: frame.x + 5, y: frame.y + 5, width: frame.width, height: frame.height)
             _ = self.setFrameOnQueue(nudge, wid: wid, pid: pid)
-            ok = self.setFrameOnQueue(frame, wid: wid, pid: pid)
+            ok = self.setFrameOnQueue(frame, wid: wid, pid: pid) == nil
         }
         return ok
     }
@@ -399,8 +475,9 @@ public final class AXApplier: @unchecked Sendable {
 
     // MARK: - Frame-set protocol (runs on a per-pid queue)
 
+    /// nil on success, otherwise why it failed.
     @discardableResult
-    private func setFrameOnQueue(_ frame: Frame, wid: WindowID, pid: Int32) -> Bool {
+    private func setFrameOnQueue(_ frame: Frame, wid: WindowID, pid: Int32) -> FailureReason? {
         var target = CGPoint(x: frame.x, y: frame.y)
         // 1. Instant compositor positioning via SkyLight
         let slsStatus = SLSMoveWindow(cid, wid, &target)
@@ -411,9 +488,9 @@ public final class AXApplier: @unchecked Sendable {
             // SLS-only placement: success iff WindowServer accepted it AND
             // a follow-up read shows the window actually there (position
             // verdict; size drift is app constraint, not refusal).
-            if !slsOK { return false }
+            if !slsOK { return .noAXElement }
             var rect = CGRect.zero
-            guard SLSGetWindowBounds(cid, wid, &rect) == 0 else { return false }
+            guard SLSGetWindowBounds(cid, wid, &rect) == 0 else { return .boundsUnreadable }
             let posOK = abs(rect.minX - target.x) <= verifyTolerance
                 && abs(rect.minY - target.y) <= verifyTolerance
             lock.withLock {
@@ -426,7 +503,7 @@ public final class AXApplier: @unchecked Sendable {
                     expectedAt[wid] = Date()
                 }
             }
-            return posOK
+            return posOK ? nil : .positionRejected(want: target, got: rect.origin)
         }
 
         let size = CGSize(width: frame.width, height: frame.height)
@@ -461,6 +538,10 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         let ok = slsOK && haveRect && posOK
+        let reason: FailureReason? = ok ? nil
+            : !slsOK ? .windowServerRefused(slsStatus)
+            : !haveRect ? .boundsUnreadable
+            : .positionRejected(want: target, got: rect.origin)
         // Record echo suppression only on real success; on failure leave any
         // prior expectation alone so observer Moved/Resized events are treated
         // as genuine (and can trigger strikes upstream via failedIDs).
@@ -474,7 +555,7 @@ public final class AXApplier: @unchecked Sendable {
                 expectedAt[wid] = Date()
             }
         }
-        return ok
+        return reason
     }
 
     private func queue(for pid: Int32) -> DispatchQueue {
@@ -499,20 +580,22 @@ private final class Counter: @unchecked Sendable {
     private var errors = 0
     private var failed: [WindowID] = []
     private var succeeded: [WindowID] = []
+    private var reasons: [WindowID: AXApplier.FailureReason] = [:]
 
-    func add(ok: Bool, wid: WindowID) {
+    func add(reason: AXApplier.FailureReason?, wid: WindowID) {
         lock.withLock {
-            if ok {
-                applied += 1
-                succeeded.append(wid)
-            } else {
+            if let reason {
                 errors += 1
                 failed.append(wid)
+                reasons[wid] = reason
+            } else {
+                applied += 1
+                succeeded.append(wid)
             }
         }
     }
 
-    func snapshot() -> (Int, Int, [WindowID], [WindowID]) {
-        lock.withLock { (applied, errors, failed, succeeded) }
+    func snapshot() -> (Int, Int, [WindowID], [WindowID], [WindowID: AXApplier.FailureReason]) {
+        lock.withLock { (applied, errors, failed, succeeded, reasons) }
     }
 }

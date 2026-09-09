@@ -1,4 +1,5 @@
 import AppKit
+import WeftPlatform
 import Carbon.HIToolbox
 import Foundation
 
@@ -100,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private let switcher = WindowSwitcher()
+    /// The update line, kept hidden unless there is a newer release.
+    private var updateItem: NSMenuItem?
+    private var latestUpdate: UpdateCheck.Result?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -122,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Install keybindings via Carbon HotKeyManager
         installKeybindings()
+
+        checkForUpdate()
 
         // `open -a WeftBar --args --settings` / `--setup`. The menu-bar icon
         // is the normal way in, but a support answer that begins "click the
@@ -147,10 +153,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // First-run gate: permissions until onboarded, then stay quiet.
-        if OnboardingWindowController.shouldShow() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                OnboardingWindowController.shared.show()
-            }
+        // Async because the decision needs an answer from weftd, and at login
+        // weftd may still be starting — blocking the main thread on that gave
+        // a menu bar that appears late, and giving up on it gave a Setup
+        // window that reappears forever.
+        Task { @MainActor in
+            guard await OnboardingWindowController.shouldShow() else { return }
+            OnboardingWindowController.shared.show()
         }
     }
 
@@ -335,6 +344,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         retryItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
         menu.addItem(retryItem)
 
+        // Update — only ever present when there is actually one, so the menu
+        // does not carry a permanent "you are up to date" line nobody reads.
+        updateItem = NSMenuItem(
+            title: "", action: #selector(openUpdatePage), keyEquivalent: ""
+        )
+        updateItem?.target = self
+        updateItem?.image = NSImage(
+            systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil
+        )
+        updateItem?.isHidden = true
+        if let updateItem { menu.addItem(updateItem) }
+
         // Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
@@ -364,6 +385,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func openOnboarding() {
         OnboardingWindowController.shared.show()
+    }
+
+    @objc private func openUpdatePage() {
+        guard let update = latestUpdate, let url = URL(string: update.url) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Ask once per launch; `UpdateCheck` decides whether that turns into a
+    /// request or a cached answer.
+    ///
+    /// Nothing here blocks and nothing here nags: no dialog, no badge that
+    /// cannot be dismissed, no download. A menu item appears saying which
+    /// version exists, and clicking it opens the release page. Anyone who
+    /// wants none of it sets `check-for-updates = false`.
+    private func checkForUpdate() {
+        let enabled = ConfigStore.readCheckForUpdates()
+        UpdateCheck.refreshIfNeeded(enabled: enabled) { [weak self] result in
+            guard let result, result.isNewerThanRunning else { return }
+            Task { @MainActor in
+                self?.latestUpdate = result
+                self?.updateItem?.title = "Update to weft \(result.latest)…"
+                self?.updateItem?.isHidden = false
+            }
+        }
     }
     @objc private func resyncAndRestart() {
         DispatchQueue.global(qos: .userInitiated).async {

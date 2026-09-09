@@ -1,6 +1,7 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import Security
 
 /// TCC answers for **this** process, read live.
 ///
@@ -50,6 +51,40 @@ public enum Permissions {
             }
         }
         return sawCandidate ? false : nil
+    }
+
+    /// Whether this binary's TCC grants can survive being rebuilt.
+    ///
+    /// macOS stores a grant against a program's *designated requirement*. Sign
+    /// with a certificate — even a self-signed one — and that requirement is
+    /// `identifier "..." and certificate leaf = H"..."`, which every future
+    /// build still satisfies. Ad-hoc sign it, as `swift build` does, and there
+    /// is no identity to name, so the requirement falls back to the code
+    /// directory hash: a rebuilt binary is a different program and the grant
+    /// stops applying to it.
+    ///
+    /// It stops applying *silently*. TCC leaves the row in System Settings
+    /// with its switch on, so the pane says granted while every AX call is
+    /// refused — the single most confusing state weft can be in, and the one
+    /// the Setup window has to name out loud when it happens.
+    ///
+    /// Ad-hoc signatures carry no certificates, so the presence of a
+    /// certificate chain is the whole test.
+    public static func hasStableSigningIdentity() -> Bool {
+        var codeRef: SecCode?
+        guard SecCodeCopySelf([], &codeRef) == errSecSuccess, let codeRef else { return false }
+        var staticRef: SecStaticCode?
+        guard SecCodeCopyStaticCode(codeRef, [], &staticRef) == errSecSuccess,
+              let staticRef
+        else { return false }
+        var infoRef: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticRef, SecCSFlags(rawValue: kSecCSSigningInformation), &infoRef
+        ) == errSecSuccess,
+            let info = infoRef as? [String: Any]
+        else { return false }
+        let certs = info[kSecCodeInfoCertificates as String] as? [Any]
+        return !(certs?.isEmpty ?? true)
     }
 
     /// What TCC thinks, before any tap is attempted. Useful only as a hint:

@@ -488,3 +488,22 @@ protocol HasOrigin {
 
 extension SpaceRow: HasOrigin {}
 extension RuleRow: HasOrigin {}
+
+extension ConfigStore {
+    /// Read `check-for-updates` without loading the whole config.
+    ///
+    /// The menu bar asks this once at launch, before anything has parsed
+    /// weft.toml, and an unreadable or absent config must mean "yes" — the
+    /// default — rather than silently disabling the only channel through which
+    /// a user learns a fix exists.
+    static func readCheckForUpdates() -> Bool {
+        let path = ("~/.config/weft/weft.toml" as NSString).expandingTildeInPath
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return true }
+        for raw in content.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("check-for-updates") else { continue }
+            return !line.contains("false")
+        }
+        return true
+    }
+}

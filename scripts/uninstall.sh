@@ -68,8 +68,18 @@ rm -rf "$APPDIR/WeftBar.app" "/Applications/WeftBar.app"
 if [ "$PURGE" = 1 ]; then
     echo "==> purging config"
     rm -rf "$HOME/.config/weft"
+    # The signing keychain goes with a purge and only with a purge. It holds
+    # the identity every TCC grant is keyed to, so removing it on a plain
+    # uninstall would silently cost the user a full re-grant of all three
+    # permissions the next time they installed — for a reinstall that was
+    # meant to change nothing.
+    echo "==> removing the weft signing identity"
+    security delete-keychain "$HOME/Library/Keychains/weft-signing.keychain-db" 2>/dev/null \
+        && echo "    deleted weft-signing.keychain-db (a future install re-grants once)" \
+        || echo "    none present"
 else
     echo "    kept ~/.config/weft (use --purge to delete)"
+    echo "    kept the weft signing identity, so a reinstall keeps its permissions"
 fi
 
 # Restore the exact agents install.sh stopped, by label and plist path. See

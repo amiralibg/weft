@@ -61,13 +61,21 @@ PLIST
 # Re-sign the bundle after writing into it. The linker ad-hoc signs the
 # executable, but copying it into a bundle and adding an Info.plist invalidates
 # that signature — and on arm64 an invalid signature is a bundle that will not
-# launch at all. WEFT_CODESIGN_IDENTITY lets the release workflow substitute a
-# real Developer ID; without it this stays ad-hoc, which runs locally but is
-# still subject to Gatekeeper once downloaded (see scripts/install-release.sh).
-IDENTITY="${WEFT_CODESIGN_IDENTITY:--}"
-codesign --force --deep --sign "$IDENTITY" \
-    ${WEFT_CODESIGN_IDENTITY:+--options runtime --timestamp} \
-    "$APP" 2>/dev/null \
+# launch at all.
+#
+# Three cases, in order of preference. A real Developer ID (the release
+# workflow). The local self-signed identity install.sh passes down, which keeps
+# the app's designated requirement stable so its own TCC grants — and the
+# Setup window's Carbon hotkeys — survive a rebuild. Ad-hoc as a last resort,
+# which launches but is a different program to macOS after every build.
+IDENTITY="${WEFT_CODESIGN_IDENTITY:-${WEFT_SELFSIGN_IDENTITY:--}}"
+SIGN_ARGS=(--force --deep --sign "$IDENTITY")
+if [ -n "${WEFT_CODESIGN_IDENTITY:-}" ]; then
+    SIGN_ARGS+=(--options runtime --timestamp)
+elif [ -n "${WEFT_SELFSIGN_IDENTITY:-}" ]; then
+    SIGN_ARGS+=(--keychain "${WEFT_SIGN_KEYCHAIN:-$HOME/Library/Keychains/weft-signing.keychain-db}")
+fi
+codesign "${SIGN_ARGS[@]}" "$APP" 2>/dev/null \
     && echo "Signed: $IDENTITY" \
     || echo "WARNING: codesign failed — the bundle may not launch"
 

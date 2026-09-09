@@ -129,8 +129,16 @@ public enum Doctor {
         struct DaemonPermissions: Decodable {
             var binary: String
             var accessibility: Bool
+            /// The Input Monitoring switch as TCC has it.
             var inputMonitoring: Bool
+            /// The live event tap. Optional so a doctor from a newer build
+            /// still reads an older daemon, which only reported the tap.
+            var keybindsLive: Bool?
             var screenRecording: Bool
+            /// Whether a rebuild keeps these grants. Optional for older daemons.
+            var stableIdentity: Bool?
+            /// What keybinds actually run on.
+            var tapLive: Bool { keybindsLive ?? inputMonitoring }
         }
         var daemonPerms: DaemonPermissions?
         if let response = IPCClient.sendCommand(
@@ -145,6 +153,18 @@ public enum Doctor {
         if let p = daemonPerms {
             print("    Permissions below are weftd's own, read from the running daemon:")
             print("    \(p.binary)")
+            // Said before the individual verdicts, because it changes how to
+            // read all of them: an unsigned weftd that was rebuilt shows as
+            // granted in System Settings while being trusted for nothing.
+            if p.stableIdentity == false {
+                print("[!] weftd is not signed with a stable identity.")
+                print("    macOS ties a permission to the exact program it was granted to, so")
+                print("    rebuilding weft invalidates every grant below WITHOUT clearing the")
+                print("    switch in System Settings. If a switch reads as on and weft still")
+                print("    does not work, turn that switch off and back on.")
+                print("    Reinstall with scripts/install.sh to sign it once and stop this")
+                print("    happening on future updates.")
+            }
             if p.accessibility {
                 print("[✓] Accessibility (weftd): Granted")
             } else {
@@ -156,10 +176,23 @@ public enum Doctor {
                 print("      \(p.binary)")
                 allOk = false
             }
-            if p.inputMonitoring {
-                print("[✓] Input Monitoring (weftd): event tap installed (keybinds live)")
+            if p.tapLive {
+                if p.inputMonitoring {
+                    print("[✓] Input Monitoring (weftd): granted, event tap installed (keybinds live)")
+                } else {
+                    // Not a warning. macOS lets an Accessibility-trusted
+                    // process open an event tap, so keybinds are genuinely
+                    // live with the Input Monitoring switch still off — but
+                    // saying "granted" here would credit the user with a
+                    // switch they never flipped, and they would go looking
+                    // for it.
+                    print("[✓] Input Monitoring (weftd): switch off, but the event tap is live")
+                    print("    Accessibility covers the tap, so every keybind fires. Turning")
+                    print("    Input Monitoring on as well is harmless and makes it explicit.")
+                }
             } else {
                 print("[✗] Input Monitoring (weftd): tap NOT installed — no keybind will fire.")
+                print("    (TCC switch reads \(p.inputMonitoring ? "on" : "off").)")
                 print("    System Settings -> Privacy & Security -> Input Monitoring.")
                 print("    weftd asks when the tap fails, so it should already be listed —")
                 print("    switch it on. If it is not there, add:")
@@ -178,15 +211,31 @@ public enum Doctor {
             print("    weftctl Input Monitoring: \(CGPreflightListenEventAccess() ? "granted" : "missing")")
         }
 
-        // 1c. Screen Recording (JankyBorders highlight follows focus via capture)
-        // weftd's answer when there is a daemon to ask; the grant that matters
-        // is its, not ours. Optional either way — tiling never touches it.
+        // 1c. Screen Recording. weftd's answer when there is a daemon to ask;
+        // the grant that matters is its, not ours.
+        //
+        // No longer filed as optional. Without it macOS redacts kCGWindowName
+        // for every window weftd does not own, so `query windows` comes back
+        // with `"title": ""` across the board — and a config full of
+        // title-matching rules then matches nothing, silently. That reads as
+        // "weft ignores my rules", not as a missing permission.
         if daemonPerms?.screenRecording ?? Permissions.screenRecording() {
-            print("[✓] Screen Recording: Granted (borders highlight tracks focus)")
+            print("[✓] Screen Recording: Granted (window titles readable)")
         } else {
-            print("[○] Screen Recording: Not granted (borders highlight may not follow focus)")
-            print("    System Settings -> Privacy & Security -> Screen Recording (for borders).")
-            print("    Optional — every tiling and keybind feature works without it.")
+            print("[✗] Screen Recording: MISSING — every window title reads as empty.")
+            print("    System Settings -> Privacy & Security -> Screen Recording.")
+            print("    Title-matching rules match nothing, the window switcher lists")
+            print("    blank rows, and the focus highlight will not track focus.")
+            print("      \(daemonPerms?.binary ?? "weftd")")
+            allOk = false
+        }
+
+        // 1d. A newer release. Cache only — `doctor` must work offline and
+        // must not hang on a network call; WeftBar refreshes it in the
+        // background once a day.
+        if let update = UpdateCheck.cached(), update.isNewerThanRunning {
+            print("[↑] Update available: weft \(update.latest) (running \(WeftVersion.current))")
+            print("    \(UpdateCheck.installCommand)")
         }
 
         // 2. SkyLight Connection

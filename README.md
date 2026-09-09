@@ -103,30 +103,56 @@ account behind it. Two consequences worth knowing up front:
   an unsigned app that carries the flag — reporting it as "damaged", which it is
   not. The installer clears the flag from the files it installs. That is the one
   thing in it you should read before piping it to a shell.
-- macOS identifies an unsigned binary by its **contents**, so every new build is
-  a different program as far as Privacy & Security is concerned: **an update
-  drops weftd's Accessibility and Input Monitoring grants.** The installer says
-  so, and Setup reopens by itself; you toggle `weftd` off and on again in System
-  Settings. Building from source has exactly the same property.
+- macOS identifies an *unsigned* binary by its **contents**, so every new build
+  would be a different program as far as Privacy & Security is concerned — and
+  an update would drop weftd's grants while leaving the switches in System
+  Settings visibly on, granting nothing. `install.sh` avoids this by creating
+  one self-signed code-signing identity on first run (kept in its own keychain,
+  no password prompt) and signing every binary with it. The permission is then
+  tied to that identity rather than to the bytes, so **grants survive every
+  future rebuild and update**. Deleting `~/Library/Keychains/weft-signing.keychain-db`
+  starts a new identity and costs one re-grant.
 
 Neither applies to a build signed with a Developer ID — the release workflow
 does that automatically if the repository has the signing secrets configured.
 
+## Updates
+
+weft installs from a script or a clone, so nothing would otherwise tell you a
+fix exists. WeftBar asks GitHub once a day whether a newer release is out and
+adds a single menu-bar item when there is one; clicking it opens the release
+page. `weftctl doctor` reports the same thing from the cached answer.
+
+It downloads nothing and installs nothing — updating is the same one-liner as
+installing, and the permissions you granted carry over because the installer
+signs weft with a stable identity. Turn the check off with
+`check-for-updates = false` under `[general]`.
+
 ## Permissions
 
-Weft needs two macOS privacy permissions, and **both belong to `weftd`** — the
+Weft needs three macOS privacy permissions, and **all belong to `weftd`** — the
 engine — not to the `WeftBar` menu-bar app you can see. macOS grants these per
 binary, so granting them to WeftBar does nothing at all.
 
 | Permission | What it is for | Required |
 |---|---|---|
 | **Accessibility** | Moving, resizing and focusing windows | Yes |
-| **Input Monitoring** | Keybinds and mouse gestures | Yes |
-| **Screen Recording** | Only the focus highlight | No |
+| **Input Monitoring** | Keybinds and mouse gestures | Usually covered by Accessibility |
+| **Screen Recording** | Reading window titles — rules, switcher, sketchybar | Yes |
+
+Screen Recording is not about recording. Without it macOS redacts
+`kCGWindowName` for every window `weftd` does not own, so every title comes back
+empty: title-matching rules stop matching, and the switcher lists blank rows.
 
 The Setup window opens each System Settings pane in turn. In each one, find the
 row named **weftd** and turn its switch on — weft notices within a second and
 moves itself along. Nothing needs restarting.
+
+In practice you will often only be asked for Accessibility. macOS lets a
+process that already holds Accessibility open an event tap, so keybinds go live
+the moment that switch flips, and Setup marks Input Monitoring **Covered** and
+moves past it rather than claiming you granted it. Turning it on as well is
+harmless if you would rather have it explicit.
 
 `weftd` asks the system for both permissions on launch, which is what makes
 macOS *list* it, so the row should already be there waiting. If it is not, the

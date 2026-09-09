@@ -76,6 +76,9 @@ struct SettingsView: View {
         HStack(spacing: 0) {
             Sidebar(tab: $tab, health: health)
                 .frame(width: 218)
+                // The sidebar is navigation: it is the last thing that should
+                // give way when a detail pane wants more room than exists.
+                .layoutPriority(1)
 
             Divider()
 
@@ -83,7 +86,11 @@ struct SettingsView: View {
                 DetailHeader(tab: tab)
                 Divider().opacity(0.6)
 
-                ScrollView {
+                // Horizontal as well as vertical, as a backstop. A pane whose
+                // content cannot fit should scroll inside its own column; the
+                // failure this replaces was an HStack overflowing and taking
+                // the sidebar off the left edge of the window with it.
+                ScrollView([.vertical, .horizontal]) {
                     Group {
                         switch tab {
                         case .general: GeneralTab(store: store)
@@ -105,6 +112,7 @@ struct SettingsView: View {
                 Divider().opacity(0.6)
                 ActionBar(store: store, health: health)
             }
+            .frame(minWidth: 0, maxWidth: .infinity)
         }
         .frame(minWidth: 880, minHeight: 620)
         .tint(.weft)
@@ -418,6 +426,39 @@ private struct PixelField: View {
     }
 }
 
+/// Top/Bottom/Left/Right, on one line if there is room and two if there is not.
+private struct EdgeFields: View {
+    @Binding var top: Int
+    @Binding var bottom: Int
+    @Binding var left: Int
+    @Binding var right: Int
+    var range: ClosedRange<Int> = 0...400
+    let onChange: () -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { fields }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    PixelField(label: "Top", value: $top, range: range, onChange: onChange)
+                    PixelField(label: "Bottom", value: $bottom, range: range, onChange: onChange)
+                }
+                HStack(spacing: 12) {
+                    PixelField(label: "Left", value: $left, range: range, onChange: onChange)
+                    PixelField(label: "Right", value: $right, range: range, onChange: onChange)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var fields: some View {
+        PixelField(label: "Top", value: $top, range: range, onChange: onChange)
+        PixelField(label: "Bottom", value: $bottom, range: range, onChange: onChange)
+        PixelField(label: "Left", value: $left, range: range, onChange: onChange)
+        PixelField(label: "Right", value: $right, range: range, onChange: onChange)
+    }
+}
+
 // MARK: - General
 
 private struct GeneralTab: View {
@@ -464,12 +505,20 @@ private struct GeneralTab: View {
                                         ), in: 0...400).labelsHidden()
                                     }
                                 } else {
-                                    HStack(spacing: 12) {
-                                        PixelField(label: "Top", value: $store.outerTop) { store.markDirty() }
-                                        PixelField(label: "Bottom", value: $store.outerBottom) { store.markDirty() }
-                                        PixelField(label: "Left", value: $store.outerLeft) { store.markDirty() }
-                                        PixelField(label: "Right", value: $store.outerRight) { store.markDirty() }
-                                    }
+                                    // Four fields on one line need ~356pt, and
+                                    // the row already spends 164 on its label:
+                                    // with the preview beside it that is more
+                                    // than the window's minimum width, and
+                                    // nothing in this column could shrink. The
+                                    // HStack overflowed, and what spilled off
+                                    // was the fixed-width sidebar — unchecking
+                                    // this box pushed the navigation out of the
+                                    // window. Two rows when one will not fit.
+                                    EdgeFields(
+                                        top: $store.outerTop, bottom: $store.outerBottom,
+                                        left: $store.outerLeft, right: $store.outerRight,
+                                        onChange: { store.markDirty() }
+                                    )
                                 }
                             }
                         }
@@ -494,11 +543,12 @@ private struct GeneralTab: View {
 
             Card(title: "Screen reserve", subtitle: "Room kept clear for a bar or dock that is always on screen.") {
                 HStack(spacing: 12) {
-                    PixelField(label: "Top", value: $store.reserveTop) { store.markDirty() }
-                    PixelField(label: "Bottom", value: $store.reserveBottom) { store.markDirty() }
-                    PixelField(label: "Left", value: $store.reserveLeft) { store.markDirty() }
-                    PixelField(label: "Right", value: $store.reserveRight) { store.markDirty() }
-                    Spacer()
+                    EdgeFields(
+                        top: $store.reserveTop, bottom: $store.reserveBottom,
+                        left: $store.reserveLeft, right: $store.reserveRight,
+                        onChange: { store.markDirty() }
+                    )
+                    Spacer(minLength: 0)
                 }
             }
 
@@ -1269,7 +1319,7 @@ enum CommandCatalog {
             "split vertical", "split horizontal",
         ]),
         Group(name: "Stack", commands: [
-            "stack wrap", "stack next", "stack prev", "stack unstack",
+            "stack toggle", "stack next", "stack prev", "stack unstack",
         ]),
         Group(name: "Scroll layout", commands: [
             "scroll focus next-column", "scroll focus prev-column", "scroll width cycle",
@@ -1509,7 +1559,11 @@ private struct AdvancedTab: View {
 final class EngineHealth: ObservableObject {
     @Published var running = false
     @Published var accessibility = false
-    @Published var inputMonitoring = false
+    /// The event tap, not the Input Monitoring switch. This card is about
+    /// whether weft works, and Accessibility alone is enough for macOS to let
+    /// weftd open the tap — flagging "missing permissions" at someone whose
+    /// keybinds all fire is just wrong.
+    @Published var keybindsLive = false
     @Published var isRestarting = false
     /// Labels of the desktops that actually exist right now. `[[space]]` names
     /// are handed out in Mission Control order, so a config with more entries
@@ -1524,7 +1578,7 @@ final class EngineHealth: ObservableObject {
 
     private var timer: Timer?
 
-    var needsPermissions: Bool { running && !(accessibility && inputMonitoring) }
+    var needsPermissions: Bool { running && !(accessibility && keybindsLive) }
 
     var tint: Color {
         if !running { return .orange }
@@ -1541,7 +1595,7 @@ final class EngineHealth: ObservableObject {
         if needsPermissions {
             var missing: [String] = []
             if !accessibility { missing.append("Accessibility") }
-            if !inputMonitoring { missing.append("Input Monitoring") }
+            if !keybindsLive { missing.append("Input Monitoring") }
             return missing.joined(separator: " and ") + " is not granted to weftd."
         }
         return "Config changes apply within 100 ms."
@@ -1579,7 +1633,7 @@ final class EngineHealth: ObservableObject {
             await MainActor.run {
                 self.running = perms != nil
                 self.accessibility = perms?.accessibility ?? false
-                self.inputMonitoring = perms?.inputMonitoring ?? false
+                self.keybindsLive = perms?.tapLive ?? false
                 self.liveSpaces = spaces
             }
         }

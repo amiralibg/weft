@@ -155,7 +155,7 @@ public struct Keymap: Sendable, Equatable {
                 ("alt-shift-v", "split horizontal"),
                 ("alt-b", "balance"),
                 ("alt-shift-r", "mode resize"),
-                ("alt-s", "stack wrap"),
+                ("alt-s", "stack toggle"),
                 ("alt-shift-s", "stack split east"),
                 ("alt-bracketleft", "stack prev"),
                 ("alt-bracketright", "stack next"),

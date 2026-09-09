@@ -223,7 +223,7 @@ public enum Migrate {
                     else if actionRaw.contains("bsp") { weftCmd = "space layout bsp" }
                     else if actionRaw.contains("float") { weftCmd = "space layout float" }
                     else if actionRaw.contains("scroll") { weftCmd = "space layout scroll" }
-                    else if actionRaw.contains("stack") { weftCmd = "stack wrap" }
+                    else if actionRaw.contains("stack") { weftCmd = "stack toggle" }
                 }
                 else if actionRaw.contains("space --balance") { weftCmd = "balance" }
                 else if actionRaw.contains("window --resize") {

@@ -20,6 +20,23 @@ public struct ScreenReserve: Sendable, Equatable {
 
 public struct GeneralConfig: Sendable, Equatable {
     public var innerGap: Double
+    /// How far each window in a stack is inset from the one behind it, so the
+    /// pile is visible rather than looking like one window. 0 = flat.
+    public var stackOffset: Double
+    /// Whether to ask GitHub, once a day, if a newer weft has been released.
+    ///
+    /// weft installs from a curl script or a clone, so nothing else will ever
+    /// tell a user a fix exists. The check sends no identifying information
+    /// beyond a `weft/<version>` user agent, downloads nothing and installs
+    /// nothing — it surfaces a version number and the command to run.
+    public var checkForUpdates: Bool
+    /// Whether to manage windows belonging to menu-bar-only apps.
+    ///
+    /// Off by default: their windows are dropdown panels, and tiling one takes
+    /// a slot in the layout and steals the focus that clicking away would
+    /// otherwise use to dismiss it. On for anyone running a real app as an
+    /// agent who wants it tiled anyway.
+    public var manageMenubarApps: Bool
     public var outerGap: TilingConfig.OuterGap
     public var defaultLayout: LayoutKind
     public var mouseModifier: String
@@ -29,6 +46,9 @@ public struct GeneralConfig: Sendable, Equatable {
 
     public init(
         innerGap: Double = 8,
+        stackOffset: Double = 8,
+        manageMenubarApps: Bool = false,
+        checkForUpdates: Bool = true,
         outerGap: TilingConfig.OuterGap = TilingConfig.OuterGap(top: 8, bottom: 8, left: 8, right: 8),
         defaultLayout: LayoutKind = .bsp,
         mouseModifier: String = "alt",
@@ -37,6 +57,9 @@ public struct GeneralConfig: Sendable, Equatable {
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
+        self.stackOffset = stackOffset
+        self.manageMenubarApps = manageMenubarApps
+        self.checkForUpdates = checkForUpdates
         self.outerGap = outerGap
         self.defaultLayout = defaultLayout
         self.mouseModifier = mouseModifier
@@ -46,7 +69,7 @@ public struct GeneralConfig: Sendable, Equatable {
     }
 
     public func asTilingConfig() -> TilingConfig {
-        TilingConfig(innerGap: innerGap, outerGap: outerGap)
+        TilingConfig(innerGap: innerGap, outerGap: outerGap, stackOffset: stackOffset)
     }
 }
 
@@ -154,6 +177,9 @@ public struct ValidatedConfig: Sendable, Equatable {
         ValidatedConfig(
             general: GeneralConfig(
                 innerGap: 8,
+                stackOffset: 8,
+                manageMenubarApps: false,
+                checkForUpdates: true,
                 outerGap: TilingConfig.OuterGap(top: 8, bottom: 8, left: 8, right: 8),
                 defaultLayout: .bsp,
                 mouseModifier: "alt",
@@ -213,6 +239,17 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     throw err(path, "expected non-negative int")
                 }
                 general.innerGap = Double(n)
+            case "stack-offset":
+                guard case .int(let n) = v, n >= 0 else {
+                    throw err(path, "expected non-negative int")
+                }
+                general.stackOffset = Double(n)
+            case "check-for-updates":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                general.checkForUpdates = b
+            case "manage-menubar-apps":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                general.manageMenubarApps = b
             case "outer-gap":
                 general.outerGap = try parseOuterGap(v, path: path, lines: doc.lines)
             case "default-layout":

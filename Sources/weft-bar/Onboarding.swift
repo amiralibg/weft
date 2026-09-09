@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Combine
 import CoreGraphics
 import Foundation
 import SwiftUI
@@ -18,10 +19,33 @@ import SwiftUI
 struct DaemonPermissions: Decodable, Equatable {
     var binary: String
     var accessibility: Bool
-    /// From the live event tap, not a preflight: the tap is what keybinds
-    /// need, and it can fail where a preflight passes.
+    /// The Input Monitoring switch itself, as TCC has it.
     var inputMonitoring: Bool
+    /// The live event tap — what keybinds and mouse gestures actually run on.
+    ///
+    /// Kept apart from `inputMonitoring` because the two genuinely differ:
+    /// macOS lets an Accessibility-trusted process open an event tap, so the
+    /// tap comes up while the Input Monitoring switch is still off. This flow
+    /// used to report the tap under the Input Monitoring heading, which meant
+    /// granting Accessibility alone turned every row green and marched the
+    /// user straight to "Everything is granted" for a switch they had never
+    /// seen. Optional so a newer WeftBar still reads an older daemon.
+    var keybindsLive: Bool?
     var screenRecording: Bool
+    /// Whether weftd is signed with a stable identity. When false, a rebuild
+    /// has invalidated every grant TCC still shows as on — the switch in the
+    /// pane is enabled and doing nothing. Optional for older daemons.
+    var stableIdentity: Bool?
+
+    /// The pane will contradict us: it shows a switch that is on for a
+    /// program this binary no longer is.
+    var switchesMayLie: Bool { !(stableIdentity ?? true) }
+
+    /// What keybinds actually run on.
+    var tapLive: Bool { keybindsLive ?? inputMonitoring }
+    /// Functional readiness — the only thing worth gating Setup on.
+    /// Screen Recording counts: without it every window title is empty.
+    var ready: Bool { accessibility && tapLive && screenRecording }
 }
 
 enum PermissionKind: String, CaseIterable, Identifiable {
@@ -40,7 +64,7 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         switch self {
         case .accessibility: return "Move, resize and focus your windows."
         case .inputMonitoring: return "See your keybinds and mouse gestures."
-        case .screenRecording: return "Only the focus highlight. Tiling works without it."
+        case .screenRecording: return "Read window titles, for rules and the switcher."
         }
     }
 
@@ -60,9 +84,14 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         "Privacy & Security › \(title)"
     }
 
-    /// Screen Recording never blocks: stopping on it sent people hunting a
-    /// grant that changes nothing about tiling.
-    var isRequired: Bool { self != .screenRecording }
+    /// All three. Screen Recording used to be waved through as "only the
+    /// focus highlight" — it is not. Without it macOS redacts `kCGWindowName`
+    /// for every window weftd does not own, so every window title comes back
+    /// empty: rules that match on title never fire, the window switcher lists
+    /// blank rows, and sketchybar shows nothing. Skipping it does not cost a
+    /// highlight, it costs a working install, and the people most likely to
+    /// skip it are the ones least likely to connect the two.
+    var isRequired: Bool { true }
 
     var settingsURL: URL? {
         let anchor: String
@@ -103,6 +132,7 @@ final class SetupModel: ObservableObject {
                 .appendingPathComponent(".local/bin/weftd").path
     }
 
+    /// The switch in System Settings, as TCC has it. What the user did.
     func granted(_ kind: PermissionKind) -> Bool {
         guard let p = perms else { return false }
         switch kind {
@@ -112,12 +142,33 @@ final class SetupModel: ObservableObject {
         }
     }
 
-    var requiredGranted: Bool {
-        PermissionKind.allCases.filter(\.isRequired).allSatisfy(granted)
+    /// Whether the thing this permission buys actually works. What the user
+    /// gets.
+    ///
+    /// The two come apart on exactly one row: Accessibility is enough for
+    /// macOS to let weftd open an event tap, so keybinds fire with the Input
+    /// Monitoring switch still off. The flow advances on this — nobody should
+    /// be stopped on a step that is already working — while every label the
+    /// user reads comes from `granted`, so no one is told they flipped a
+    /// switch they never saw.
+    func satisfied(_ kind: PermissionKind) -> Bool {
+        guard let p = perms else { return false }
+        switch kind {
+        case .inputMonitoring: return p.tapLive
+        default: return granted(kind)
+        }
     }
 
+    /// Working, but not because of its own switch — the note the card shows so
+    /// a green row and an off switch stop contradicting each other.
+    func coveredByAccessibility(_ kind: PermissionKind) -> Bool {
+        kind == .inputMonitoring && satisfied(kind) && !granted(kind)
+    }
+
+    var requiredGranted: Bool { perms?.ready ?? false }
+
     var grantedCount: Int {
-        PermissionKind.allCases.filter(\.isRequired).filter(granted).count
+        PermissionKind.allCases.filter(\.isRequired).filter(satisfied).count
     }
 
     var requiredCount: Int { PermissionKind.allCases.filter(\.isRequired).count }
@@ -125,6 +176,45 @@ final class SetupModel: ObservableObject {
     /// After this long on one step, the likeliest explanation stops being
     /// "they are still reading" and starts being "the row is not there".
     var isStuck: Bool { waitedSeconds >= 20 }
+
+    /// Whether Setup may be dismissed at all.
+    ///
+    /// It may not, while weftd is answering and something it needs is still
+    /// missing. A half-granted weft is not a degraded weft — it is windows
+    /// that float free, keybinds that do nothing and empty window titles, with
+    /// no hint anywhere that a permission is the reason. Letting the one
+    /// window that explains that be closed on the first page is how people
+    /// ended up with an installed weft they concluded was broken.
+    ///
+    /// The exception is a daemon that is not answering: there is nothing to
+    /// grant against, Setup says so, and trapping someone in a window that
+    /// cannot help them is its own bug.
+    var canDismiss: Bool { requiredGranted || !daemonReachable }
+
+    /// Set briefly when a dismiss is refused, so the page can explain itself
+    /// instead of the window simply not closing.
+    @Published var blockedDismissAt: Date?
+
+    var showsBlockedDismissHint: Bool {
+        guard let at = blockedDismissAt else { return false }
+        return Date().timeIntervalSince(at) < 6
+    }
+
+    func flashBlockedDismiss() {
+        blockedDismissAt = Date()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_200_000_000)
+            withAnimation(.easeOut(duration: 0.3)) { self?.blockedDismissAt = nil }
+        }
+    }
+
+    /// weftd was rebuilt since it was granted, so the pane is showing switches
+    /// that are on and inert. Worth saying before anything else on the page:
+    /// the instruction "turn it on" is unfollowable when it already is.
+    var showsStaleGrantWarning: Bool {
+        guard let p = perms else { return false }
+        return p.switchesMayLie && !p.ready
+    }
 
     // MARK: Polling
 
@@ -184,7 +274,7 @@ final class SetupModel: ObservableObject {
                 activeStep = nil
                 page = .done
             }
-        } else if let current = activeStep, granted(current) {
+        } else if let current = activeStep, satisfied(current) {
             advanceStep()
         }
     }
@@ -200,7 +290,7 @@ final class SetupModel: ObservableObject {
 
     /// Open the pane for the first ungranted required permission.
     func advanceStep() {
-        guard let next = PermissionKind.allCases.first(where: { $0.isRequired && !granted($0) })
+        guard let next = PermissionKind.allCases.first(where: { $0.isRequired && !satisfied($0) })
         else {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) { page = .done }
             return
@@ -268,6 +358,16 @@ final class SetupModel: ObservableObject {
         )
         Task.detached(priority: .userInitiated) {
             ConfigEditorWindowController.restartWeftCtl()
+            // Wait for the daemon to answer again before handing over.
+            //
+            // `launchctl kickstart -k` returns the moment it has signalled, so
+            // for a second or so after this there is no socket to talk to. The
+            // relaunched WeftBar used to ask straight into that gap, read the
+            // silence as "permissions missing", and reopen Setup — on a
+            // machine where everything was already granted. Finish, relaunch,
+            // "Everything is granted", Finish: the loop had no exit, because
+            // nothing about it depended on the permissions at all.
+            _ = await OnboardingWindowController.awaitDaemon()
             await MainActor.run {
                 // Relaunch so hotkeys re-register under the new grants.
                 let proc = Process()
@@ -391,8 +491,8 @@ private struct WelcomePage: View {
             VStack(alignment: .leading, spacing: 16) {
                 Bullet(
                     symbol: "lock.shield",
-                    title: "Two switches to flip",
-                    text: "Both belong to **weftd**, the engine — not to this menu-bar app."
+                    title: "Three switches to flip",
+                    text: "All belong to **weftd**, the engine — not to this menu-bar app."
                 )
                 Bullet(
                     symbol: "arrow.right.circle",
@@ -414,7 +514,7 @@ private struct WelcomePage: View {
 
             VStack(spacing: 14) {
                 Button(action: model.beginPermissions) {
-                    Text(model.requiredGranted ? "Everything is granted" : "Get started")
+                    Text(model.requiredGranted ? "Review permissions" : "Get started")
                         .frame(width: 190)
                 }
                 .buttonStyle(.borderedProminent)
@@ -422,10 +522,10 @@ private struct WelcomePage: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.daemonReachable)
 
-                if model.daemonReachable {
-                    CloseButton(action: onClose)
-                } else {
+                if !model.daemonReachable {
                     DaemonUnreachableNotice()
+                } else if model.canDismiss {
+                    CloseButton(action: onClose)
                 }
             }
             .padding(.bottom, 44)
@@ -507,6 +607,19 @@ private struct PermissionsPage: View {
             .padding(.horizontal, 32)
             .padding(.top, 38)
 
+            if model.showsStaleGrantWarning {
+                StaleGrantBanner()
+                    .padding(.horizontal, 32)
+                    .padding(.top, 16)
+            }
+
+            if model.showsBlockedDismissHint {
+                BlockedDismissNotice()
+                    .padding(.horizontal, 32)
+                    .padding(.top, 16)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             ProgressBar(granted: model.grantedCount, total: model.requiredCount)
                 .padding(.horizontal, 32)
                 .padding(.top, 18)
@@ -517,6 +630,8 @@ private struct PermissionsPage: View {
                         PermissionCard(
                             kind: kind,
                             granted: model.granted(kind),
+                            satisfied: model.satisfied(kind),
+                            covered: model.coveredByAccessibility(kind),
                             isActive: model.activeStep == kind,
                             model: model
                         )
@@ -531,6 +646,58 @@ private struct PermissionsPage: View {
 
             FooterBar(model: model, onClose: onClose)
         }
+    }
+}
+
+/// Shown when someone tries to close Setup with a permission still missing.
+private struct BlockedDismissNotice: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.fill")
+                .foregroundStyle(Color.weft)
+            Text("Weft cannot tile, resize or respond to a keybind until these are granted — so this window stays until they are. Quit WeftBar from the menu bar icon if you would rather stop here.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.weft.opacity(0.10))
+        )
+    }
+}
+
+/// Shown when weftd was rebuilt after being granted.
+///
+/// Without this the flow is unwinnable and looks like weft's fault: the pane
+/// says granted, Setup says missing, and there is no third thing on screen to
+/// explain how both can be true.
+private struct StaleGrantBanner: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.system(size: 15))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("System Settings will show these as already on")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("weft was rebuilt since you granted it, and macOS ties a permission to the exact program it was granted to. The switches are on for the old one. **Turn each switch off and back on** — that is the whole fix, and it only happens on this build.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(13)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.3), lineWidth: 1)
+        )
     }
 }
 
@@ -562,7 +729,7 @@ private struct FooterBar: View {
             .foregroundStyle(.tertiary)
 
             HStack(spacing: 12) {
-                CloseButton(action: onClose)
+                if model.canDismiss { CloseButton(action: onClose) }
                 Spacer()
                 Button {
                     model.restartEngine()
@@ -630,11 +797,16 @@ private struct ProgressBar: View {
 
 private struct PermissionCard: View {
     let kind: PermissionKind
+    /// The switch in System Settings.
     let granted: Bool
+    /// Whether what this row buys actually works.
+    let satisfied: Bool
+    /// Working, with its own switch still off.
+    let covered: Bool
     let isActive: Bool
     @ObservedObject var model: SetupModel
 
-    private var expanded: Bool { isActive && !granted }
+    private var expanded: Bool { isActive && !satisfied }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -653,13 +825,13 @@ private struct PermissionCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
-                    granted ? Color.green.opacity(0.35)
+                    satisfied ? Color.green.opacity(0.35)
                         : expanded ? Color.weft.opacity(0.55)
                         : Color.primary.opacity(0.06),
                     lineWidth: 1
                 )
         )
-        .animation(.spring(response: 0.42, dampingFraction: 0.85), value: granted)
+        .animation(.spring(response: 0.42, dampingFraction: 0.85), value: satisfied)
         .animation(.spring(response: 0.42, dampingFraction: 0.85), value: expanded)
     }
 
@@ -667,10 +839,10 @@ private struct PermissionCard: View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(granted ? Color.green.opacity(0.16) : Color.weft.opacity(0.15))
-                Image(systemName: granted ? "checkmark" : kind.symbol)
-                    .font(.system(size: 16, weight: granted ? .bold : .regular))
-                    .foregroundStyle(granted ? Color.green : Color.weft)
+                    .fill(satisfied ? Color.green.opacity(0.16) : Color.weft.opacity(0.15))
+                Image(systemName: satisfied ? "checkmark" : kind.symbol)
+                    .font(.system(size: 16, weight: satisfied ? .bold : .regular))
+                    .foregroundStyle(satisfied ? Color.green : Color.weft)
                     .contentTransition(.symbolEffect(.replace))
             }
             .frame(width: 38, height: 38)
@@ -684,7 +856,7 @@ private struct PermissionCard: View {
                         tint: kind.isRequired ? Color.weft : Color.secondary
                     )
                 }
-                Text(kind.detail)
+                Text(covered ? "Working — but the Input Monitoring switch is still off." : kind.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -692,10 +864,18 @@ private struct PermissionCard: View {
 
             Spacer(minLength: 8)
 
-            if granted {
-                Text("Granted")
+            if satisfied {
+                // "Granted" is a claim about what the user did, so it is only
+                // used when they actually did it. Accessibility is enough for
+                // macOS to let weftd open the event tap, and reporting that as
+                // a grant sent people looking for a switch they had never
+                // touched — and finding it off.
+                Text(covered ? "Covered" : "Granted")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.green)
+                    .help(covered
+                        ? "Accessibility already lets weftd read your keybinds. Turning Input Monitoring on as well is optional."
+                        : "The switch is on in System Settings.")
                     .transition(.scale.combined(with: .opacity))
             } else if expanded {
                 WaitingPip()
@@ -716,8 +896,17 @@ private struct PermissionCard: View {
 
             VStack(alignment: .leading, spacing: 9) {
                 Step(1, "Find the row named **weftd** in the list.")
-                Step(2, "Turn its switch **on**.")
-                Step(3, "If macOS offers to quit and reopen, choose **Later** — weft picks the grant up on its own.")
+                if model.showsStaleGrantWarning {
+                    // The only instruction that works when the switch is
+                    // already on. Telling someone to "turn it on" in that
+                    // state is not a hard instruction, it is an impossible
+                    // one, and they conclude weft is broken — correctly.
+                    Step(2, "Its switch is probably **already on**. Turn it **off**, then **on** again.")
+                    Step(3, "If macOS offers to quit and reopen, choose **Later**.")
+                } else {
+                    Step(2, "Turn its switch **on**. If it is already on, turn it **off and on again**.")
+                    Step(3, "If macOS offers to quit and reopen, choose **Later** — weft picks the grant up on its own.")
+                }
             }
 
             fallback
@@ -867,21 +1056,39 @@ private struct DonePage: View {
                 .padding(.top, 24)
                 .opacity(appeared ? 1 : 0)
 
-            Text("Everything required is granted.")
+            Text("Windows tile, keybinds fire.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .padding(.top, 6)
                 .opacity(appeared ? 1 : 0)
 
-            VStack(alignment: .leading, spacing: 15) {
-                Bullet(symbol: "square.grid.2x2", text: "Your windows tile as you open them.")
-                Bullet(symbol: "keyboard", text: "Your keybinds are live — press **⌘K** for the cheatsheet.")
-                Bullet(symbol: "gearshape", text: "Settings and everything else live in the menu-bar icon.")
+            // Named, not summarised. "Everything required is granted" is the
+            // one sentence a user cannot check, and when it was wrong — a live
+            // event tap counted as an Input Monitoring grant — there was
+            // nothing on the page to catch it. Three rows saying what each
+            // switch actually reads costs the same space and cannot lie.
+            VStack(alignment: .leading, spacing: 11) {
+                ForEach(PermissionKind.allCases) { kind in
+                    SummaryRow(
+                        kind: kind,
+                        granted: model.granted(kind),
+                        satisfied: model.satisfied(kind),
+                        covered: model.coveredByAccessibility(kind)
+                    )
+                }
             }
-            .padding(.top, 32)
+            .padding(.top, 30)
             .frame(maxWidth: 420, alignment: .leading)
             .opacity(appeared ? 1 : 0)
             .offset(y: appeared ? 0 : 12)
+
+            Text("Press **⌘K** for the cheatsheet. Everything else lives in the menu-bar icon.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 22)
+                .frame(maxWidth: 420, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .opacity(appeared ? 1 : 0)
 
             Spacer()
 
@@ -932,11 +1139,44 @@ private struct AppIcon: View {
     }
 }
 
+/// One permission, on the final page: what it reads and what that buys.
+private struct SummaryRow: View {
+    let kind: PermissionKind
+    let granted: Bool
+    let satisfied: Bool
+    let covered: Bool
+
+    private var status: (text: String, tint: Color, symbol: String) {
+        if covered {
+            return ("Covered by Accessibility", .green, "checkmark.circle.fill")
+        }
+        if satisfied { return ("Granted", .green, "checkmark.circle.fill") }
+        if kind.isRequired { return ("Missing", .orange, "exclamationmark.circle.fill") }
+        return ("Off — optional", .secondary, "minus.circle")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: status.symbol)
+                .font(.system(size: 15))
+                .foregroundStyle(status.tint)
+                .frame(width: 18)
+            Text(kind.title)
+                .font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 12)
+            Text(status.text)
+                .font(.system(size: 12))
+                .foregroundStyle(status.tint == .secondary ? .secondary : status.tint)
+        }
+    }
+}
+
 // MARK: - Window
 
 @MainActor
-final class OnboardingWindowController: NSWindowController {
+final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     static let shared = OnboardingWindowController()
+    private var dismissWatch: AnyCancellable?
 
     static var flagURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -963,23 +1203,71 @@ final class OnboardingWindowController: NSWindowController {
         window.contentView = NSHostingView(
             rootView: SetupView(model: model) { [weak self] in self?.hide() }
         )
+        window.delegate = self
+        // The title bar has its own close button, and it does not consult the
+        // view. Keep it in step with whether Setup is dismissable at all.
+        dismissWatch = model.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in self?.syncCloseButton() }
+        }
+        syncCloseButton()
+    }
+
+    private func syncCloseButton() {
+        window?.standardWindowButton(.closeButton)?.isEnabled = model.canDismiss
+    }
+
+    /// The red button and ⌘W, gated the same way as the in-page Close.
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        MainActor.assumeIsolated {
+            guard model.canDismiss else {
+                // Say why, rather than swallowing the click and looking broken.
+                NSSound.beep()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
+                    model.flashBlockedDismiss()
+                }
+                return false
+            }
+            model.stopPolling()
+            return true
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    static func shouldShow() -> Bool {
+    /// Off the main thread: the socket read blocks, and at login it blocks
+    /// while the daemon is still coming up.
+    ///
+    /// Silence is not an answer. Once the flag is written, Setup reopens only
+    /// when weftd *says* something is missing — never because it was too busy
+    /// starting to reply, which is the state WeftBar is in every single time
+    /// it is relaunched right after a service restart.
+    static func shouldShow() async -> Bool {
         if !FileManager.default.fileExists(atPath: flagURL.path) { return true }
-        return !shared.allGreen()
+        guard let p = await awaitDaemon() else { return false }
+        return !p.ready
     }
 
-    /// Synchronous, for the launch-time decision in `main`. The flow itself
-    /// polls off the main thread.
-    func allGreen() -> Bool {
+    /// Poll the socket until the daemon answers, up to `timeout`. Returns nil
+    /// if it never does.
+    static func awaitDaemon(timeout: TimeInterval = 6) async -> DaemonPermissions? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let p = await Task.detached(priority: .utility, operation: {
+                query()
+            }).value {
+                return p
+            }
+            guard Date() < deadline else { return nil }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+    }
+
+    /// One blocking round trip. Never call on the main thread.
+    nonisolated static func query() -> DaemonPermissions? {
         guard let json = BarIPC.send("query permissions"),
-              let data = json.data(using: .utf8),
-              let p = try? JSONDecoder().decode(DaemonPermissions.self, from: data)
-        else { return false }
-        return p.accessibility && p.inputMonitoring
+              let data = json.data(using: .utf8)
+        else { return nil }
+        return try? JSONDecoder().decode(DaemonPermissions.self, from: data)
     }
 
     func show() {
@@ -989,6 +1277,13 @@ final class OnboardingWindowController: NSWindowController {
     }
 
     func hide() {
+        guard model.canDismiss else {
+            NSSound.beep()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
+                model.flashBlockedDismiss()
+            }
+            return
+        }
         model.stopPolling()
         window?.orderOut(nil)
     }
