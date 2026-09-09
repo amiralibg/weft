@@ -124,6 +124,14 @@ final class SetupModel: ObservableObject {
     /// Opened by the user, or by the flow after a long enough wait. Holds the
     /// "weftd is not in the list" recovery: reveal, drag, paste the path.
     @Published var showsFallback = false
+    /// The card whose instructions are showing. The flow opens the step it
+    /// moves to; the user can open and close any unsatisfied row by clicking
+    /// it. Kept apart from `activeStep` because that gets cleared by states
+    /// this row knows nothing about — a pending engine restart, most of all —
+    /// and expansion used to read straight off it, so the card someone was
+    /// mid-way through following sealed itself shut a second after they
+    /// opened it, with no way to prise it back open.
+    @Published var openedCard: PermissionKind?
     /// Seconds the current step has been waiting. Drives the "still nothing?"
     /// hint rather than a spinner that says the same thing forever.
     @Published var waitedSeconds = 0
@@ -226,10 +234,25 @@ final class SetupModel: ObservableObject {
         return p.switchesMayLie && !p.ready
     }
 
+    /// Every required row is working. What the restart banner claims, and so
+    /// what it has to wait for.
+    var allRequiredSatisfied: Bool {
+        PermissionKind.allCases.filter(\.isRequired).allSatisfy(satisfied)
+    }
+
     /// Every switch is on and the engine still cannot work, because it was
     /// running before the switches were flipped. One button fixes it, so the
     /// page shows one button.
-    var needsEngineRestart: Bool { perms?.mustRestart ?? false }
+    ///
+    /// weftd reports the pending restart the moment Accessibility lands, which
+    /// is two steps before the flow is done. Taken at face value that put a
+    /// banner reading "Everything is granted" above a Screen Recording row
+    /// that plainly was not — and, because the restart branch clears
+    /// `activeStep`, it collapsed the card the user was standing on a second
+    /// after they opened it, so the drag-weftd-into-the-list instructions and
+    /// the button that reveals the binary could not be reached at all. The
+    /// restart is the last thing left, or it is not yet the thing to say.
+    var needsEngineRestart: Bool { (perms?.mustRestart ?? false) && allRequiredSatisfied }
 
     // MARK: Polling
 
@@ -319,7 +342,14 @@ final class SetupModel: ObservableObject {
     func advanceStep() {
         guard let next = PermissionKind.allCases.first(where: { $0.isRequired && !satisfied($0) })
         else {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) { page = .done }
+            // Nothing left to switch on. If the engine still has to restart
+            // before it can use any of it, "you are all set" is one page too
+            // early — the banner that fixes it lives on this one.
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                activeStep = nil
+                openedCard = nil
+                if !needsEngineRestart { page = .done }
+            }
             return
         }
         focusStep(next)
@@ -328,6 +358,7 @@ final class SetupModel: ObservableObject {
     func focusStep(_ kind: PermissionKind) {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             activeStep = kind
+            openedCard = kind
             showsFallback = false
         }
         stepStarted = Date()
@@ -673,7 +704,6 @@ private struct PermissionsPage: View {
                             granted: model.granted(kind),
                             satisfied: model.satisfied(kind),
                             covered: model.coveredByAccessibility(kind),
-                            isActive: model.activeStep == kind,
                             model: model
                         )
                     }
@@ -834,13 +864,25 @@ private struct FooterBar: View {
                 .help("Only if a granted switch still reads as missing here")
 
                 Button {
-                    if let step = model.activeStep { model.focusStep(step) } else { model.advanceStep() }
+                    if model.needsEngineRestart {
+                        model.restartEngine()
+                    } else if let step = model.activeStep {
+                        model.focusStep(step)
+                    } else {
+                        model.advanceStep()
+                    }
                 } label: {
-                    Text(model.activeStep == nil ? "Continue" : "Reopen pane")
+                    // "Continue" with the restart pending walked into a page
+                    // that refuses to advance, so the one button people reach
+                    // for did nothing at all. When a restart is the only thing
+                    // left, it is what the primary button does.
+                    Text(model.needsEngineRestart ? "Restart the engine"
+                        : model.activeStep == nil ? "Continue" : "Reopen pane")
                         .frame(minWidth: 108)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(model.isRestarting)
                 .keyboardShortcut(.defaultAction)
             }
         }
@@ -893,10 +935,23 @@ private struct PermissionCard: View {
     let satisfied: Bool
     /// Working, with its own switch still off.
     let covered: Bool
-    let isActive: Bool
     @ObservedObject var model: SetupModel
 
-    private var expanded: Bool { isActive && !satisfied }
+    // Not `model.activeStep == kind`: the flow's own pointer is cleared by
+    // states that have nothing to do with this row, and while expansion read
+    // off it a card could collapse under the user mid-instruction. The open
+    // card is its own piece of state, set by the flow and by the user, and
+    // only ever changed by one of them.
+    private var expanded: Bool { !satisfied && model.openedCard == kind }
+
+    /// Anything still ungranted can be opened and closed by hand.
+    private var expandable: Bool { !satisfied }
+
+    private func toggle() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
+            model.openedCard = expanded ? nil : kind
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -972,7 +1027,19 @@ private struct PermissionCard: View {
             } else {
                 Button("Open") { model.focusStep(kind) }
             }
+
+            if expandable {
+                // Says the row has more behind it, and gives the tap target a
+                // shape people already know how to read.
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .padding(.leading, 2)
+            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { if expandable { toggle() } }
     }
 
     private var instructions: some View {
