@@ -186,7 +186,8 @@ jobs:
           ## Install
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-release.sh | bash
+          curl -fsSL --retry 5 --retry-all-errors \\
+            https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-release.sh | bash
           \`\`\`
 
           Or download the archive below, unpack it, and run \`./install.sh\`.

@@ -52,7 +52,8 @@ it with your desktop.
 macOS 15 or later, Intel or Apple Silicon.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash
+curl -fsSL --retry 5 --retry-all-errors \
+  https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash
 ```
 
 That downloads the [latest release](https://github.com/amiralibg/weft/releases/latest),

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Install a released weft build — no clone, no toolchain, no compile.
 #
-#   curl -fsSL https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash
+#   curl -fsSL --retry 5 --retry-all-errors \
+#     https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash
+#
+# The retry flags are not decoration: GitHub's hosts drop connections from some
+# networks often enough that a single attempt is a coin flip, and without them
+# the pipeline fails before this script ever runs.
 #
 # Or, from an unpacked release archive, just: ./install.sh
 #
