@@ -756,24 +756,13 @@ private struct RestartBanner: View {
             Image(systemName: "arrow.clockwise.circle.fill")
                 .foregroundStyle(Color.weft)
                 .font(.system(size: 17))
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("One restart and weft is ready")
                     .font(.system(size: 13, weight: .semibold))
-                Text("Everything is granted. The engine was already running when you granted it, and macOS only hands out that access at launch — so it needs to start once more to pick it up.")
+                Text("Everything is granted. The engine was already running when you granted it, and macOS only hands out that access at launch — restart the engine below to finish setup.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button {
-                    model.restartEngine()
-                } label: {
-                    HStack(spacing: 6) {
-                        if model.isRestarting { ProgressView().controlSize(.small) }
-                        Text(model.isRestarting ? "Restarting…" : "Restart the engine")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.isRestarting)
-                .keyboardShortcut(.defaultAction)
             }
             Spacer(minLength: 0)
         }
@@ -851,17 +840,19 @@ private struct FooterBar: View {
             HStack(spacing: 12) {
                 if model.canDismiss { CloseButton(action: onClose) }
                 Spacer()
-                Button {
-                    model.restartEngine()
-                } label: {
-                    HStack(spacing: 6) {
-                        if model.isRestarting { ProgressView().controlSize(.small) }
-                        Text(model.isRestarting ? "Restarting…" : "Restart engine")
+                if !model.needsEngineRestart && !model.allRequiredSatisfied {
+                    Button {
+                        model.restartEngine()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if model.isRestarting { ProgressView().controlSize(.small) }
+                            Text(model.isRestarting ? "Restarting…" : "Restart engine")
+                        }
                     }
+                    .controlSize(.large)
+                    .disabled(model.isRestarting)
+                    .help("Only if a granted switch still reads as missing here")
                 }
-                .controlSize(.large)
-                .disabled(model.isRestarting)
-                .help("Only if a granted switch still reads as missing here")
 
                 Button {
                     if model.needsEngineRestart {
@@ -872,13 +863,14 @@ private struct FooterBar: View {
                         model.advanceStep()
                     }
                 } label: {
-                    // "Continue" with the restart pending walked into a page
-                    // that refuses to advance, so the one button people reach
-                    // for did nothing at all. When a restart is the only thing
-                    // left, it is what the primary button does.
-                    Text(model.needsEngineRestart ? "Restart the engine"
-                        : model.activeStep == nil ? "Continue" : "Reopen pane")
-                        .frame(minWidth: 108)
+                    HStack(spacing: 6) {
+                        if model.needsEngineRestart && model.isRestarting {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(model.needsEngineRestart ? (model.isRestarting ? "Restarting…" : "Restart the engine")
+                            : model.activeStep == nil ? "Continue" : "Reopen pane")
+                    }
+                    .frame(minWidth: 108)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)

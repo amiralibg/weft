@@ -149,11 +149,11 @@ public final class BorderRenderer: @unchecked Sendable {
 
     /// Same, keeping whichever window is already the focused one. Used by the
     /// drag path, which changes geometry and nothing else.
-    public func update(frames: [WindowID: Frame]) {
+    public func update(frames: [WindowID: Frame], scope: Set<WindowID>? = nil) {
         let (on, focus) = lock.withLock { (enabled, focused) }
         guard on else { return }
-        let scope = Set(frames.keys)
-        queue.async { self.sync(frames: frames, focused: focus, scope: scope) }
+        let s = scope ?? Set(frames.keys)
+        queue.async { self.sync(frames: frames, focused: focus, scope: s) }
     }
 
     /// Drop every overlay, because whatever they were describing is no longer
@@ -187,7 +187,10 @@ public final class BorderRenderer: @unchecked Sendable {
                 self.overlays = [:]
                 return ids
             }
-            for wid in dead { SLSReleaseWindow(self.cid, wid) }
+            for wid in dead {
+                SLSOrderWindow(self.cid, wid, 0, 0)
+                SLSReleaseWindow(self.cid, wid)
+            }
         }
     }
 
@@ -243,6 +246,12 @@ public final class BorderRenderer: @unchecked Sendable {
         } else if !samePlace {
             var origin = frame.origin
             SLSMoveWindow(cid, overlay.wid, &origin)
+            if overlay.color == color {
+                overlay.target = target
+                lock.withLock { overlays[wid] = overlay }
+                order(overlay.wid, above: wid)
+                return
+            }
         }
         overlay.target = target
         overlay.color = color
@@ -300,7 +309,10 @@ public final class BorderRenderer: @unchecked Sendable {
             guard let overlay = overlays.removeValue(forKey: wid) else { return nil }
             return overlay.wid
         }
-        if let dead { SLSReleaseWindow(cid, dead) }
+        if let dead {
+            SLSOrderWindow(cid, dead, 0, 0)
+            SLSReleaseWindow(cid, dead)
+        }
     }
 
     /// Put the overlay directly above the window it belongs to.

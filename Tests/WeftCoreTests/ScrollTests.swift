@@ -227,3 +227,65 @@ private func strip(_ ids: WindowID...) -> ScrollState {
     #expect(try Command.parse("scroll move-window prev-column") == .scroll(.moveColumn(-1)))
     #expect(try Command.parse("scroll width cycle") == .scroll(.widthCycle))
 }
+
+@Test func scrollDirectionalFocusTraversesAllColumnsAndRows() {
+    let s = ScrollState(columns: [
+        Column(windows: [1]),
+        Column(windows: [2, 3]),
+        Column(windows: [4]),
+        Column(windows: [5]),
+    ], focusCol: 0, focusRow: 0)
+
+    // East to Col 1 (win 2)
+    let (s1, m1) = Reducer.reduceScroll(s, screen: scrollScreen, config: noGaps, command: .focus(.east))
+    #expect(s1.focusedWindow == 2)
+    #expect(s1.focusCol == 1 && s1.focusRow == 0)
+    #expect(m1.contains(.focusWindow(2)))
+
+    // South to win 3 in Col 1
+    let (s2, m2) = Reducer.reduceScroll(s1, screen: scrollScreen, config: noGaps, command: .focus(.south))
+    #expect(s2.focusedWindow == 3)
+    #expect(s2.focusCol == 1 && s2.focusRow == 1)
+    #expect(m2.contains(.focusWindow(3)))
+
+    // North back to win 2
+    let (s3, _) = Reducer.reduceScroll(s2, screen: scrollScreen, config: noGaps, command: .focus(.north))
+    #expect(s3.focusedWindow == 2)
+    #expect(s3.focusCol == 1 && s3.focusRow == 0)
+
+    // East to Col 2 (win 4)
+    let (s4, _) = Reducer.reduceScroll(s3, screen: scrollScreen, config: noGaps, command: .focus(.east))
+    #expect(s4.focusedWindow == 4)
+    #expect(s4.focusCol == 2)
+
+    // East to Col 3 (win 5)
+    let (s5, _) = Reducer.reduceScroll(s4, screen: scrollScreen, config: noGaps, command: .focus(.east))
+    #expect(s5.focusedWindow == 5)
+    #expect(s5.focusCol == 3)
+
+    // West back to Col 2 (win 4)
+    let (s6, _) = Reducer.reduceScroll(s5, screen: scrollScreen, config: noGaps, command: .focus(.west))
+    #expect(s6.focusedWindow == 4)
+    #expect(s6.focusCol == 2)
+}
+
+@Test func scrollDirectionalMoveSwapsColumnsAndRows() {
+    let s = ScrollState(columns: [
+        Column(windows: [1]),
+        Column(windows: [2, 3]),
+        Column(windows: [4]),
+    ], focusCol: 1, focusRow: 0)
+
+    // In Col 1 (windows [2, 3]), move south swaps rows
+    let (s1, _) = Reducer.reduceScroll(s, screen: scrollScreen, config: noGaps, command: .move(.south))
+    #expect(s1.columns[1].windows == [3, 2])
+    #expect(s1.focusedWindow == 2)
+    #expect(s1.focusRow == 1)
+
+    // Move east swaps Col 1 and Col 2
+    let (s2, _) = Reducer.reduceScroll(s1, screen: scrollScreen, config: noGaps, command: .move(.east))
+    #expect(s2.columns[1].windows == [4])
+    #expect(s2.columns[2].windows == [3, 2])
+    #expect(s2.focusedWindow == 2)
+    #expect(s2.focusCol == 2)
+}

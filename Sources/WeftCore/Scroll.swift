@@ -183,6 +183,44 @@ public struct ScrollState: Sendable, Equatable {
         return copy
     }
 
+    /// Move focus by rows within the current column.
+    public func movingFocusByRow(_ delta: Int) -> ScrollState {
+        guard columns.indices.contains(focusCol) else { return self }
+        let rowCount = columns[focusCol].windows.count
+        guard rowCount > 0 else { return self }
+        var copy = self
+        copy.focusRow = min(max(copy.focusRow + delta, 0), rowCount - 1)
+        return copy
+    }
+
+    /// Swap the focused column with an adjacent column in the strip (delta = ±1).
+    public func swappingColumns(_ delta: Int) -> ScrollState {
+        guard columns.indices.contains(focusCol) else { return self }
+        let targetCol = focusCol + delta
+        guard columns.indices.contains(targetCol), targetCol != focusCol else { return self }
+        var copy = self
+        copy.columns.swapAt(focusCol, targetCol)
+        copy.focusCol = targetCol
+        return copy
+    }
+
+    /// Swap the focused row with an adjacent row in the current column (delta = ±1).
+    public func swappingRowsInFocusedColumn(_ delta: Int) -> ScrollState {
+        guard columns.indices.contains(focusCol) else { return self }
+        let targetRow = focusRow + delta
+        guard columns[focusCol].windows.indices.contains(targetRow), targetRow != focusRow else {
+            return self
+        }
+        var copy = self
+        copy.columns[focusCol].windows.swapAt(focusRow, targetRow)
+        if copy.columns[focusCol].heights.indices.contains(focusRow) &&
+           copy.columns[focusCol].heights.indices.contains(targetRow) {
+            copy.columns[focusCol].heights.swapAt(focusRow, targetRow)
+        }
+        copy.focusRow = targetRow
+        return copy
+    }
+
     /// Move the focused window into the adjacent column (merge). Empty
     /// columns are dropped. Focus stays on the moved window.
     public func movingWindowToColumn(_ delta: Int) -> ScrollState {

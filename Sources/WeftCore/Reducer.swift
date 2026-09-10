@@ -172,17 +172,27 @@ public enum Reducer {
             guard sc.windows.contains(id) else { return (sc, []) }
             next = sc.focusing(id)
         case .focus(let dir):
-            let (frames, _) = scrollLayout(sc, screen: screen, config: config)
-            guard let focused = sc.focusedWindow,
-                  let id = neighbour(of: focused, in: frames, towards: dir)
-            else { return (sc, []) }
-            next = sc.focusing(id)
+            switch dir {
+            case .west:
+                next = sc.movingFocusByColumn(-1)
+            case .east:
+                next = sc.movingFocusByColumn(1)
+            case .north:
+                next = sc.movingFocusByRow(-1)
+            case .south:
+                next = sc.movingFocusByRow(1)
+            }
         case .move(let dir):
-            let (frames, _) = scrollLayout(sc, screen: screen, config: config)
-            guard let focused = sc.focusedWindow,
-                  let id = neighbour(of: focused, in: frames, towards: dir)
-            else { return (sc, []) }
-            next = sc.swapping(focused, id)
+            switch dir {
+            case .west:
+                next = sc.swappingColumns(-1)
+            case .east:
+                next = sc.swappingColumns(1)
+            case .north:
+                next = sc.swappingRowsInFocusedColumn(-1)
+            case .south:
+                next = sc.swappingRowsInFocusedColumn(1)
+            }
         case .resize(let dir, let delta):
             // Column widths on the horizontal axis, row shares on the
             // vertical one. Vertical used to be a no-op, which made the whole

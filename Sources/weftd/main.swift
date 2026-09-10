@@ -525,7 +525,8 @@ final class Daemon: @unchecked Sendable {
         // the window during a drag.
         if bordersBridge.drawsBorders {
             let parked = readParked()
-            bordersBridge.renderer.update(frames: frames.filter { !parked.contains($0.key) })
+            let live = frames.filter { !parked.contains($0.key) }
+            bordersBridge.renderer.update(frames: live, scope: Set(frames.keys))
         }
     }
 

@@ -99,23 +99,22 @@ final class BordersBridge: @unchecked Sendable {
             warnedExternal = false
             return
         }
-        guard supervised else {
-            if !warnedExternal {
-                warnedExternal = true
-                fputs(
-                    "weftd: borders is running and weft is drawing its own — you will see two "
-                        + "outlines. Quit borders, or set [integrations.borders] backend = \"janky\".\n",
-                    stderr
-                )
-            }
-            return
-        }
+        // Native borders and JankyBorders cannot run concurrently. When native
+        // is active, terminate any external borders instance and its parent script
+        // to prevent duplicate outlines or compositor ghost lines.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        proc.arguments = ["-x", "borders"]
+        proc.arguments = ["-9", "-x", "borders"]
         try? proc.run()
         proc.waitUntilExit()
-        fputs("weftd: stopped the external borders process — weft draws its own now\n", stderr)
+
+        let killrc = Process()
+        killrc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        killrc.arguments = ["-9", "-f", "bordersrc"]
+        try? killrc.run()
+        killrc.waitUntilExit()
+
+        fputs("weftd: stopped external borders and bordersrc processes — weft draws its own now\n", stderr)
     }
 
     private func startProcess(_ config: BordersIntegrationConfig) {
