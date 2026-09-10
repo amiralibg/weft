@@ -42,10 +42,16 @@ enum PanEnd {
 /// is what makes holding down a column-focus key read as one continuous
 /// scroll rather than a series of lurches.
 final class PanAnimator: @unchecked Sendable {
-    /// 8 ms: one frame at 120 Hz, and two at 60. Ticks are one WindowServer
-    /// transaction each, so the cost of over-sampling a 60 Hz display is a
-    /// few microseconds and the benefit on a ProMotion one is the whole point.
-    private static let tick: TimeInterval = 1.0 / 120.0
+    /// 60 Hz, with leeway.
+    ///
+    /// This was 120 Hz at zero leeway, which is a promise the daemon has no
+    /// business making: zero leeway forbids the kernel from coalescing the
+    /// timer with anything else, so it wakes the CPU out of idle on its own
+    /// schedule 120 times a second for the length of every pan. Half the rate
+    /// and a couple of milliseconds of slack are indistinguishable on a
+    /// 140 ms move and cost the rest of the machine nothing.
+    private static let tick: TimeInterval = 1.0 / 60.0
+    private static let leeway: DispatchTimeInterval = .milliseconds(2)
 
     private let queue = DispatchQueue(label: "weft.scroll-pan", qos: .userInteractive)
     private let lock = NSLock()
@@ -98,7 +104,7 @@ final class PanAnimator: @unchecked Sendable {
             self.onFrame = onFrame
             self.onEnd = onEnd
             let t = DispatchSource.makeTimerSource(queue: queue)
-            t.schedule(deadline: .now() + Self.tick, repeating: Self.tick, leeway: .nanoseconds(0))
+            t.schedule(deadline: .now() + Self.tick, repeating: Self.tick, leeway: Self.leeway)
             t.setEventHandler { [weak self] in self?.step() }
             self.timer = t
             t.resume()

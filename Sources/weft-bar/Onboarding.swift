@@ -379,6 +379,16 @@ final class SetupModel: ObservableObject {
     /// case it actually solves.
     func open(_ kind: PermissionKind) {
         guard let url = kind.settingsURL else { return }
+        // Input Monitoring is the one permission where opening the pane is not
+        // enough: TCC only puts a weftd row in that list once weftd has asked
+        // for it, and weftd is a daemon with no window, so its own request
+        // used to fire during startup and drop a system modal on top of this
+        // window. Ask now instead — the user is looking at the Input
+        // Monitoring step, so the modal explains itself, and the row is there
+        // by the time the pane opens.
+        if kind == .inputMonitoring {
+            _ = BarIPC.send("request-input-access")
+        }
         NSWorkspace.shared.open(url)
     }
 

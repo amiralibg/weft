@@ -208,18 +208,41 @@ final class Daemon: @unchecked Sendable {
                 stderr
             )
             if !ok {
-                // Ask the system, from weftd itself. This is not about showing
-                // a dialog — it is what makes macOS ADD weftd to the Input
-                // Monitoring list. Without it the list has no weftd row, and
-                // the only way in is the `+` picker, which cannot browse to
-                // `~/.local/bin` because a dotted directory is hidden. Being
-                // told to "find weftd" in a folder Finder refuses to show is
-                // the whole of that complaint.
-                _ = CGRequestListenEventAccess()
-                fputs("weftd: requested Input Monitoring — weftd should now be listed in "
-                    + "System Settings › Privacy & Security › Input Monitoring; switch it on\n", stderr)
+                self?.requestInputAccess(reason: "tap denied at startup")
             }
         }
+    }
+
+    /// Ask TCC for Input Monitoring — and, more to the point, get weftd *listed*.
+    ///
+    /// This is not about showing a dialog. It is what makes macOS add a weftd
+    /// row to the Input Monitoring list; without it the list has no such row
+    /// and the only way in is the `+` picker, which cannot browse to
+    /// `~/.local/bin` because a dotted directory is hidden. Being told to
+    /// "find weftd" in a folder Finder refuses to show is the whole of that
+    /// complaint.
+    ///
+    /// It does raise a system modal, though, and at startup that modal landed
+    /// on top of the Setup window whose entire job is to walk the user through
+    /// this permission — a second, unexplained dialog from a process with no
+    /// window of its own. So when WeftBar is running it is left to Setup,
+    /// which calls `request-input-access` over the socket at the step where
+    /// the user is already reading about Input Monitoring.
+    private func requestInputAccess(reason: String) {
+        if !Daemon.setupIsRunning() || reason == "Setup asked" {
+            _ = CGRequestListenEventAccess()
+            fputs("weftd: requested Input Monitoring (\(reason)) — weftd should now be listed "
+                + "in System Settings › Privacy & Security › Input Monitoring; switch it on\n",
+                stderr)
+            return
+        }
+        fputs("weftd: Input Monitoring not granted; leaving the request to the Setup "
+            + "window rather than stacking a second dialog on top of it\n", stderr)
+    }
+
+    /// Is WeftBar — and therefore possibly its Setup window — running?
+    private static func setupIsRunning() -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.weft.bar").isEmpty
     }
 
     /// Everything that must happen once, after the socket is listening.
@@ -1294,6 +1317,9 @@ final class Daemon: @unchecked Sendable {
             bus.emit(stateChangedEvent())
             scheduleSync()
         case .windowMoved(let wid), .windowResized(let wid):
+            // A pan is moving this window right now, every 8 ms. Nothing it
+            // reports is news, and matching frames cannot tell us so.
+            if isPanning(wid) { return }
             // Our own writes echo back as moved/resized notifications (classic
             // tiling-WM feedback loop, §11 risk 7). Drop them; a genuine user
             // drag settles first and THEN retiles once (trailing edge), so we
@@ -1605,6 +1631,19 @@ final class Daemon: @unchecked Sendable {
             let report = rescue()
             fputs("weftd: \(report)\n", stderr)
             return IPCResponse(ok: true, output: report)
+        case "request-input-access":
+            // Ask TCC to list weftd under Input Monitoring, on demand.
+            //
+            // weftd used to do this by itself the moment its event tap failed,
+            // which is during startup — so the system's own modal landed on
+            // top of the Setup window that exists to walk the user through
+            // exactly this permission, from a process they cannot see. Two
+            // dialogs asking for one thing, one of them unexplained. Setup now
+            // asks for it when the user is looking at the Input Monitoring
+            // step, and weftd only falls back to asking on its own when no
+            // Setup window is running to do it (see `requestInputAccess`).
+            requestInputAccess(reason: "Setup asked")
+            return IPCResponse(ok: true, output: "requested Input Monitoring")
         default:
             break
         }
@@ -2923,6 +2962,40 @@ final class Daemon: @unchecked Sendable {
     private let panAnimator = PanAnimator()
     private let panLock = NSLock()
 
+    /// Windows a pan is currently moving, and when that claim expires.
+    ///
+    /// Echo suppression matches a notification against the exact frame we last
+    /// wrote, which works for a settled layout and cannot work for a moving
+    /// one: a pan rewrites the expected frame every 8 ms, the app's move
+    /// notification arrives tens of milliseconds later, and by then it matches
+    /// nothing. Every frame of every pan therefore read as *the user* dragging
+    /// a window, and each one scheduled a debounced full re-apply — so the
+    /// daemon spent a pan answering its own echoes and every real command
+    /// queued behind them. That is why windows were slow to move on bsp spaces
+    /// too, where nothing was animating at all.
+    ///
+    /// While a window is in here its move and resize notifications are dropped
+    /// wholesale. The deadline is a backstop: if a pan dies without landing,
+    /// the suppression lapses on its own rather than deafening the daemon.
+    private var panningUntil: [WindowID: Date] = [:]
+
+    private func markPanning(_ wids: Set<WindowID>, for duration: TimeInterval) {
+        let deadline = Date().addingTimeInterval(duration + 0.35)
+        panLock.withLock { for w in wids { panningUntil[w] = deadline } }
+    }
+
+    private func clearPanning(_ wids: Set<WindowID>) {
+        panLock.withLock { for w in wids { panningUntil.removeValue(forKey: w) } }
+    }
+
+    private func isPanning(_ wid: WindowID) -> Bool {
+        panLock.withLock {
+            guard let until = panningUntil[wid] else { return false }
+            guard until > Date() else { panningUntil.removeValue(forKey: wid); return false }
+            return true
+        }
+    }
+
     /// What a scroll space looked like the last time it was drawn.
     ///
     /// The viewport a pan starts from, and the geometry that says whether the
@@ -3020,18 +3093,22 @@ final class Daemon: @unchecked Sendable {
             return .settle(force: panAnimator.cancel(sid: sid))
         }
         let parkX = (SpaceControl.displayLayout().map { $0.frame.x }.min() ?? screen.x) - 5000
+        let seconds = Double(ms) / 1000.0
+        markPanning(participants, for: seconds)
+        // Cleared once, not per frame. They are rebuilt from the settled
+        // layout when the pan lands.
+        if bordersBridge.drawsBorders { bordersBridge.renderer.clearOnSpaceChange() }
         panAnimator.run(
             sid: sid,
             from: fromVX,
             to: toVX,
-            duration: Double(ms) / 1000.0,
+            duration: seconds,
             onFrame: { [weak self] vx in
                 guard let self else { return }
                 let all = scrollStripFrames(
                     state, screen: screen, config: config, viewportX: vx
                 )
                 var moves: [WindowID: Frame] = [:]
-                var onScreen: [WindowID: Frame] = [:]
                 for wid in participants {
                     guard let f = all[wid] else { continue }
                     if f.x < screen.x + screen.width, f.x + f.width > screen.x {
@@ -3040,7 +3117,6 @@ final class Daemon: @unchecked Sendable {
                         // WindowServer clips it, so a column arrives by
                         // sliding in rather than appearing once it fits.
                         moves[wid] = f
-                        onScreen[wid] = f
                     } else {
                         // Not on this display yet (or any more) — hold it off
                         // past every display rather than at its true strip
@@ -3048,21 +3124,49 @@ final class Daemon: @unchecked Sendable {
                         moves[wid] = Frame(x: parkX, y: f.y, width: f.width, height: f.height)
                     }
                 }
+                // Positions only. The borders are deliberately NOT redrawn per
+                // frame: `BorderRenderer.sync` tears down the overlay of any
+                // window in scope that has no frame this call, so a column
+                // spending part of a pan off screen had its overlay released
+                // and recreated — a WindowServer window and a fresh backing
+                // store — on every one of these ticks. At 120 Hz that pegged
+                // the GPU and took the whole desktop down with it, because the
+                // WindowServer is not weft's to saturate. They are cleared
+                // once when the pan starts and rebuilt once when it lands.
                 self.applier.movePositions(moves)
-                guard self.bordersBridge.drawsBorders else { return }
-                // A border drawn around a column that is still off screen is
-                // a rectangle floating in the void.
-                self.bordersBridge.renderer.update(frames: onScreen, scope: participants)
             },
             onEnd: { [weak self] end in
                 guard let self else { return }
                 switch end {
                 case .cancelled:
+                    self.clearPanning(participants)
                     return  // the daemon is writing the settled frames itself
                 case .superseded(by: let other) where other == sid:
                     return  // the newer pan on this strip owns these windows
                 case .landed, .superseded:
                     break
+                }
+                self.clearPanning(participants)
+                // Recomputed here, not captured when the pan started.
+                //
+                // 140 ms is long enough for a window to open, close or be
+                // resized, and writing the frames this pan set out with would
+                // put the strip back the way it was before that happened —
+                // which is a layout that no longer exists, laid over one that
+                // does. Ask the space what it looks like *now*; fall back to
+                // the frames we started with only if it has stopped being a
+                // scroll space in the meantime.
+                var landing = settled
+                var park = parkedNow
+                var reach = scope
+                if case .scroll(let now) = self.readSpaces().layouts[sid] {
+                    let live = scrollLayout(
+                        now, screen: self.usableScreen(for: sid),
+                        config: self.currentConfig().general.asTilingConfig()
+                    )
+                    landing = live.frames
+                    park = live.parked
+                    reach = Set(now.windows)
                 }
                 // The forced apply is the point of the whole arrangement: the
                 // pan moved every window behind its app's back, and this is
@@ -3070,8 +3174,8 @@ final class Daemon: @unchecked Sendable {
                 // another display's strip settles here too — leaving those
                 // windows frozen part-way across the screen is the one outcome
                 // that has to be impossible.
-                self.applyFrames(settled, force: true)
-                self.reconcileParked(parkedNow: parkedNow, frames: settled, scope: scope)
+                self.applyFrames(landing, force: true)
+                self.reconcileParked(parkedNow: park, frames: landing, scope: reach)
                 self.refreshDividerZones()
             }
         )

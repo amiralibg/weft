@@ -224,7 +224,7 @@ default-layout = "bsp"          # bsp | scroll | float
 mouse-border-resize = true      # drag a window border to resize, no modifier
 mouse-modifier = "alt"          # hold to drag a window by its body
 mouse-follows-focus = true
-scroll-animation-ms = 140       # scroll pan duration in ms; 0 = instant jump
+scroll-animation-ms = 0         # scroll pan duration in ms; 0 = instant jump
 reserve = 0                     # room for an always-on-screen bar
 
 [keys]

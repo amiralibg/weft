@@ -89,8 +89,8 @@ final class ConfigStore: ObservableObject {
     @Published var focusFollowsMouse = false
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
-    /// Scroll-space pan duration in ms; 0 turns the motion off.
-    @Published var scrollAnimationMs = 140
+    /// Scroll-space pan duration in ms; 0 (the default) turns the motion off.
+    @Published var scrollAnimationMs = 0
 
     // Integrations
     @Published var bordersEnabled = false
@@ -179,7 +179,7 @@ final class ConfigStore: ObservableObject {
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
-        scrollAnimationMs = g?.int("scroll-animation-ms") ?? 140
+        scrollAnimationMs = g?.int("scroll-animation-ms") ?? 0
     }
 
     private func readIntegrations() {

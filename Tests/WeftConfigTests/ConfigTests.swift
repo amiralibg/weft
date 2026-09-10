@@ -323,8 +323,9 @@ private func exampleText() throws -> String {
         scroll-animation-ms = 0
         """)
     #expect(off.general.scrollAnimationMs == 0)
-    // Absent means the default motion, not no motion.
-    #expect(try loadConfig("[general]\ninner-gap = 8\n").general.scrollAnimationMs == 140)
+    // Absent means OFF. A motion feature that once took the whole desktop
+    // down with it has to be opted into, not opted out of.
+    #expect(try loadConfig("[general]\ninner-gap = 8\n").general.scrollAnimationMs == 0)
     // The line number is what makes a config error actionable.
     #expect(throws: ConfigError.self) {
         try loadConfig("[general]\nscroll-animation-ms = -1\n")

@@ -30,8 +30,8 @@ Hard constraints:
   `NSAnimationContext`, no easing. Frame changes are single writes.
 
   The carve-out is the scroll strip's **viewport pan** (`scroll-animation-ms`,
-  140 ms by default, 0 to turn it off). The rule exists because interpolating a
-  retile means an AX write per window per frame — a cross-process round trip an
+  **off by default**; set a duration in milliseconds to turn it on). The rule
+  exists because interpolating a retile means an AX write per window per frame — a cross-process round trip an
   app can be slow at — so the layout falls behind whatever is driving it. A pan
   costs none of that: every window keeps its size and its Y and moves the same
   distance along X, so a frame is one `SLSTransaction` of positions, which is
@@ -40,6 +40,20 @@ Hard constraints:
   happens once, when the pan lands. Anything that is not a pure pan — a width
   cycle, a resize, a column inserted mid-strip, a display change — fails that
   test and is still drawn in one write. See `Sources/weftd/ScrollPan.swift`.
+
+  It is off by default because the first version of it was not survivable, and
+  both ways it failed are worth keeping written down. It redrew the border
+  overlays every frame, and `BorderRenderer.sync` tears down the overlay of any
+  window in scope with no frame this call — so a column spending part of a pan
+  off screen had its overlay released and recreated, a WindowServer window and
+  a fresh backing store, at frame rate. The GPU pegged and the whole desktop
+  lagged, because the WindowServer is not weft's to saturate. And it defeated
+  echo suppression: that matches a notification against the exact frame last
+  written, which cannot work against a frame being rewritten every 8 ms, so
+  every frame of every pan came back as *the user* dragging a window and
+  scheduled a debounced re-apply — which is why windows were slow to move on
+  bsp spaces too, where nothing was animating. Motion needs suppression of its
+  own (`panningUntil`) and must not drive anything that allocates per frame.
 - **Event-driven.** Zero polling timers in steady state; idle CPU must be 0%.
 - SIP-off / scripting addition is acceptable and assumed.
 
@@ -417,7 +431,7 @@ default-layout = "bsp"
 mouse-modifier = "alt"
 mouse-follows-focus = true
 focus-follows-mouse = false
-scroll-animation-ms = 140       # scroll-space pan duration; 0 = instant
+scroll-animation-ms = 0         # scroll-space pan duration; 0 = instant
 
 [[space]]
 label  = "code"

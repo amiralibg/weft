@@ -52,8 +52,16 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
     /// How long a scroll space takes to pan between columns, in milliseconds.
-    /// 0 turns it off and restores the single-write behaviour `docs/DESIGN.md`
-    /// §1 describes.
+    /// **0 (the default) turns it off** and keeps the single-write behaviour
+    /// `docs/DESIGN.md` §1 describes.
+    ///
+    /// Off by default because the first version of it was not survivable: it
+    /// drove the border overlays at frame rate, which made the WindowServer
+    /// create and release an overlay window every frame a column spent off
+    /// screen, and it defeated echo suppression so every frame of a pan came
+    /// back as "the user moved a window". The GPU pegged and the whole desktop
+    /// — not just weft — lagged. Both are fixed, but a motion feature that can
+    /// take the machine down with it has to be opted into, not opted out of.
     ///
     /// The strip is the one layout where a frame change is *motion* rather
     /// than a rearrangement: every window keeps its size and slides the same
@@ -77,7 +85,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
-        scrollAnimationMs: Int = 140,
+        scrollAnimationMs: Int = 0,
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap

@@ -74,7 +74,7 @@ mouse-follows-focus = true
 focus-follows-mouse = false
 
 # How long a scroll space takes to slide from one column to the next, in
-# milliseconds. Set 0 for an instant jump.
+# milliseconds. 0 (the default) is an instant jump.
 #
 # This is the only motion weft has, and it is here because the scroll strip is
 # the only layout where a frame change is movement rather than a rearrangement:
@@ -82,7 +82,7 @@ focus-follows-mouse = false
 # direction to read and jumping throws it away. It costs one WindowServer
 # transaction per frame — no accessibility traffic, nothing an app can be slow
 # at — which is exactly why nothing else in weft animates.
-scroll-animation-ms = 140
+scroll-animation-ms = 0
 
 # Space kept clear for a bar or dock that is always on screen. Set the top to
 # your bar's height if you run one — e.g. { top = 32 } for sketchybar.
