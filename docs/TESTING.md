@@ -166,7 +166,55 @@ killall weftd weft-bar 2>/dev/null
 brew services start yabai; brew services start skhd
 ```
 
-## H. What to send back when reporting
+## H. Latency
+
+Weft's latency is not one number. A retile is a WindowServer sweep, a pure
+layout computation, one atomic `SLSTransaction` of positions and then a
+cross-process AX write per app — and only the last of those is slow. So the
+daemon keeps a bounded ring of samples per phase (always on: `Sources/WeftPlatform/Trace.swift`)
+and `weftctl bench` prints them:
+
+```bash
+weftctl bench "window focus east" -n 100
+weftctl query trace | jq          # the same numbers, raw
+```
+
+`WEFT_TRACE=1` on the daemon adds a stderr line per sample, for watching one
+operation rather than aggregating many.
+
+**Phases**
+
+| Phase | What it covers |
+|---|---|
+| `cmd.dispatch` | Parse → reduce on the core queue → hand frames to the apply queue. What a keypress actually waits on. |
+| `layout` | The pure `(Tree, Frame, Config) -> [WindowID: Frame]` pass. Microseconds; a tripwire test guards it (`Tests/WeftCoreTests/LayoutBudgetTests.swift`). |
+| `apply.diff` | Reading each window's current bounds to decide whether it needs writing at all. |
+| `apply.commit` | The single `SLSTransaction` that moves every window's origin at once. This is the motion you see first. |
+| `ax.position` / `ax.size` | The cross-process AX writes. `ax.size` is the one that forces an app relayout — on Chromium/Electron windows it dominates everything else here. |
+| `ax.verify` | `SLSGetWindowBounds` read-back and the correction write when the app landed somewhere else. |
+| `apply.total` | Entry to last write completing, across every app in the batch. |
+| `sweep.world` / `sweep.classify` / `sweep.bind` / `sweep.total` | The world resync. `sweep.total` is the cold-start cost and the per-event cost of learning about a new window. |
+
+**Capturing a baseline.** Run each of these with a native app (Terminal,
+Finder) and again with an Electron one (VS Code, Slack) in the layout — the
+gap between the two is the thing worth fixing.
+
+```bash
+weftctl bench "window focus east"  -n 100   # focus only, no frames written
+weftctl bench "window swap east"   -n 50    # equal-size swap: commit-dominated
+weftctl bench "window zoom-fullscreen" -n 50  # every window resizes
+```
+
+Close-and-refill and app-launch latency are event-driven, not command-driven,
+so they are measured by watching the phases rather than driving them:
+
+```bash
+weftctl trace reset
+# close a window by hand, wait a second
+weftctl query trace
+```
+
+## I. What to send back when reporting
 
 ```bash
 weftctl doctor

@@ -7,7 +7,7 @@ func usage() -> Never {
     fputs(
         """
         usage:
-          weftctl query <displays|spaces|windows|world|state|tree|capability>
+          weftctl query <displays|spaces|windows|world|state|tree|trace|capability>
           weftctl <command>            # focus/move/resize/split/balance/sync/retile/...
           weftctl space <focus|move-window|label|layout>  # native spaces (M4+)
           weftctl sticky [wid] [on|off]             # toggle sticky window
@@ -15,7 +15,8 @@ func usage() -> Never {
           weftctl app toggle <bundle-id>            # launch/focus/hide
           weftctl subscribe [--all]    # live event stream (Ctrl-C to exit)
           weftctl doctor               # diagnostic health check
-          weftctl bench <cmd> [-n N]   # latency benchmark & histogram
+          weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
+          weftctl trace reset          # clear the daemon's phase samples
           weftctl migrate [--write]    # migrate yabai/skhd configuration
           weftctl service <install|uninstall|start|stop|restart|status>
           weftctl --version

@@ -30,6 +30,8 @@ public final class AXApplier: @unchecked Sendable {
     private var expectedAt: [WindowID: Date] = [:]
     private var epoch: [WindowID: UInt64] = [:]
     private var epochCounter: UInt64 = 0
+    /// pid → process name, for trace output only.
+    private var appNameCache: [Int32: String] = [:]
     /// How long our own writes suppress observer echoes. After this the
     /// expected frame expires so a later user drag that lands near an old
     /// target is NOT mistaken for our echo (previous code never expired).
@@ -294,6 +296,7 @@ public final class AXApplier: @unchecked Sendable {
         lock.withLock {
             queues.removeValue(forKey: pid)
             appElements.removeValue(forKey: pid)
+            appNameCache.removeValue(forKey: pid)
         }
     }
 
@@ -390,6 +393,8 @@ public final class AXApplier: @unchecked Sendable {
         // cheap, but there is one per window, and doing them inside the lock
         // meant a drag's diff pass blocked every per-pid queue that wanted to
         // record a result at the same time.
+        let tTotal = Trace.start("apply.total")
+        let tDiff = Trace.start("apply.diff")
         var settled: [WindowID: Frame] = [:]
         var todo: [(wid: WindowID, frame: Frame, pid: Int32)] = []
         for (wid, frame) in frames {
@@ -405,14 +410,16 @@ public final class AXApplier: @unchecked Sendable {
             }
             todo.append((wid, frame, pid))
         }
+        tDiff.end()
         if !settled.isEmpty {
             lock.withLock { for (wid, f) in settled { lastApplied[wid] = f } }
         }
         guard !todo.isEmpty else {
+            tTotal.end(detail: "all settled")
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
-        commitPositions(todo)
+        Trace.time("apply.commit") { commitPositions(todo) }
         let grouped = Dictionary(grouping: todo, by: { $0.pid })
         let group = DispatchGroup()
         let counter = Counter()
@@ -434,6 +441,7 @@ public final class AXApplier: @unchecked Sendable {
         }
         group.notify(queue: .global(qos: .utility)) {
             let (a, e, failed, ok, reasons) = counter.snapshot()
+            tTotal.end(detail: "\(todo.count) window(s)")
             completion?(ApplyResult(
                 applied: a,
                 skipped: frames.count - todo.count,
@@ -789,6 +797,16 @@ public final class AXApplier: @unchecked Sendable {
         return nil
     }
 
+    /// Process name for a pid, cached. Only ever used as trace `detail`, so
+    /// a miss is cosmetic — but the lookup is a `NSRunningApplication`
+    /// round trip and this runs on the write path, so it happens once per app.
+    private func appName(for pid: Int32) -> String {
+        if let cached = lock.withLock({ appNameCache[pid] }) { return cached }
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+        lock.withLock { appNameCache[pid] = name }
+        return name
+    }
+
     // MARK: - Frame-set protocol (runs on a per-pid queue)
 
     /// nil on success, otherwise why it failed.
@@ -839,16 +857,22 @@ public final class AXApplier: @unchecked Sendable {
             && abs(pre.width - frame.width) <= 0.5
             && abs(pre.height - frame.height) <= 0.5
 
+        let who = appName(for: pid)
         var p = target
         if let v = AXValueCreate(.cgPoint, &p) {
-            AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+            Trace.time("ax.position", detail: who) {
+                AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+            }
         }
         if !sizeAlreadyRight {
             var s = CGSize(width: frame.width, height: frame.height)
             if let v = AXValueCreate(.cgSize, &s) {
-                AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                Trace.time("ax.size", detail: who) {
+                    AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                }
             }
         }
+        let tVerify = Trace.start("ax.verify")
         // Verify POSITION with SLS (cheap, no app IPC). Correction fires
         // ~half the time depending on grow-vs-shrink direction (S1). Size is
         // read back and recorded as-settled so echoes match and the diff
@@ -871,6 +895,7 @@ public final class AXApplier: @unchecked Sendable {
                 }
             }
         }
+        tVerify.end(detail: who)
         let ok = slsOK && haveRect && posOK
         let reason: FailureReason? = ok ? nil
             : !slsOK ? .windowServerRefused(slsStatus)

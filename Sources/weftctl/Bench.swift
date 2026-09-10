@@ -1,5 +1,6 @@
 import Foundation
 import WeftIPC
+import WeftPlatform
 
 public enum Bench {
     public static func run(command: String, iterations: Int) {
@@ -8,6 +9,10 @@ public enum Bench {
             fputs("weftctl: cannot benchmark — daemon is not running at \(sockPath)\n", stderr)
             exit(1)
         }
+
+        // Start from a clean slate so the phase table below describes this
+        // run rather than whatever the desktop has been doing.
+        _ = IPCClient.sendCommand(path: sockPath, command: "trace reset")
 
         print("Benchmarking '\(command)' over \(iterations) iterations...")
         var samples: [Double] = []
@@ -66,6 +71,39 @@ public enum Bench {
             let barLen = Int((Double(b) / Double(count)) * 40)
             let bar = String(repeating: "#", count: barLen)
             print(String(format: "  [%5.2f - %5.2f ms]: %5d (%4.1f%%) %@", bStart, bEnd, b, (Double(b) / Double(count)) * 100, bar))
+        }
+
+        printPhases(sockPath: sockPath)
+    }
+
+    /// What the daemon spent the run doing, phase by phase.
+    ///
+    /// The round-trip figure above is the socket, not the work: a command
+    /// returns as soon as the frames are handed to the apply queue, and the
+    /// cross-process AX writes that actually move windows land afterwards.
+    /// They are the slow part, and this is where they show up.
+    static func printPhases(sockPath: String) {
+        // The AX writes a command triggers are asynchronous — the last of
+        // them lands after the last round trip returns. Give them a moment
+        // before reading, or the final iteration's samples are missing.
+        Thread.sleep(forTimeInterval: 0.4)
+        guard let raw = IPCClient.sendCommand(path: sockPath, command: "query trace"),
+              let json = raw.output,
+              let data = json.data(using: .utf8),
+              let stats = try? JSONDecoder().decode([Trace.PhaseStats].self, from: data),
+              !stats.isEmpty
+        else {
+            print("\n(no phase trace available — daemon predates 'query trace')")
+            return
+        }
+        print("\nDaemon phases (ms, slowest p50 first):")
+        print("  phase              n     p50     p90     p99     max   slowest was")
+        for st in stats {
+            let name = st.phase.padding(toLength: 16, withPad: " ", startingAt: 0)
+            print(String(
+                format: "  %@ %5d  %6.2f  %6.2f  %6.2f  %6.2f   %@",
+                name, st.count, st.p50, st.p90, st.p99, st.max, st.worstDetail
+            ))
         }
     }
 }

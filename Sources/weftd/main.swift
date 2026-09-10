@@ -886,6 +886,7 @@ final class Daemon: @unchecked Sendable {
         let t0 = Date()
         let world = WorldReader.snapshot()
         let tRead = Date()
+        Trace.record("sweep.world", ms: tRead.timeIntervalSince(t0) * 1000)
         refreshScreens()
         let cfg = currentConfig()
         // sid → display, and the display keyboard focus is on. Both are read
@@ -926,6 +927,12 @@ final class Daemon: @unchecked Sendable {
         let tClassify0 = Date()
         let verdicts = applier.classifyBatch(unclassified.map { (wid: $0.id, pid: $0.pid) })
         let tClassify = Date()
+        if !unclassified.isEmpty {
+            Trace.record(
+                "sweep.classify", ms: tClassify.timeIntervalSince(tClassify0) * 1000,
+                detail: "\(unclassified.count) window(s)"
+            )
+        }
         for w in unclassified {
             if let verdict = verdicts[w.id] {
                 switch verdict {
@@ -1142,6 +1149,8 @@ final class Daemon: @unchecked Sendable {
         // restored at launch that no longer exists.
         forgetParked(readParked().subtracting(worldWids))
         let tBind = Date()
+        Trace.record("sweep.bind", ms: tBind.timeIntervalSince(tBind0) * 1000)
+        Trace.record("sweep.total", ms: tBind.timeIntervalSince(t0) * 1000)
         // Only the display the user is actually on may raise anything.
         //
         // Raising calls `NSRunningApplication.activate()`, and with two
@@ -1631,6 +1640,11 @@ final class Daemon: @unchecked Sendable {
             let report = rescue()
             fputs("weftd: \(report)\n", stderr)
             return IPCResponse(ok: true, output: report)
+        case "trace reset":
+            // `weftctl bench` calls this first, so its numbers describe the
+            // run and not the last hour of desktop use.
+            Trace.reset()
+            return IPCResponse(ok: true, output: "trace reset")
         case "request-input-access":
             // Ask TCC to list weftd under Input Monitoring, on demand.
             //
@@ -1671,6 +1685,8 @@ final class Daemon: @unchecked Sendable {
     /// one path where it happened a hundred times a second.
     private func dispatch(_ command: Command) -> IPCResponse {
         dispatchPrecondition(condition: .notOnQueue(core))
+        let tDispatch = Trace.start("cmd.dispatch")
+        defer { tDispatch.end(detail: String(describing: command).prefix(40).description) }
         if case .space(let sub) = command {
             return handleSpace(sub)
         }
@@ -2673,7 +2689,7 @@ final class Daemon: @unchecked Sendable {
     private func handleQuery(_ text: String) -> IPCResponse {
         let parts = text.split(separator: " ").map(String.init)
         guard parts.count == 2 else {
-            return IPCResponse(ok: false, error: "usage: query <displays|spaces|windows|world|state|tree|capability|permissions>")
+            return IPCResponse(ok: false, error: "usage: query <displays|spaces|windows|world|state|tree|trace|capability|permissions>")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -2684,6 +2700,8 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: true, output: str)
         }
         switch parts[1] {
+        case "trace":
+            return emit(Trace.stats())
         case "state":
             let screen = self.usableScreen(for: currentSID())
             let config = currentConfig().general.asTilingConfig()
@@ -3222,7 +3240,9 @@ final class Daemon: @unchecked Sendable {
         switch spaceLayout {
         case .tiling(let tree):
             forgetScrollRender(sid)
-            let frames = layout(tree, in: screen, config: config)
+            let frames = Trace.time("layout", detail: "\(tree.windows.count) window(s)") {
+                layout(tree, in: screen, config: config)
+            }
             applyFrames(frames, force: force)
             // A space that was scroll a moment ago can still have columns
             // SLS-parked at -5000. bsp gives every window a frame, so nothing

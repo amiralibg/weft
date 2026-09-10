@@ -1,0 +1,55 @@
+# Build and test every push. Nothing here publishes anything.
+#
+# Before this existed, `swift test` ran exactly once — inside the release job,
+# at tag time — so a broken `main` was discovered mid-release and a regression
+# could sit unnoticed for as long as nobody tagged.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]   # the release workflow already builds and tests tags
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest Xcode
+        run: |
+          set -euo pipefail
+          # The package needs Swift 6.2. Pick the newest toolchain the image
+          # has and fail loudly rather than half-building against an old one.
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          swift --version
+          version=$(swift --version | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
+          if [ "$(printf '%s\n6.2\n' "$version" | sort -V | head -1)" != "6.2" ]; then
+            echo "::error::Swift 6.2+ required, runner has $version ($latest)"
+            exit 1
+          fi
+
+      - name: Cache SwiftPM build products
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test --skip-build
