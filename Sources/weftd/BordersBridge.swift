@@ -4,6 +4,12 @@ import WeftConfig
 import WeftCore
 
 final class BordersBridge: @unchecked Sendable {
+    /// Weft's own renderer. Always constructed, only fed when the config asks
+    /// for it — it costs nothing until the first window gets a border.
+    let renderer = BorderRenderer()
+    /// True when weft is drawing the borders itself, so the apply path can
+    /// skip computing frames nobody is going to paint.
+    private(set) var drawsBorders = false
     private let lock = NSLock()
     private var process: Process?
     private var isSupervised = false
@@ -23,10 +29,30 @@ final class BordersBridge: @unchecked Sendable {
     private var crashRestarts = 0
 
     func applyConfig(_ config: BordersIntegrationConfig, currentLayout: LayoutKind? = nil, currentMode: String? = nil) {
+        let native = config.enabled && config.backend == .native
+        drawsBorders = native
+        // Never both. Two renderers drawing the same rectangle is two
+        // rectangles, one of them a frame behind the other.
+        if native {
+            lock.withLock { stopInternal() }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.retireExternalBorders(supervised: config.supervise)
+            }
+        }
+        renderer.setEnabled(native)
+        if native {
+            renderer.setStyle(BorderRenderer.Style(
+                width: config.resolvedWidth,
+                radius: config.radius ?? 10,
+                activeColor: BorderRenderer.parseColor(config.resolvedActiveColor) ?? 0xff7a_a2f7,
+                inactiveColor: BorderRenderer.parseColor(config.resolvedInactiveColor) ?? 0x4041_4868,
+                showInactive: config.showInactive
+            ))
+        }
         lock.withLock {
             lastConfig = config
-            if !config.enabled {
-                stopInternal()
+            if !config.enabled || config.backend == .native {
+                if !native { stopInternal() }
                 warnedMissing = false
                 warnedExternal = false
                 return
@@ -61,6 +87,37 @@ final class BordersBridge: @unchecked Sendable {
 
     private func findBordersBinary() -> String? { ExternalBinary.find("borders") }
 
+    /// Switching to the native renderer while a `borders` process is still up
+    /// means every window wears two rectangles.
+    ///
+    /// If weft was supervising it, weft started it and weft ends it — an
+    /// upgrade that changes the default backend must not leave the old
+    /// renderer running forever. If it was not, someone else started it and
+    /// it is not weft's to kill: say so instead.
+    private func retireExternalBorders(supervised: Bool) {
+        guard isBordersAlreadyRunning() else {
+            warnedExternal = false
+            return
+        }
+        guard supervised else {
+            if !warnedExternal {
+                warnedExternal = true
+                fputs(
+                    "weftd: borders is running and weft is drawing its own — you will see two "
+                        + "outlines. Quit borders, or set [integrations.borders] backend = \"janky\".\n",
+                    stderr
+                )
+            }
+            return
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        proc.arguments = ["-x", "borders"]
+        try? proc.run()
+        proc.waitUntilExit()
+        fputs("weftd: stopped the external borders process — weft draws its own now\n", stderr)
+    }
+
     private func startProcess(_ config: BordersIntegrationConfig) {
         guard let bin = findBordersBinary() else {
             // Say it once. `enabled = true` with borders not installed is a
@@ -86,52 +143,36 @@ final class BordersBridge: @unchecked Sendable {
             return
         }
         warnedExternal = false
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: bin)
-        proc.arguments = config.args
-        proc.terminationHandler = { [weak self] p in
-            self?.handleTermination(status: p.terminationStatus)
-        }
-        do {
-            try proc.run()
-            self.process = proc
-            self.isSupervised = true
-            fputs("weftd: borders supervised (pid=\(proc.processIdentifier))\n", stderr)
-        } catch {
-            fputs("weftd: failed to launch borders: \(error)\n", stderr)
-        }
-    }
 
-    private static let maxCrashRestarts = 5
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = config.args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
 
-    private func handleTermination(status: Int32) {
-        lock.withLock {
-            self.process = nil
-            if status == 0 {
-                fputs("weftd: borders exited normally (status=0)\n", stderr)
-                crashRestarts = 0
-                return
+        p.terminationHandler = { [weak self] proc in
+            self?.lock.withLock {
+                self?.process = nil
+                self?.isSupervised = false
             }
-            guard !stopped, let cfg = lastConfig, cfg.enabled, cfg.supervise else { return }
-
-            crashRestarts += 1
-            guard crashRestarts <= Self.maxCrashRestarts else {
-                fputs(
-                    "weftd: borders has crashed \(crashRestarts) times in a row (status=\(status)); "
-                        + "giving up. Check its arguments in [integrations.borders] args, then "
-                        + "`weftctl service restart` to try again.\n",
-                    stderr
-                )
-                return
+            // Rapid crashes mean the arguments are invalid, the binary is
+            // corrupt, or it is running on an unsupported OS version.
+            // Spawning it again the next second is a 1 Hz fork bomb: back
+            // off after three quick deaths.
+            let crash = proc.terminationStatus != 0
+            let delay: TimeInterval
+            if crash {
+                self?.crashRestarts += 1
+                if let r = self?.crashRestarts, r > 3 {
+                    fputs("weftd: borders has crashed repeatedly (\(r) times) — disabling supervision\n", stderr)
+                    return
+                }
+                delay = Double(self?.crashRestarts ?? 1) * 2.0
+            } else {
+                self?.crashRestarts = 0
+                delay = 1.0
             }
-            // Back off rather than hammering: a bad `args` value fails
-            // instantly and identically every time.
-            let delay = pow(2.0, Double(crashRestarts - 1))
-            fputs(
-                "weftd: borders crashed (status=\(status)), restart \(crashRestarts)/\(Self.maxCrashRestarts) in \(Int(delay))s\n",
-                stderr
-            )
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.lock.withLock {
                     guard let self = self, !self.stopped,
                           let c = self.lastConfig, c.enabled, c.supervise
@@ -139,6 +180,15 @@ final class BordersBridge: @unchecked Sendable {
                     self.startProcess(c)
                 }
             }
+        }
+
+        do {
+            try p.run()
+            process = p
+            isSupervised = true
+            fputs("weftd: started borders (pid \(p.processIdentifier))\n", stderr)
+        } catch {
+            fputs("weftd: failed to spawn borders: \(error)\n", stderr)
         }
     }
 
@@ -149,6 +199,16 @@ final class BordersBridge: @unchecked Sendable {
             targetColor = mc
         } else if let ac = config.activeColor[layout.rawValue] {
             targetColor = ac
+        }
+        if config.backend == .native {
+            // In process: an assignment and, if it actually changed, a
+            // repaint. The external path below is a `fork` + `exec` of a CLI,
+            // which is what this used to cost on every focus change.
+            let resolved = targetColor ?? config.resolvedActiveColor
+            if let rgba = BorderRenderer.parseColor(resolved) {
+                renderer.setActiveColor(rgba)
+            }
+            return
         }
         guard let color = targetColor else { return }
         let shouldSend: Bool = lock.withLock {
@@ -168,6 +228,8 @@ final class BordersBridge: @unchecked Sendable {
     }
 
     func stop() {
+        drawsBorders = false
+        renderer.setEnabled(false)
         lock.withLock {
             stopped = true
             stopInternal()
@@ -175,11 +237,10 @@ final class BordersBridge: @unchecked Sendable {
     }
 
     private func stopInternal() {
-        if let proc = process, proc.isRunning {
-            proc.terminate()
-            fputs("weftd: stopped borders\n", stderr)
-        }
+        guard let p = process else { return }
         process = nil
         isSupervised = false
+        p.terminationHandler = nil
+        p.terminate()
     }
 }

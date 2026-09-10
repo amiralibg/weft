@@ -173,6 +173,9 @@ public final class SubscriberHub: @unchecked Sendable {
 
     public var count: Int { lock.withLock { subscribers.count } }
 
+    /// Whether encoding an event is worth doing at all.
+    public var hasSubscribers: Bool { lock.withLock { !subscribers.isEmpty } }
+
     public func add(_ conn: IPCConnection) {
         lock.withLock { subscribers.append(conn) }
     }

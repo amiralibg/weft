@@ -53,7 +53,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .spaces: return "Name your spaces and pick a layout for each."
         case .rules: return "Send apps to a space, or leave them alone entirely."
         case .keys: return "Every chord weft listens for, and what it runs."
-        case .integrations: return "JankyBorders and Sketchybar."
+        case .integrations: return "Window borders and Sketchybar."
         case .advanced: return "The file itself, exactly as it will be written."
         }
     }
@@ -495,6 +495,34 @@ private struct NumberField: View {
                     .frame(width: width)
                     .multilineTextAlignment(.trailing)
                 Stepper("", value: $value, in: range).labelsHidden()
+            }
+            if !unit.isEmpty {
+                Text(unit)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .onChange(of: value) { _, _ in onChange() }
+    }
+}
+
+/// The same, for a measurement that is allowed a half. Border thickness is
+/// the one setting where 1.5 and 2 look meaningfully different.
+private struct DecimalField: View {
+    @Binding var value: Double
+    var range: ClosedRange<Double> = 0...100
+    var unit: String = "px"
+    let onChange: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            HStack(spacing: 0) {
+                TextField("", value: $value, format: .number.precision(.fractionLength(0...2)))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(width: 54)
+                    .multilineTextAlignment(.trailing)
+                Stepper("", value: $value, in: range, step: 0.5).labelsHidden()
             }
             if !unit.isEmpty {
                 Text(unit)
@@ -1876,18 +1904,72 @@ private struct IntegrationsTab: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Card(title: "JankyBorders", subtitle: "Draws the highlight around the focused window.") {
+            Card(title: "Window borders", subtitle: "Draws the highlight around the focused window.") {
                 HStack(spacing: 10) {
                     Toggle("Enable borders", isOn: $store.bordersEnabled)
                         .toggleStyle(.switch)
                         .onChange(of: store.bordersEnabled) { _, _ in store.markDirty() }
                     Spacer()
-                    InstallState(path: health.bordersPath, binary: "borders")
+                    if store.bordersBackend == "janky" {
+                        InstallState(path: health.bordersPath, binary: "borders")
+                    }
+                }
+
+                if store.bordersEnabled {
+                    Row(
+                        label: "Drawn by",
+                        help: store.bordersBackend == "native"
+                            ? "Weft's own renderer. Borders only around windows weft is managing, so menu-bar popovers and system panels never get one."
+                            : "The external borders binary. It outlines anything that looks like a window, including menu-bar popovers."
+                    ) {
+                        Picker("", selection: $store.bordersBackend) {
+                            Text("Built into weft").tag("native")
+                            Text("JankyBorders").tag("janky")
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 260)
+                        .onChange(of: store.bordersBackend) { _, _ in store.markDirty() }
+                    }
+                }
+
+                if store.bordersEnabled, store.bordersBackend == "native" {
+                    Row(label: "Thickness") {
+                        DecimalField(value: $store.bordersWidth, range: 0...20, unit: "px") {
+                            store.markDirty()
+                        }
+                    }
+                    Row(label: "Corner radius", help: "Match your windows' own corners. macOS rounds them by about 10px.") {
+                        DecimalField(value: $store.bordersRadius, range: 0...40, unit: "px") {
+                            store.markDirty()
+                        }
+                    }
+                    Row(label: "Unfocused windows", help: "Outline every window in the layout, not just the focused one.") {
+                        Toggle("Outline them too", isOn: $store.bordersShowInactive)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
+                            .onChange(of: store.bordersShowInactive) { _, _ in store.markDirty() }
+                    }
+                    if store.bordersShowInactive {
+                        Row(label: "Unfocused colour", help: "0xaarrggbb. Blank uses a dim grey-blue.") {
+                            TextField("0x40414868", text: $store.bordersInactiveColor)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .frame(maxWidth: 160)
+                                .onChange(of: store.bordersInactiveColor) { _, _ in store.markDirty() }
+                        }
+                    }
+                    Label(
+                        "The focused colour comes from active-color, per layout, in Advanced — the same table JankyBorders used.",
+                        systemImage: "paintpalette"
+                    )
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
                 }
 
                 // Switching this on without the binary is a no-op that logs one
                 // line to a file nobody reads. Say so here instead.
-                if store.bordersEnabled, health.bordersPath == nil {
+                if store.bordersEnabled, store.bordersBackend == "janky", health.bordersPath == nil {
                     MissingBinary(
                         name: "borders",
                         install: "brew install FelixKratz/formulae/borders",
@@ -1895,7 +1977,7 @@ private struct IntegrationsTab: View {
                     )
                 }
 
-                if store.bordersEnabled, health.bordersPath != nil {
+                if store.bordersEnabled, store.bordersBackend == "janky", health.bordersPath != nil {
                     Row(label: "Supervise", help: "weftd starts borders and restarts it if it dies.") {
                         Toggle("Keep borders running", isOn: $store.bordersSupervise)
                             .toggleStyle(.checkbox)

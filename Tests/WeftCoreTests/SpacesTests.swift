@@ -220,3 +220,78 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
         == .moveWindowToDisplay(.cycle, follow: true))
     #expect(try Command.parse("focus display cycle") == .focusDisplay(.cycle))
 }
+
+/// The bug: switch a space to scroll, let it empty, open a window — bsp.
+///
+/// `syncMembership` keyed "does this space still exist?" off the membership
+/// dictionary, which only lists spaces that hold a managed window. An empty
+/// desktop therefore looked deleted, its layout was dropped, and the next
+/// window to arrive found a space with no layout at all — which the daemon
+/// seeds from config.
+@Test func anEmptySpaceKeepsItsLayoutKind() {
+    let s0 = SpaceState(layouts: [7: .scroll(ScrollState())])
+    // Sweep with the space present but holding nothing.
+    let (s1, _) = syncMembership(s0, spaces: [:], live: [7])
+    #expect(s1.layouts[7]?.kind == .scroll)
+    #expect(s1.layouts[7]?.windows == [])
+    // And it is still scroll when the first window lands on it.
+    let (s2, fresh) = syncMembership(s1, spaces: [7: [11]], live: [7])
+    #expect(s2.layouts[7]?.kind == .scroll)
+    #expect(s2.layouts[7]?.windows == [11])
+    #expect(fresh == [11])
+}
+
+/// A space that is genuinely gone — an unplugged display — still loses its
+/// layout, which is the behaviour the dropping was there for.
+@Test func aVanishedSpaceLosesItsLayout() {
+    let s0 = SpaceState(layouts: [7: .scroll(ScrollState()), 8: .tiling(Tree())])
+    let (s1, _) = syncMembership(s0, spaces: [7: [1]], live: [7])
+    #expect(s1.layouts[7] != nil)
+    #expect(s1.layouts[8] == nil)
+}
+
+@Test func layoutOverridesRoundTripByOrdinal() {
+    var s = SpaceState()
+    s.assignLabels(sids: [10, 20, 30], names: ["main", "web", "code"])
+    s.overrides[20] = .scroll
+    let saved = s.persistedOverrides(sids: [10, 20, 30])
+    #expect(saved == ["", "scroll", ""])
+    // A restart hands out different sids for the same desktops.
+    var next = SpaceState()
+    next.assignLabels(sids: [11, 21, 31], names: ["main", "web", "code"])
+    next.assignOverrides(sids: [11, 21, 31], kinds: saved)
+    #expect(next.overrides[21] == .scroll)
+    #expect(next.overrides[11] == nil)
+}
+
+/// Unplugging a display must not leave a stale override behind to be applied
+/// to whatever space inherits that id later.
+@Test func overridesDieWithTheirSpace() {
+    var s = SpaceState()
+    s.assignLabels(sids: [10, 20], names: ["main", "web"])
+    s.overrides[20] = .float
+    s.assignLabels(sids: [10], names: ["main"])
+    #expect(s.overrides[20] == nil)
+}
+
+@Test func spaceWithOverrideScrollKeepsScrollWhenNewWindowOpens() {
+    let tree = Tree(root: .window(1), focus: 1, insertion: .bsp)
+    var s0 = SpaceState(layouts: [1: .scroll(scrollFromTree(tree))], overrides: [1: .scroll])
+    #expect(s0.layouts[1]?.kind == .scroll)
+    #expect(s0.layouts[1]?.windows == [1])
+
+    // A second window opens on space 1
+    let (s1, fresh) = syncMembership(s0, spaces: [1: [1, 2]], live: [1])
+    #expect(s1.layouts[1]?.kind == .scroll)
+    #expect(s1.layouts[1]?.windows == [1, 2])
+    #expect(fresh == [2])
+}
+
+@Test func spaceEmptyWithOverrideScrollKeepsScrollWhenFirstWindowOpens() {
+    // Space 2 starts with no layout but has an override of scroll
+    var s0 = SpaceState(overrides: [2: .scroll])
+    let (s1, fresh) = syncMembership(s0, spaces: [2: [100]], live: [2])
+    #expect(s1.layouts[2]?.kind == .scroll)
+    #expect(s1.layouts[2]?.windows == [100])
+    #expect(fresh == [100])
+}

@@ -128,25 +128,78 @@ public struct SketchybarIntegrationConfig: Sendable, Equatable {
     }
 }
 
+/// Which code draws the borders.
+public enum BordersBackend: String, Sendable, Equatable {
+    /// Weft's own renderer, in-process. Borders only around windows weft is
+    /// managing, placed from the same frames weft applies, with no second
+    /// process and no `fork` per colour change.
+    case native
+    /// The external `borders` binary (JankyBorders). Kept because it has
+    /// options weft's renderer does not, and because a config that already
+    /// worked should keep working.
+    case janky
+}
+
 public struct BordersIntegrationConfig: Sendable, Equatable {
     public var enabled: Bool
+    public var backend: BordersBackend
     public var args: [String]
     public var supervise: Bool
     public var activeColor: [String: String]
     public var modeColor: [String: String]
+    /// Native renderer only. Nil means "take it from `args`", so a config
+    /// written for JankyBorders needs no edits to work with the native one.
+    public var width: Double?
+    public var radius: Double?
+    public var inactiveColor: String?
+    public var showInactive: Bool
 
     public init(
         enabled: Bool = false,
+        backend: BordersBackend = .native,
         args: [String] = [],
         supervise: Bool = true,
         activeColor: [String: String] = [:],
-        modeColor: [String: String] = [:]
+        modeColor: [String: String] = [:],
+        width: Double? = nil,
+        radius: Double? = nil,
+        inactiveColor: String? = nil,
+        showInactive: Bool = true
     ) {
         self.enabled = enabled
+        self.backend = backend
         self.args = args
         self.supervise = supervise
         self.activeColor = activeColor
         self.modeColor = modeColor
+        self.width = width
+        self.radius = radius
+        self.inactiveColor = inactiveColor
+        self.showInactive = showInactive
+    }
+
+    /// A `key=value` from JankyBorders' argument list, so `args = ["width=5.0"]`
+    /// keeps meaning what it meant.
+    public func arg(_ key: String) -> String? {
+        for a in args where a.hasPrefix("\(key)=") {
+            return String(a.dropFirst(key.count + 1))
+        }
+        return nil
+    }
+
+    /// Stroke width the native renderer should use.
+    public var resolvedWidth: Double {
+        width ?? arg("width").flatMap(Double.init) ?? 4
+    }
+
+    /// Colour for everything that is not focused.
+    public var resolvedInactiveColor: String {
+        inactiveColor ?? arg("inactive_color") ?? "0x40414868"
+    }
+
+    /// Fallback active colour, for a layout with no entry in `active-color`.
+    public var resolvedActiveColor: String {
+        arg("active_color") ?? "0xff7aa2f7"
     }
 }
 
@@ -508,6 +561,24 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "supervise":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 integrations.borders.supervise = b
+            case "backend":
+                guard case .string(let sv) = v else { throw err(path, "expected string") }
+                guard let backend = BordersBackend(rawValue: sv) else {
+                    throw err(path, "expected native|janky")
+                }
+                integrations.borders.backend = backend
+            case "width":
+                guard let d = v.asDouble else { throw err(path, "expected number") }
+                integrations.borders.width = d
+            case "radius":
+                guard let d = v.asDouble else { throw err(path, "expected number") }
+                integrations.borders.radius = d
+            case "inactive-color":
+                guard case .string(let sv) = v else { throw err(path, "expected string hex") }
+                integrations.borders.inactiveColor = sv
+            case "show-inactive":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                integrations.borders.showInactive = b
             case "args":
                 guard case .array(let arr) = v else { throw err(path, "expected array of strings") }
                 var args: [String] = []

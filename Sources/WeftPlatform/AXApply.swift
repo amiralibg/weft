@@ -46,6 +46,11 @@ public final class AXApplier: @unchecked Sendable {
     /// App activation only. Separate from the per-pid AX queues so a slow
     /// `activate()` never delays that app's frame writes (see `focusWindow`).
     private let activateQueue = DispatchQueue(label: "weft.ax.activate", qos: .userInitiated)
+    /// Latest-wins backpressure for the AX size writes of a drag.
+    private let resizeLock = NSLock()
+    private var pendingResizes: [(wid: WindowID, frame: Frame, pid: Int32)]?
+    private var resizeInFlight = false
+    private let dragQueue = DispatchQueue(label: "weft.ax.drag", qos: .userInteractive)
 
     public init() {
         self.cid = SLSMainConnectionID()
@@ -77,6 +82,15 @@ public final class AXApplier: @unchecked Sendable {
                 queues[pid] = DispatchQueue(label: "weft.ax.\(pid)")
             }
         }
+        // Fan out, do not walk. Each app's enumeration is a cross-process
+        // round trip with a 0.15 s ceiling, and this used to take them one
+        // after another on the caller's thread: fifteen apps that each spend
+        // 40 ms is 600 ms of nothing happening, and on a cold start — where
+        // every app is unbound at once — it is the largest single component
+        // of "weft takes ages to come up". Apps are independent, the queues
+        // are already per-pid, so the only reason it was serial was the
+        // `.sync`. Wait for the whole set, not for each one in turn.
+        let group = DispatchGroup()
         for pid in pids {
             let appEl: AXUIElement = lock.withLock {
                 if let el = appElements[pid] { return el }
@@ -87,7 +101,7 @@ public final class AXApplier: @unchecked Sendable {
             }
             // Enumerate windows on a per-pid queue so a wedged app can't
             // stall binding for everyone else.
-            queue(for: pid).sync {
+            queue(for: pid).async(group: group) {
                 var found: [(WindowID, AXUIElement)] = []
                 var value: CFTypeRef?
                 if AXUIElementCopyAttributeValue(
@@ -117,6 +131,12 @@ public final class AXApplier: @unchecked Sendable {
                 }
             }
         }
+        // Bounded, so a single wedged app cannot hold up a sweep for longer
+        // than one app's timeout: the ones that answered are bound, and the
+        // one that did not is asked again on the next sweep (this is
+        // idempotent, and `unbound` above means the cost is only ever paid
+        // for windows still missing an element).
+        _ = group.wait(timeout: .now() + 0.4)
         // Windows whose pid wasn't enumerable keep their old binding, if any.
     }
 
@@ -172,7 +192,12 @@ public final class AXApplier: @unchecked Sendable {
             element = lock.withLock { windowElements[wid] }
         }
         guard let el = element else { return nil }
-        return queue(for: pid).sync { () -> Result<Void, NotTileable>? in
+        return queue(for: pid).sync { self.classifyOnQueue(el: el, wid: wid) }
+    }
+
+    /// The AX reads behind `classify`. Caller must already be on `wid`'s app
+    /// queue.
+    private func classifyOnQueue(el: AXUIElement, wid: WindowID) -> Result<Void, NotTileable>? {
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(
                 el, kAXSubroleAttribute as CFString, &value
@@ -209,7 +234,44 @@ public final class AXApplier: @unchecked Sendable {
                 if !chrome { return .failure(.panelChrome) }
             }
             return .success(())
+    }
+
+    /// `classify` for a whole sweep at once, one pass per app instead of one
+    /// per window.
+    ///
+    /// Cold start asks this about every window on the desktop, and the
+    /// single-window version answers them strictly in turn: each answer is a
+    /// handful of AX round trips, so thirty windows across a dozen apps spent
+    /// most of a second in a loop before a single tile was written. Grouping
+    /// by pid keeps the per-app serialisation that protects a wedged app's
+    /// neighbours, and runs the apps against each other.
+    ///
+    /// Same contract as `classify`: a missing key means "cannot tell yet".
+    public func classifyBatch(
+        _ windows: [(wid: WindowID, pid: Int32)]
+    ) -> [WindowID: Result<Void, NotTileable>] {
+        guard !windows.isEmpty else { return [:] }
+        bind(windows: windows)
+        let grouped = Dictionary(grouping: windows, by: { $0.pid })
+        let sink = VerdictSink()
+        let group = DispatchGroup()
+        for (pid, items) in grouped {
+            queue(for: pid).async(group: group) {
+                for item in items {
+                    guard let el = self.lock.withLock({ self.windowElements[item.wid] })
+                        ?? self.resolveElement(for: item.wid, pid: pid)
+                    else { continue }
+                    if let verdict = self.classifyOnQueue(el: el, wid: item.wid) {
+                        sink.put(item.wid, verdict)
+                    }
+                }
+            }
         }
+        // One app's whole ceiling, not one per window. Anything still
+        // unanswered stays unclassified and is asked again next sweep, which
+        // is exactly what a nil from `classify` already meant.
+        _ = group.wait(timeout: .now() + 0.5)
+        return sink.all()
     }
 
     /// Drop every cached entry for windows that no longer exist. Without this
@@ -338,6 +400,7 @@ public final class AXApplier: @unchecked Sendable {
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
+        commitPositions(todo)
         let grouped = Dictionary(grouping: todo, by: { $0.pid })
         let group = DispatchGroup()
         let counter = Counter()
@@ -368,6 +431,123 @@ public final class AXApplier: @unchecked Sendable {
                 failureReasons: reasons
             ))
         }
+    }
+
+    /// Position-only apply, for the frames of an interactive drag.
+    ///
+    /// The full frame-set protocol is the right thing for a settled layout and
+    /// the wrong thing for a gesture. Per window it costs an SLS move, an AX
+    /// position write, an AX size write, an SLS read-back and — about half the
+    /// time — a correction write, all of it serialised behind the app. A mouse
+    /// reports every 8 ms; two or three apps' worth of that does not fit, so
+    /// the drag falls behind the cursor and keeps going after the button
+    /// comes up.
+    ///
+    /// During a drag almost nothing actually changes size. Moving a bsp
+    /// divider *translates* the windows on the far side of it, and widening a
+    /// scroll column translates every column right of it — the same size, a
+    /// different origin. So: every target position goes out in one
+    /// WindowServer transaction (atomic, no app IPC, and all the windows land
+    /// on the same compositor frame instead of arriving one by one), and only
+    /// the windows whose size genuinely changed pay for an AX write. No
+    /// read-back, no correction: the settle pass at the end of the drag runs
+    /// the full protocol and fixes anything that drifted.
+    public func applyDragFrames(frames: [WindowID: Frame], pids: [WindowID: Int32]) {
+        guard !frames.isEmpty else { return }
+        var resizes: [(wid: WindowID, frame: Frame, pid: Int32)] = []
+        let transaction = SLSTransactionCreate(cid)
+        var moved = false
+        for (wid, frame) in frames {
+            var pre = CGRect.zero
+            let readable = SLSGetWindowBounds(cid, wid, &pre) == 0
+            let needsMove = !readable
+                || abs(pre.minX - frame.x) > 0.5 || abs(pre.minY - frame.y) > 0.5
+            let needsResize = !readable
+                || abs(pre.width - frame.width) > 0.5 || abs(pre.height - frame.height) > 0.5
+            if needsMove, let transaction {
+                SLSTransactionMoveWindowWithGroup(
+                    transaction, wid, CGPoint(x: frame.x, y: frame.y)
+                )
+                moved = true
+            }
+            if needsResize, let pid = pids[wid] {
+                resizes.append((wid, frame, pid))
+            }
+        }
+        // `SLSTransactionCreate` is annotated CF_RETURNS_RETAINED in the shim,
+        // so ARC releases it — which matters here, where one leak is one leak
+        // per mouse event.
+        if let transaction, moved { SLSTransactionCommit(transaction, 0) }
+        // Record the expectation for every window we touched, so the observer
+        // does not read our own drag back as the user moving windows.
+        lock.withLock {
+            for (wid, frame) in frames {
+                epochCounter += 1
+                epoch[wid] = epochCounter
+                expectedFrame[wid] = frame
+                expectedAt[wid] = Date()
+                lastApplied[wid] = frame
+            }
+        }
+        // Resizes are the expensive half and get their own backpressure: the
+        // positions above go out on every single mouse event, because they
+        // cost nothing, while at most one batch of AX size writes is ever in
+        // flight and the newest batch replaces any that were waiting. Holding
+        // the *positions* back behind a slow app — which a single coalescer
+        // over the whole frame set does — is what made a drag lag behind the
+        // cursor even when only one window was actually changing size.
+        guard !resizes.isEmpty else { return }
+        let start: Bool = resizeLock.withLock {
+            pendingResizes = resizes
+            guard !resizeInFlight else { return false }
+            resizeInFlight = true
+            return true
+        }
+        if start { drainResizes() }
+    }
+
+    private func drainResizes() {
+        let batch: [(wid: WindowID, frame: Frame, pid: Int32)]? = resizeLock.withLock {
+            let next = pendingResizes
+            pendingResizes = nil
+            if next == nil { resizeInFlight = false }
+            return next
+        }
+        guard let batch else { return }
+        let group = DispatchGroup()
+        for (pid, items) in Dictionary(grouping: batch, by: { $0.pid }) {
+            queue(for: pid).async(group: group) {
+                for item in items {
+                    guard let el = self.resolveElement(for: item.wid, pid: pid) else { continue }
+                    var size = CGSize(width: item.frame.width, height: item.frame.height)
+                    if let v = AXValueCreate(.cgSize, &size) {
+                        AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                    }
+                    // An app that grows from its top-left corner ends up in
+                    // the right place already; one that does not needs the
+                    // origin restating, and that is WindowServer-local.
+                    var origin = CGPoint(x: item.frame.x, y: item.frame.y)
+                    SLSMoveWindow(self.cid, item.wid, &origin)
+                }
+            }
+        }
+        group.notify(queue: dragQueue) { [weak self] in self?.drainResizes() }
+    }
+
+    /// Put every window at its target position in one WindowServer commit.
+    ///
+    /// Called before the per-app AX writes of a normal apply so a retile
+    /// reads as one movement rather than a ripple: without it each window
+    /// moves on whatever frame its app's queue got to, and a four-window
+    /// space visibly rearranges in stages.
+    private func commitPositions(_ items: [(wid: WindowID, frame: Frame, pid: Int32)]) {
+        guard items.count > 1, let transaction = SLSTransactionCreate(cid) else { return }
+        for item in items {
+            SLSTransactionMoveWindowWithGroup(
+                transaction, item.wid, CGPoint(x: item.frame.x, y: item.frame.y)
+            )
+        }
+        SLSTransactionCommit(transaction, 0)
     }
 
     /// Raise a window (focus) via AX + app activation.
@@ -693,5 +873,19 @@ private final class Counter: @unchecked Sendable {
 
     func snapshot() -> (Int, Int, [WindowID], [WindowID], [WindowID: AXApplier.FailureReason]) {
         lock.withLock { (applied, errors, failed, succeeded, reasons) }
+    }
+}
+
+/// Locked collector for `classifyBatch`, which writes from every app queue.
+private final class VerdictSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var verdicts: [WindowID: Result<Void, AXApplier.NotTileable>] = [:]
+
+    func put(_ wid: WindowID, _ verdict: Result<Void, AXApplier.NotTileable>) {
+        lock.withLock { verdicts[wid] = verdict }
+    }
+
+    func all() -> [WindowID: Result<Void, AXApplier.NotTileable>] {
+        lock.withLock { verdicts }
     }
 }

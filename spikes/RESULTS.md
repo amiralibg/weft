@@ -161,6 +161,61 @@ fallback is unaffected either way.
 
 ---
 
+## S6 — weft draws its own borders: **works, entirely**
+
+Measured 2026-09-10, macOS 26.5.2 / arm64. Harness: `border.swift`, plus a pixel read-back.
+
+Every private call the native renderer needs succeeds from an ordinary,
+unprivileged connection — no scripting addition, no entitlement beyond what weft
+already has:
+
+| Call | Result |
+| --- | --- |
+| `SLSNewWindow(cid, 2, x, y, region, &wid)` | ok |
+| `SLSSetWindowResolution(cid, wid, 2.0)` | ok — backing store comes back 800×600 for a 400×300pt window, so the context is drawn in points and is retina-correct |
+| `SLSSetWindowOpacity(cid, wid, false)` | ok — required, or the overlay is a filled rectangle |
+| `SLSSetMouseEventEnableFlags(cid, wid, false)` | ok — click-through |
+| `SLSOrderWindow(cid, ourWID, 1, theirWID)` | **ok** — the rc=1000 refusal in §11.11 applies to reordering *another app's* window, not to ordering *ours* relative to one |
+| `SLWindowContextCreate` + `CGContext` stroke | ok |
+| `SLSSetWindowShape(cid, wid, x, y, region)` | ok |
+| `SLSReleaseWindow` | ok |
+
+Read-back of the overlay's own backing store (`SLWindowContextCreateImage`, no
+screen-recording permission needed): 6.8% of pixels painted, 99.4% of those the
+stroke colour. An outline, not a fill.
+
+Three findings that are not obvious from the symbol names:
+
+1. **`SLSSetWindowShape`'s `(x, y)` is the window's global origin, not an offset.**
+   Passing `0, 0` to "just resize" teleports the window to the corner of the main
+   display until the next move. Shape and position are one call.
+2. **`SLSTransactionCommit`'s return value is not an error code.** It came back as
+   `1158907464`, `90381480`, `19038648` on successive runs — uninitialised. Verify a
+   transaction by reading the bounds back, never by the rc.
+3. **A `CGSRegionRef` handed back through an out-parameter is owned by ARC.**
+   `CGSNewRegionWithRect(&rect, &region)` followed by `CGSReleaseRegion(region)` is a
+   double free, and it crashes on the *second* border, not the first. The renderer
+   therefore creates and releases regions in C (`BorderShim.h`) so no region ever
+   crosses into Swift.
+
+Also confirmed: an overlay is layer 0, larger than 100×100 and owned by a process
+with no bundle, so it passes every filter in `WorldReader` — weft tiles its own
+borders unless they are excluded by pid.
+
+## S7 — batched window moves: **`SLSTransaction` works**
+
+`SLSTransactionCreate` → N × `SLSTransactionMoveWindowWithGroup` →
+`SLSTransactionCommit(t, 0)` moved two windows to their targets, verified by reading
+the bounds back. The object is a real CF type (`SLSTransactionGetTypeID` = 80,
+description `<SLSTransaction … valid>`) created at +1, so `CF_RETURNS_RETAINED` is
+the correct annotation and ARC releases it.
+
+This is what a multi-window tiling change should use: individual `SLSMoveWindow`
+calls composite on whatever frame each one lands in, so the windows visibly arrive
+one after another.
+
+---
+
 ## Design changes this forces
 
 1. **Discovery moves off AX entirely** (S0). WindowServer for enumeration, AX captured at
@@ -171,3 +226,8 @@ fallback is unaffected either way.
 4. **Frame-set cost revised** to ~2.5 IPCs average (S1); verify step is load-bearing.
 5. **`space --create`/`--destroy` are available**, not broken (S3) — the capability probe can
    report them as working on this build.
+6. **Borders move in-process** (S6). JankyBorders becomes optional rather than the
+   only option, and the borders weft draws are the ones weft is managing — a
+   menu-bar popover never gets one, because it was never in a layout.
+7. **Multi-window moves go through one transaction** (S7), so a retile is one
+   compositor frame rather than one per window.

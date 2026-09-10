@@ -92,6 +92,11 @@ final class ConfigStore: ObservableObject {
 
     // Integrations
     @Published var bordersEnabled = false
+    @Published var bordersBackend = "native"
+    @Published var bordersWidth = 4.0
+    @Published var bordersRadius = 10.0
+    @Published var bordersInactiveColor = ""
+    @Published var bordersShowInactive = true
     @Published var bordersSupervise = true
     @Published var bordersArgs = ""
     /// Set when `args` is spread over several lines in the file — the text
@@ -177,6 +182,15 @@ final class ConfigStore: ObservableObject {
     private func readIntegrations() {
         let b = document.firstIndex(ofHeader: "[integrations.borders]").map { document.sections[$0] }
         bordersEnabled = b?.bool("enabled") ?? false
+        bordersBackend = b?.string("backend") ?? "native"
+        bordersWidth = b?.double("width")
+            ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
+            ?? 4
+        bordersRadius = b?.double("radius") ?? 10
+        bordersInactiveColor = b?.string("inactive-color")
+            ?? Self.argValue(b?.rawValue("args"), "inactive_color")
+            ?? ""
+        bordersShowInactive = b?.bool("show-inactive") ?? true
         bordersSupervise = b?.bool("supervise") ?? true
         bordersArgsLocked = b?.isMultiline("args") ?? false
         bordersArgs = bordersArgsLocked
@@ -187,6 +201,15 @@ final class ConfigStore: ObservableObject {
         sketchybarEnabled = s?.bool("enabled") ?? false
         sketchybarBarName = s?.string("bar-name") ?? "sketchybar"
         sketchybarCoalesceMs = s?.int("coalesce-ms") ?? 16
+    }
+
+    /// One `key=value` out of a JankyBorders argument list, so the native
+    /// renderer's fields start out showing what the user already had.
+    private static func argValue(_ raw: String?, _ key: String) -> String? {
+        for a in readArray(raw) where a.hasPrefix("\(key)=") {
+            return String(a.dropFirst(key.count + 1))
+        }
+        return nil
     }
 
     private static func readArray(_ raw: String?) -> [String] {
@@ -326,7 +349,18 @@ final class ConfigStore: ObservableObject {
             let i = document.ensureSection("[integrations.borders]")
             var s = document.sections[i]
             s.set("enabled", bool: bordersEnabled)
+            s.set("backend", string: bordersBackend)
             s.set("supervise", bool: bordersSupervise)
+            if bordersBackend == "native" {
+                s.set("width", double: bordersWidth)
+                s.set("radius", double: bordersRadius)
+                s.set("show-inactive", bool: bordersShowInactive)
+                if bordersInactiveColor.isEmpty {
+                    s.remove("inactive-color")
+                } else {
+                    s.set("inactive-color", string: bordersInactiveColor)
+                }
+            }
             let args = bordersArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
             if s.isMultiline("args") {
                 // Hand-wrapped across lines. The form showed only the first

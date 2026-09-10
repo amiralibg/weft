@@ -48,47 +48,36 @@ final class BarState: ObservableObject {
         }
     }
 
-    func stop() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        stream?.cancel()
-        stream = nil
-    }
-
-    /// Coalesced. A burst of events — an app launching fires several within a
-    /// few milliseconds — collapses into one refresh, and one more after it if
-    /// anything arrived while that was in flight.
+    /// Pull the snapshot off the main thread, then publish it in one turn of
+    /// the run loop so views observe a coherent state.
     func refresh() {
         guard !refreshing else {
+            // Coalesce: if something changed while a refresh was in flight,
+            // run exactly one more once it lands rather than queueing one
+            // per event.
             refreshAgain = true
             return
         }
         refreshing = true
-        Task.detached(priority: .utility) {
-            let snapshot = Snapshot.read()
-            await MainActor.run { self.apply(snapshot) }
+        Task.detached(priority: .userInitiated) {
+            let next = Self.takeSnapshot()
+            await MainActor.run {
+                self.spaces = next.spaces
+                self.windows = next.windows
+                self.daemonUp = next.reachable
+                self.needsRestart = next.needsRestart
+                self.refreshing = false
+                self.onChange?()
+                if self.refreshAgain {
+                    self.refreshAgain = false
+                    self.refresh()
+                }
+            }
         }
     }
 
-    private func apply(_ s: Snapshot) {
-        refreshing = false
-        if s.reachable {
-            spaces = s.spaces
-            windows = s.windows
-        }
-        daemonUp = s.reachable
-        needsRestart = s.needsRestart
-        onChange?()
-        if refreshAgain {
-            refreshAgain = false
-            refresh()
-        }
-    }
-
-    /// One long-lived connection, reconnecting with a delay when it drops.
-    /// The daemon pushes a `stateChanged` line on every layout, focus and
-    /// space change, which is precisely when the menu bar is stale.
-    private func connectStream() {
+    /// Tear down any running subscription and start a fresh one.
+    func connectStream() {
         stream?.cancel()
         let token = StreamToken()
         stream = token
@@ -99,15 +88,22 @@ final class BarState: ObservableObject {
             Task { @MainActor in self?.refresh() }
         }
         Task.detached(priority: .utility) {
+            var retryDelayMs = 50
             while !token.isCancelled {
                 let ok = BarIPC.subscribe { _ in
                     guard !token.isCancelled else { return }
                     notify()
                 }
-                // Reconnect, unhurried: a daemon that is down stays down for
-                // seconds at a time, and a tight retry loop against a missing
-                // socket is a busy wait that shows up in Activity Monitor.
-                try? await Task.sleep(nanoseconds: ok ? 500_000_000 : 2_000_000_000)
+                // Reconnect promptly on restart: start fast (50ms) so a restarting
+                // daemon is caught the moment it rebinds its socket, then back off
+                // gracefully if it stays down.
+                if ok {
+                    retryDelayMs = 50
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                } else {
+                    try? await Task.sleep(nanoseconds: UInt64(retryDelayMs) * 1_000_000)
+                    retryDelayMs = min(retryDelayMs * 2, 1000)
+                }
             }
         }
     }
@@ -127,29 +123,37 @@ final class BarState: ObservableObject {
         var windows: [BarWindow] = []
         var reachable = false
         var needsRestart = false
+    }
 
-        static func read() -> Snapshot {
-            var out = Snapshot()
-            guard let sJSON = BarIPC.send("query spaces"),
-                  let sData = sJSON.data(using: .utf8),
-                  let spaces = try? JSONDecoder().decode([BarSpace].self, from: sData)
-            else { return out }
-            out.reachable = true
-            out.spaces = spaces
-            if let wJSON = BarIPC.send("query windows"),
-               let wData = wJSON.data(using: .utf8),
-               let windows = try? JSONDecoder().decode([BarWindow].self, from: wData)
-            {
-                out.windows = windows
-            }
-            struct Perms: Decodable { var needsRestart: Bool? }
-            if let pJSON = BarIPC.send("query permissions"),
-               let pData = pJSON.data(using: .utf8),
-               let perms = try? JSONDecoder().decode(Perms.self, from: pData)
-            {
-                out.needsRestart = perms.needsRestart ?? false
-            }
-            return out
+    private nonisolated static func takeSnapshot() -> Snapshot {
+        guard let sJSON = BarIPC.send("query spaces"),
+              let sData = sJSON.data(using: .utf8),
+              let spaces = try? JSONDecoder().decode([BarSpace].self, from: sData)
+        else {
+            return Snapshot()
         }
+
+        var windows: [BarWindow] = []
+        if let wJSON = BarIPC.send("query windows"),
+           let wData = wJSON.data(using: .utf8),
+           let list = try? JSONDecoder().decode([BarWindow].self, from: wData)
+        {
+            windows = list
+        }
+
+        var needsRestart = false
+        if let pJSON = BarIPC.send("query permissions"),
+           let pData = pJSON.data(using: .utf8),
+           let perms = try? JSONDecoder().decode(DaemonPermissions.self, from: pData)
+        {
+            needsRestart = perms.needsRestart ?? false
+        }
+
+        return Snapshot(
+            spaces: spaces,
+            windows: windows,
+            reachable: true,
+            needsRestart: needsRestart
+        )
     }
 }

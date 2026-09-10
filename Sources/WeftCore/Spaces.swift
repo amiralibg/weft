@@ -132,9 +132,14 @@ public struct SpaceState: Sendable, Equatable {
     public var order: [SpaceID]
     /// The previously focused space ID for back-and-forth space toggle (`space focus recent`).
     public var recentSpace: SpaceID?
+    /// Dynamic layout overrides chosen via `space layout <kind>`, keyed by
+    /// SpaceID. Distinct from `layouts` so the intent survives an empty-space
+    /// sweep and can be persisted across restarts.
+    public var overrides: [SpaceID: LayoutKind]
 
     public init(
         layouts: [SpaceID: SpaceLayout] = [:],
+        overrides: [SpaceID: LayoutKind] = [:],
         labels: [SpaceID: String] = [:],
         currentByDisplay: [String: SpaceID] = [:],
         displays: [String] = [],
@@ -144,6 +149,7 @@ public struct SpaceState: Sendable, Equatable {
         recentSpace: SpaceID? = nil
     ) {
         self.layouts = layouts
+        self.overrides = overrides
         self.labels = labels
         self.currentByDisplay = currentByDisplay
         self.displays = displays
@@ -208,12 +214,33 @@ public struct SpaceState: Sendable, Equatable {
         for sid in layouts.keys where !live.contains(sid) {
             layouts.removeValue(forKey: sid)
         }
+        // Retain only overrides whose spaces still exist
+        overrides = overrides.filter { sids.contains($0.key) }
     }
 
     /// Ordered label names for persistence (ordinal → label).
     public func persistedNames(sids: [SpaceID]) -> [String] {
         let ordered = order.isEmpty ? sids.sorted() : order
         return ordered.map { labels[$0] ?? "" }
+    }
+
+    /// Layout overrides by ordinal, ready to persist as `["", "scroll", ""]`.
+    ///
+    /// Persisting by ordinal rather than by space id lets the choices survive
+    /// a daemon restart (macOS hands out fresh space ids on reboot) while
+    /// remaining independent of whether spaces are labelled.
+    public func persistedOverrides(sids: [SpaceID]) -> [String] {
+        sids.map { overrides[$0]?.rawValue ?? "" }
+    }
+
+    /// Re-apply a previously persisted list of layout overrides by ordinal.
+    public mutating func assignOverrides(sids: [SpaceID], kinds: [String]) {
+        for (i, sid) in sids.enumerated() where i < kinds.count {
+            let raw = kinds[i]
+            if let kind = LayoutKind(rawValue: raw) {
+                overrides[sid] = kind
+            }
+        }
     }
 }
 
@@ -224,13 +251,28 @@ public struct SpaceState: Sendable, Equatable {
 public func syncMembership(
     _ state: SpaceState,
     spaces: [SpaceID: [WindowID]],
+    live: Set<SpaceID>? = nil,
     screens: [SpaceID: Frame] = [:],
     config: TilingConfig = TilingConfig()
 ) -> (SpaceState, Set<WindowID>) {
     var next = state
     var fresh: Set<WindowID> = []
-    for (sid, ids) in spaces {
-        switch next.layouts[sid] ?? .tiling(Tree()) {
+    // Every space that exists, not just the ones holding a managed window, so
+    // an emptied space keeps its layout kind (with empty membership).
+    let sids = live ?? Set(spaces.keys)
+    for sid in sids {
+        let ids = spaces[sid] ?? []
+        let initialLayout: SpaceLayout
+        if let overrideKind = next.overrides[sid] {
+            switch overrideKind {
+            case .scroll: initialLayout = .scroll(ScrollState())
+            case .float: initialLayout = .float(FloatState())
+            case .bsp: initialLayout = .tiling(Tree())
+            }
+        } else {
+            initialLayout = .tiling(Tree())
+        }
+        switch next.layouts[sid] ?? initialLayout {
         case .tiling(var tree):
             let have = Set(tree.windows)
             for id in ids.sorted() where !have.contains(id) {
@@ -268,9 +310,13 @@ public func syncMembership(
             next.layouts[sid] = .float(fl)
         }
     }
-    // Drop layouts for spaces with no data (defensive; assignLabels covers it).
-    for sid in next.layouts.keys where spaces[sid] == nil {
-        next.layouts.removeValue(forKey: sid)
+    // Drop layouts for spaces that are genuinely no longer live.
+    if let live {
+        next.layouts = next.layouts.filter { live.contains($0.key) }
+    } else {
+        for sid in next.layouts.keys where spaces[sid] == nil {
+            next.layouts.removeValue(forKey: sid)
+        }
     }
     return (next, fresh)
 }

@@ -42,9 +42,28 @@ final class EventBus: @unchecked Sendable {
         for event in events {
             let key = DaemonEventHash(event)
             guard seen.insert(key).inserted else { continue }  // dedupe within tick
+            // …and across ticks, for the one event that is a snapshot rather
+            // than a happening. Opening a window emits `stateChanged` three
+            // times — once immediately, once from the 20 ms sweep and once
+            // from the 300 ms one — with byte-identical contents. Each cost a
+            // core-queue hop for the summary, a sketchybar trigger and a line
+            // of log. A repeat of a snapshot tells a subscriber nothing.
+            if event.kind == .stateChanged {
+                let unchanged: Bool = lock.withLock {
+                    guard lastState == key else {
+                        lastState = key
+                        return false
+                    }
+                    return true
+                }
+                if unchanged { continue }
+            }
             lock.withLock { _sink }?(event)
         }
     }
+
+    /// The last `stateChanged` that actually went out.
+    private var lastState: DaemonEventHash?
 }
 
 // DaemonEvent isn't Hashable (arrays are, but synthesized conformance wasn't

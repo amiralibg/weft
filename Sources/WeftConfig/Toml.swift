@@ -13,6 +13,16 @@ public enum TomlValue: Sendable, Equatable {
     case bool(Bool)
     case array([TomlValue])
     case table([String: TomlValue])
+
+    /// Numbers written without a decimal point parse as `int`, and every
+    /// caller that wants a measurement wants either.
+    public var asDouble: Double? {
+        switch self {
+        case .int(let i): return Double(i)
+        case .float(let f): return f
+        default: return nil
+        }
+    }
 }
 
 public struct TomlError: Error, Sendable, Equatable {

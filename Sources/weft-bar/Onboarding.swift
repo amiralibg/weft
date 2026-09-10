@@ -1469,6 +1469,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     /// if it never does.
     static func awaitDaemon(timeout: TimeInterval = 6) async -> DaemonPermissions? {
         let deadline = Date().addingTimeInterval(timeout)
+        var delayMs = 50
         while true {
             if let p = await Task.detached(priority: .utility, operation: {
                 query()
@@ -1476,7 +1477,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
                 return p
             }
             guard Date() < deadline else { return nil }
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+            delayMs = min(delayMs * 2, 250)
         }
     }
 

@@ -131,6 +131,8 @@ public enum WorldReader {
         let pid: Int32
     }
 
+    private static let ownPID = ProcessInfo.processInfo.processIdentifier
+
     static func readWindows(cid: SLConnectionID, includeAXBinding: Bool = false) -> [WindowInfo] {
         guard let info = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements],
@@ -151,6 +153,12 @@ public enum WorldReader {
             let wid = WindowID(w[kCGWindowNumber as String] as? Int ?? 0)
             guard wid != 0 else { continue }
             let pid = Int32(w[kCGWindowOwnerPID as String] as? Int ?? 0)
+            // Our own windows. The native border renderer's overlays are
+            // layer-0 and larger than 100×100, so every filter above waves
+            // them through — weft would tile its own borders, and then draw
+            // borders around those. By pid rather than by owner name so it
+            // holds however the binary is named or installed.
+            guard pid != ownPID else { continue }
             // Menu-bar extras. A Stats or Ice panel is layer 0 and larger than
             // 100×100, so the geometry filter waves it straight through and
             // weft tiles it: it takes a slot in the layout, and because weft

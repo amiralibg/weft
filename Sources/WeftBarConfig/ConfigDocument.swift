@@ -171,6 +171,9 @@ extension TomlSection {
 
     public func string(_ key: String) -> String? { rawValue(key).map(TomlValue.unquote) }
     public func int(_ key: String) -> Int? { rawValue(key).flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } }
+    public func double(_ key: String) -> Double? {
+        rawValue(key).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    }
     public func bool(_ key: String) -> Bool? {
         switch rawValue(key)?.lowercased() {
         case "true": return true
@@ -199,6 +202,12 @@ extension TomlSection {
     public mutating func set(_ key: String, string value: String) { setRaw(key, TomlValue.quote(value)) }
     public mutating func set(_ key: String, bool value: Bool) { setRaw(key, value ? "true" : "false") }
     public mutating func set(_ key: String, int value: Int) { setRaw(key, String(value)) }
+    /// Trailing `.0` kept off whole numbers — `width = 4` reads better than
+    /// `width = 4.0`, and the parser takes either.
+    public mutating func set(_ key: String, double value: Double) {
+        let rounded = (value * 100).rounded() / 100
+        setRaw(key, rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded))
+    }
 
     public mutating func remove(_ key: String) {
         let target = Self.normalize(key)

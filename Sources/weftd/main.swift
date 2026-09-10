@@ -25,6 +25,11 @@ final class Daemon: @unchecked Sendable {
     private let applyQueue = DispatchQueue(label: "weft.apply", qos: .userInitiated)
     /// Serial, so parked-set writes land in the order they were taken.
     private let parkedSaveQueue = DispatchQueue(label: "weft.parked-save", qos: .utility)
+    private let layoutSaveQueue = DispatchQueue(label: "weft.layout-save", qos: .utility)
+    /// `WEFT_TRACE=1` puts every bus event in the log. Off by default: it is
+    /// a write syscall per event, and the events are the noisiest thing weft
+    /// does.
+    static let traceEvents = ProcessInfo.processInfo.environment["WEFT_TRACE"] == "1"
     private let parkedLock = NSLock()
     /// Serializes keybind commands. The tap callback must never block (§6),
     /// and handleCommand blocks (core.sync + apply wait) — so input lands
@@ -127,11 +132,18 @@ final class Daemon: @unchecked Sendable {
         }
         loadConfigFile(initial: true)
         bus.sink = { [hub, weak self] event in
-            if let data = try? JSONEncoder().encode(event),
+            // Encode only if somebody is listening. `hub` is the `weftctl
+            // subscribe` fan-out, and the trace is off unless asked for:
+            // writing a JSON line to the log file for every focus change and
+            // every window move is a synchronous file write on a path that
+            // fires dozens of times a second, and the file it grows is one
+            // nobody reads until something is already wrong.
+            if hub.hasSubscribers || Daemon.traceEvents,
+               let data = try? JSONEncoder().encode(event),
                let line = String(data: data, encoding: .utf8)
             {
                 hub.broadcast(line)
-                fputs("event \(line)\n", stderr)
+                if Daemon.traceEvents { fputs("event \(line)\n", stderr) }
             }
             guard let self else { return }
             let state = self.currentStateSummary()
@@ -140,7 +152,15 @@ final class Daemon: @unchecked Sendable {
                 self.bordersBridge.updateColor(layout: lk, mode: state.mode, config: self.currentConfig().integrations.borders)
             }
         }
-        syncFromSnapshot(initial: true)
+        // The first sweep is NOT run here.
+        //
+        // It reads the whole WindowServer and does two rounds of AX work, and
+        // until it returned nothing else in `main` had run — so the socket did
+        // not exist yet. Everything that talks to weftd (`weftctl`, and the
+        // menu-bar app's reconnect loop) got connection-refused for the whole
+        // of it and reported the engine as down, which is most of what a
+        // restart *feels* like. `main` starts the listener and then calls
+        // `start()`.
         observers.onEvent = { [weak self] event in
             guard let self else { return }
             // Off-core (was core.async): handling an event reads the whole
@@ -200,6 +220,22 @@ final class Daemon: @unchecked Sendable {
                     + "System Settings › Privacy & Security › Input Monitoring; switch it on\n", stderr)
             }
         }
+    }
+
+    /// Everything that must happen once, after the socket is listening.
+    ///
+    /// Callers that arrive during the first sweep are not turned away: the
+    /// socket accepts them, and `handle` runs their command on `incoming`
+    /// behind the sweep, so the worst case is a command that answers late
+    /// rather than one that fails.
+    func start() {
+        // On the sync queue, not the caller's: `main` calls this and then
+        // enters `CFRunLoopRun`, and the main run loop is where NSWorkspace
+        // delivers app-launch, app-quit and space-change notifications. Doing
+        // the sweep on the main thread means none of those arrive until it
+        // finishes. The queue is serial, so anything the observers post in the
+        // meantime is handled after the first sweep, in order.
+        syncQueue.async { [weak self] in self?.syncFromSnapshot(initial: true) }
     }
 
     private func warpMouseToWindow(_ wid: WindowID) {
@@ -474,88 +510,102 @@ final class Daemon: @unchecked Sendable {
     /// "slow" resize actually is. So: at most one apply in flight, and the
     /// newest target replaces any that were waiting. Intermediate frames of a
     /// drag are worth nothing once a newer one exists.
-    private var applyInFlight = false
-    private var pendingApplyFrames: [WindowID: Frame]?
     private let applyCoalesceLock = NSLock()
+    private var lastDragFrames: [WindowID: Frame]?
 
     private func applyFramesCoalesced(_ frames: [WindowID: Frame]) {
-        let go: [WindowID: Frame]? = applyCoalesceLock.withLock {
-            guard !applyInFlight else {
-                pendingApplyFrames = frames
-                return nil
-            }
-            applyInFlight = true
-            return frames
-        }
-        if let go { runCoalescedApply(go) }
-    }
-
-    /// One apply, then whatever arrived while it was running, until nothing
-    /// is waiting. Chained rather than nested: a fixed depth of two dropped
-    /// every batch that landed during the second write, which on a long drag
-    /// is most of them.
-    private func runCoalescedApply(_ frames: [WindowID: Frame]) {
-        applier.apply(frames: frames, pids: allPids()) { [weak self] result in
-            guard let self else { return }
-            self.noteApplyFailures(result)
-            let next: [WindowID: Frame]? = self.applyCoalesceLock.withLock {
-                let n = self.pendingApplyFrames
-                self.pendingApplyFrames = nil
-                if n == nil { self.applyInFlight = false }
-                return n
-            }
-            if let next { self.runCoalescedApply(next) }
+        applyCoalesceLock.withLock { lastDragFrames = frames }
+        // Positions go out on every event — a WindowServer transaction, no
+        // app IPC — and the applier holds its own latest-wins queue for the
+        // AX size writes, which are the only part an app can be slow at.
+        applier.applyDragFrames(frames: frames, pids: allPids())
+        // From the same numbers, in the same breath. An external border
+        // process only learns about this move by being notified after the
+        // fact and reading the geometry back, which is why its borders trail
+        // the window during a drag.
+        if bordersBridge.drawsBorders {
+            let parked = readParked()
+            bordersBridge.renderer.update(frames: frames.filter { !parked.contains($0.key) })
         }
     }
 
-    /// Write whatever the coalescer is still holding, now. Called when a drag
-    /// ends, so the final position is never the one that got dropped.
+    /// Run the full frame-set protocol over the drag's final geometry.
+    ///
+    /// The gesture itself deliberately skips the read-back-and-correct pass,
+    /// so this is where an app that quietly refused a size, or landed a few
+    /// points off, is put right — once, when the button comes up.
     private func flushPendingApply() {
         let last: [WindowID: Frame]? = applyCoalesceLock.withLock {
-            let n = pendingApplyFrames
-            pendingApplyFrames = nil
+            let n = lastDragFrames
+            lastDragFrames = nil
             return n
         }
         if let last { applyFrames(last) }
     }
 
-    /// Republish the borders the mouse can grab, for the spaces on screen.
+    /// Republish everything that describes the layout as it is *now*: the
+    /// borders the mouse can grab, and the borders the user can see.
     ///
     /// Called from the apply path, so the zones can never describe a layout
     /// that is no longer on screen — a stale zone means a click swallowed
     /// where there is nothing to drag, which is worse than no zones at all.
+    /// The window borders come from the same pass because they answer the
+    /// same question and computing every visible space's frames twice, on
+    /// every apply, is the kind of thing that turns into lag.
     private func refreshDividerZones() {
         let cfg = currentConfig().general
-        guard cfg.mouseBorderResize else {
+        let wantBorders = bordersBridge.drawsBorders
+        guard cfg.mouseBorderResize || wantBorders else {
             dividerLock.withLock { dividerZones = [] }
             input.updateDividerZones([])
             return
         }
         let config = cfg.asTilingConfig()
         var all: [Divider] = []
+        var borderFrames: [WindowID: Frame] = [:]
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
         let sp = readSpaces()
+        let parked = readParked()
         for sid in Set(sp.currentByDisplay.values) {
             guard let layout = sp.layouts[sid] else { continue }
             let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
             let frames: [WindowID: Frame]
+            var grabbable = true
             switch layout {
             case .tiling(let tree):
                 // A fullscreen window covers its neighbours, so there is no
                 // border to grab and every pair overlaps anyway.
-                guard tree.fullscreen == nil else { continue }
+                grabbable = tree.fullscreen == nil
                 frames = WeftCore.layout(tree, in: screen, config: config)
             case .scroll(let sc):
-                guard sc.fullscreen == nil else { continue }
+                grabbable = sc.fullscreen == nil
                 frames = scrollLayout(sc, screen: screen, config: config).frames
-            case .float:
-                continue
+            case .float(let fl):
+                grabbable = false
+                // A float space has no computed geometry — the windows are
+                // wherever the user put them, so read it.
+                frames = liveFrames(of: fl.windows)
             }
-            all += dividers(in: frames, innerGap: cfg.innerGap)
+            if wantBorders {
+                for (wid, frame) in frames where !parked.contains(wid) {
+                    borderFrames[wid] = frame
+                }
+            }
+            if grabbable && cfg.mouseBorderResize {
+                all += dividers(in: frames, innerGap: cfg.innerGap)
+            }
         }
         dividerLock.withLock { dividerZones = all }
-        input.updateDividerZones(all.map(\.rect))
+        input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
+        // Only windows in a layout, which is what makes menu-bar popovers,
+        // Spotlight and every other transient panel border-free without a
+        // single heuristic: they were never in a layout to begin with.
+        if wantBorders {
+            bordersBridge.renderer.update(
+                frames: borderFrames, focused: sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
+            )
+        }
     }
 
     /// Keybind entry point. Returns immediately (tap-thread safe); the command
@@ -694,6 +744,9 @@ final class Daemon: @unchecked Sendable {
                 return
             }
         }
+        // Two repaints, no geometry, no WindowServer sweep. This is the whole
+        // cost of following focus when the renderer is in-process.
+        bordersBridge.renderer.setFocus(wid)
     }
 
     /// Display uuids west→east. The order `focus display west|east` counts in.
@@ -746,13 +799,25 @@ final class Daemon: @unchecked Sendable {
         readSpaces().currentSpace
     }
 
+    private func resolvedInitialLayout(for sid: SpaceID, in sp: SpaceState) -> SpaceLayout {
+        if let existing = sp.layouts[sid] { return existing }
+        let cfg = currentConfig()
+        let kind = sp.overrides[sid]
+            ?? cfg.spaces.first(where: { $0.label == (sp.labels[sid] ?? "") })?.layout
+            ?? cfg.general.defaultLayout
+        switch kind {
+        case .scroll: return .scroll(ScrollState())
+        case .float: return .float(FloatState())
+        case .bsp: return .tiling(Tree())
+        }
+    }
+
     /// Current space's layout (dual-context). Absent (unvisited) reads as an
-    /// empty tiling tree — sync fills it in.
+    /// empty layout matching space/default config — sync fills it in.
     private func currentLayout() -> SpaceLayout {
         let sp = readSpaces()
-        guard let sid = sp.currentSpace, let layout = sp.layouts[sid]
-        else { return .tiling(Tree()) }
-        return layout
+        guard let sid = sp.currentSpace else { return .tiling(Tree()) }
+        return sp.layouts[sid] ?? resolvedInitialLayout(for: sid, in: sp)
     }
 
     private func storeLayout(_ layout: SpaceLayout) {
@@ -773,7 +838,9 @@ final class Daemon: @unchecked Sendable {
     func syncFromSnapshot(initial: Bool = false) {
         // ── Phase 1 (off-core): read the world. No lock, no queue held. ──
         dispatchPrecondition(condition: .notOnQueue(core))
+        let t0 = Date()
         let world = WorldReader.snapshot()
+        let tRead = Date()
         refreshScreens()
         let cfg = currentConfig()
         // sid → display, and the display keyboard focus is on. Both are read
@@ -809,8 +876,13 @@ final class Daemon: @unchecked Sendable {
         var freshlyClassified: [WindowID: Bool] = [:]
         var freshUnbindable: [WindowID: Date] = [:]
         let now = Date()
+        // One fan-out for the whole sweep. Asking window by window meant a
+        // cold start walked every app in series before anything was tiled.
+        let tClassify0 = Date()
+        let verdicts = applier.classifyBatch(unclassified.map { (wid: $0.id, pid: $0.pid) })
+        let tClassify = Date()
         for w in unclassified {
-            if let verdict = applier.classify(wid: w.id, pid: w.pid) {
+            if let verdict = verdicts[w.id] {
                 switch verdict {
                 case .success:
                     freshlyClassified[w.id] = true
@@ -856,6 +928,7 @@ final class Daemon: @unchecked Sendable {
                 // Delete labels.json to re-adopt the config's names wholesale.
                 let declared = cfg.spaces.map { $0.label }
                 sp.assignLabels(sids: allSids, names: declared.isEmpty ? Daemon.loadLabels() : declared)
+                sp.assignOverrides(sids: allSids, kinds: Daemon.loadLayoutOverrides())
             } else {
                 // Desktops added/removed at runtime: keep every existing label,
                 // but re-derive the ordinal list so `space focus 3` still means
@@ -956,19 +1029,20 @@ final class Daemon: @unchecked Sendable {
             self.unmanaged = unmanagedNow
             let priorKeys = Set(sp.layouts.keys)
             let (synced, _) = syncMembership(
-                sp, spaces: bySpace,
+                sp, spaces: bySpace, live: liveSids,
                 screens: usableBySpace, config: cfg.general.asTilingConfig()
             )
             sp = synced
-            // Fresh spaces take the declared layout (or general default);
-            // manual `space layout` overrides survive until the next reload.
-            for sid in bySpace.keys where !priorKeys.contains(sid) {
+            // Spaces seen for the first time this launch take the layout the
+            // user last chose for them, else the `[[space]]` declaration, else
+            // the general default. A space that already had a layout keeps it:
+            // this branch is seeding, not enforcement.
+            for sid in liveSids where !priorKeys.contains(sid) {
                 let label = sp.labels[sid] ?? ""
-                let kind = cfg.spaces.first(where: { $0.label == label })?.layout
+                let kind = sp.overrides[sid]
+                    ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
-                if kind != .bsp {
-                    self.convertLayout(&sp, sid: sid, to: kind)
-                }
+                self.convertLayout(&sp, sid: sid, to: kind)
             }
             self.spaces = sp
             let currentSids = Set(sp.currentByDisplay.values)
@@ -1011,10 +1085,23 @@ final class Daemon: @unchecked Sendable {
             pendingRuleResync = work
             syncQueue.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
+        let tBind0 = Date()
         applier.bind(windows: visible.map { (wid: $0.id, pid: $0.pid) })
         applier.forget(keeping: worldWids)
+        let tBind = Date()
+        // Only the display the user is actually on may raise anything.
+        //
+        // Raising calls `NSRunningApplication.activate()`, and with two
+        // displays this loop raised the focused window of *each* visible
+        // space — so the two monitors took it in turns to activate their own
+        // window, every activation posted a focused-window notification, and
+        // every one of those scheduled another sweep. The daemon sat there
+        // flipping focus between two windows on two displays forever, with
+        // nobody touching the machine. It is in the log as an unbroken
+        // alternation of `windowFocused` between the same two window ids.
+        let focusedSID = readSpaces().currentSpace
         for sid in currentSids.sorted() {
-            applySpaceLayout(sid)
+            applySpaceLayout(sid, raiseFocus: sid == focusedSID)
         }
         watchCurrent()
         bus.emit(stateChangedEvent())
@@ -1024,7 +1111,18 @@ final class Daemon: @unchecked Sendable {
                 let mark = uuid == focusedDisplay ? "*" : ""
                 return "\(i + 1)\(mark) \(Int(f.width))x\(Int(f.height))@\(Int(f.x)),\(Int(f.y))"
             }.joined(separator: " ")
+            func ms(_ a: Date, _ b: Date) -> Int { Int(b.timeIntervalSince(a) * 1000) }
             fputs("weftd: displays \(geometry) spaces \(currentSids.count) current, \(allSids.count) total, windows \(total)\n", stderr)
+            // Where a restart actually goes. Reading the WindowServer is
+            // cheap; the two AX phases are not, and both are the kind of cost
+            // that grows with how many apps are open — so a number here is
+            // the difference between "weft is slow to start" and a fix.
+            fputs(
+                "weftd: first sweep \(ms(t0, Date()))ms "
+                    + "(world \(ms(t0, tRead))ms, classify \(unclassified.count) "
+                    + "\(ms(tClassify0, tClassify))ms, bind \(ms(tBind0, tBind))ms)\n",
+                stderr
+            )
         }
     }
 
@@ -1169,13 +1267,22 @@ final class Daemon: @unchecked Sendable {
             // window. This used to run a full WindowServer sweep inline —
             // on the queue every keybind blocks on — which is where the focus
             // lag came from. Ask for a coalesced sweep and return now.
-            if !currentLayout().windows.contains(wid) {
+            //
+            // "Unknown" means unknown to *any* space on screen, not to the
+            // current one. Asking only the current space meant that with two
+            // displays attached, every click on the other monitor was a
+            // window weft had never heard of and cost a full WindowServer
+            // sweep — on a two-display desktop that is most focus changes.
+            let sp0 = readSpaces()
+            guard let homeSID = sp0.visibleSpaces.first(where: {
+                sp0.layouts[$0]?.windows.contains(wid) == true
+            }) else {
                 scheduleSync()
                 return
             }
             updateSpaces { sp in
-                guard let sid = sp.currentSpace, let layout = sp.layouts[sid]
-                else { return }
+                guard let layout = sp.layouts[homeSID] else { return }
+                let sid = homeSID
                 switch layout {
                 case .tiling(let t):
                     guard t.windows.contains(wid) else { return }
@@ -1204,6 +1311,7 @@ final class Daemon: @unchecked Sendable {
             // become AX-bindable here (apply-on-space_changed, §5.0). Runs
             // inline: the user is looking at the new space right now, so this
             // is the one event that must not wait out a debounce.
+            bordersBridge.renderer.clearOnSpaceChange()
             bus.emit(DaemonEvent(kind: .spaceChanged))
             syncFromSnapshot()
         case .displayChanged:
@@ -1211,6 +1319,9 @@ final class Daemon: @unchecked Sendable {
             // layout sized to a screen that no longer exists, and the sweep
             // below computes frames from these rects.
             refreshScreens()
+            // Scale factors and geometry both changed; every overlay's
+            // backing store is sized for a display that may not be there.
+            bordersBridge.renderer.clearOnSpaceChange()
             bus.emit(DaemonEvent(kind: .displayChanged))
             syncFromSnapshot()
         }
@@ -1304,7 +1415,7 @@ final class Daemon: @unchecked Sendable {
             unmanaged.remove(wid)
             if let sid = currentSID() {
                 updateSpaces { sp in
-                    switch sp.layouts[sid] ?? .tiling(Tree()) {
+                    switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
                     case .tiling(var t):
                         t = t.inserting(wid)
                         sp.layouts[sid] = .tiling(t)
@@ -1325,7 +1436,7 @@ final class Daemon: @unchecked Sendable {
             unmanaged.insert(wid)
             if let sid = currentSID() {
                 updateSpaces { sp in
-                    switch sp.layouts[sid] ?? .tiling(Tree()) {
+                    switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
                     case .tiling(var t):
                         t = t.removing(wid)
                         sp.layouts[sid] = .tiling(t)
@@ -1694,7 +1805,12 @@ final class Daemon: @unchecked Sendable {
             syncFromSnapshot()
             updateSpaces { sp in
                 convertLayout(&sp, sid: sid, to: targetKind)
+                // Remember that this was asked for, not derived. Without the
+                // record the next config reload, the next time the space
+                // empties, and the next restart all quietly undo it.
+                sp.overrides[sid] = targetKind
             }
+            saveLayoutOverrides()
             if let sid = currentSID() {
                 applySpaceLayout(sid)
             }
@@ -1739,7 +1855,7 @@ final class Daemon: @unchecked Sendable {
                     break
                 }
             }
-            switch sp.layouts[sid] ?? .tiling(Tree()) {
+            switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
             case .tiling(var t):
                 // Split against the TARGET display's rect: a window landing
                 // on a 3840-wide monitor should split it side by side even
@@ -2116,6 +2232,10 @@ final class Daemon: @unchecked Sendable {
         configLock.withLock { _config }
     }
 
+    /// Hash of the config text last loaded, so an FSEvents burst over an
+    /// unchanged file costs one read and nothing else. Guarded by `configLock`.
+    private var lastConfigDigest: Int?
+
     static func configFile() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/weft/weft.toml")
@@ -2134,6 +2254,19 @@ final class Daemon: @unchecked Sendable {
             }
             return
         }
+        // FSEvents fires on the directory, and it fires more than once for a
+        // single save: an editor writes a temp file and renames it, and the
+        // Settings window touches labels.json in the same directory. Both
+        // arrived here as a full reload — which re-applies the keymap,
+        // restarts the mouse zones and re-derives every declared layout — for
+        // a file whose bytes had not changed. Two "config loaded" lines per
+        // save is the visible half of it.
+        let digest = text.hashValue
+        let unchanged: Bool = configLock.withLock {
+            defer { lastConfigDigest = digest }
+            return !initial && lastConfigDigest == digest
+        }
+        if unchanged { return }
         let next: ValidatedConfig
         do {
             next = try loadConfig(text)
@@ -2160,24 +2293,45 @@ final class Daemon: @unchecked Sendable {
     /// truth — overrides manual `space layout` until the next reload).
     private func applyDeclaredLayouts() {
         let cfg = currentConfig()
+        let previous = lastDeclaredLayouts
+        lastDeclaredLayouts = Dictionary(
+            cfg.spaces.map { ($0.label, $0.layout) }, uniquingKeysWith: { _, b in b }
+        )
         guard !cfg.spaces.isEmpty else { return }
         let sp = readSpaces()
         // label → sid for known spaces.
         var changed = false
+        var clearedOverride = false
         for decl in cfg.spaces {
             guard let sid = sp.id(forLabel: decl.label),
                   let cur = sp.layouts[sid]
             else { continue }  // unknown label yet (space not visited) — applied on first sync
+            // Editing `layout =` in weft.toml is an instruction and wins; a
+            // reload that did not touch this space's declaration is not, and
+            // must not undo a `space layout` the user ran since. Reloads fire
+            // on every save of the file, so without this every unrelated edit
+            // — a keybind, a rule, a gap — snapped every space back.
+            let declarationChanged = previous[decl.label] != decl.layout
+            if !declarationChanged, sp.overrides[sid] != nil { continue }
+            if declarationChanged, sp.overrides[sid] != nil {
+                updateSpaces { $0.overrides.removeValue(forKey: sid) }
+                clearedOverride = true
+            }
             if cur.kind == decl.layout { continue }
             updateSpaces { sp in
                 convertLayout(&sp, sid: sid, to: decl.layout)
             }
             changed = true
         }
+        if clearedOverride { saveLayoutOverrides() }
         if changed {
             syncFromSnapshot()
         }
     }
+
+    /// The `[[space]] layout` values the last config load saw, per label. Only
+    /// a *change* between loads counts as the user re-deciding in the file.
+    private var lastDeclaredLayouts: [String: LayoutKind] = [:]
 
     /// Convert one space's layout preserving membership. INTO float captures
     /// live SLS frames as the remembered arrangement.
@@ -2279,6 +2433,39 @@ final class Daemon: @unchecked Sendable {
         )
         if let data = try? JSONEncoder().encode(names) {
             try? data.write(to: url)
+        }
+    }
+
+    // MARK: - Layout persistence (by ordinal; sids die on reboot, §5.3)
+    //
+    // Only *chosen* layouts are written here — the ones `space layout` set.
+    // A layout that came from `[[space]] layout` or `default-layout` is
+    // already persisted, in weft.toml, and copying it into a second file
+    // would make editing weft.toml stop working.
+
+    static func layoutsFile() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/weft/layouts.json")
+    }
+
+    static func loadLayoutOverrides() -> [String] {
+        guard let data = try? Data(contentsOf: layoutsFile()),
+              let kinds = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return kinds
+    }
+
+    private func saveLayoutOverrides() {
+        let sp = readSpaces()
+        let kinds = sp.persistedOverrides(sids: sp.order)
+        layoutSaveQueue.async {
+            let url = Daemon.layoutsFile()
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            if let data = try? JSONEncoder().encode(kinds) {
+                try? data.write(to: url)
+            }
         }
     }
 
@@ -2458,8 +2645,9 @@ final class Daemon: @unchecked Sendable {
             return emit(world.spaces.map { s in
                 let label = sp.labels[s.id] ?? "\(s.id)"
                 let layout = sp.layouts[s.id]?.kind
+                    ?? sp.overrides[s.id]
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
-                    ?? .bsp
+                    ?? cfg.general.defaultLayout
                 return SpaceStatus(
                     id: s.id,
                     label: label,
@@ -2948,4 +3136,8 @@ let server = IPCServer(path: path) { line, conn in
 DispatchQueue.global(qos: .userInitiated).async {
     server.run()
 }
+// First sweep after the listener is up, so a `weftctl` or a menu-bar app that
+// reconnects the instant launchd restarts the service finds a socket rather
+// than a refused connection.
+daemon.start()
 CFRunLoopRun()
