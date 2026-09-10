@@ -51,6 +51,19 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
+    /// How long a scroll space takes to pan between columns, in milliseconds.
+    /// 0 turns it off and restores the single-write behaviour `docs/DESIGN.md`
+    /// §1 describes.
+    ///
+    /// The strip is the one layout where a frame change is *motion* rather
+    /// than a rearrangement: every window keeps its size and slides the same
+    /// distance, so there is a real direction to read and jumping loses it —
+    /// which column went where is left for the eye to work out. Nothing else
+    /// weft does has that property, which is why this is a scroll setting and
+    /// not a global one. A pan costs one WindowServer transaction per frame
+    /// (no AX, no app IPC); the AX write that keeps each app's own idea of its
+    /// position honest happens once, when the pan lands.
+    public var scrollAnimationMs: Int
     public var reserve: ScreenReserve
 
     public init(
@@ -64,6 +77,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
+        scrollAnimationMs: Int = 140,
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
@@ -76,6 +90,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
+        self.scrollAnimationMs = scrollAnimationMs
         self.reserve = reserve
     }
 
@@ -333,6 +348,11 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "focus-follows-mouse":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.focusFollowsMouse = b
+            case "scroll-animation-ms":
+                guard case .int(let n) = v, n >= 0, n <= 2000 else {
+                    throw err(path, "expected int between 0 and 2000 (0 = off)")
+                }
+                general.scrollAnimationMs = n
             case "reserve":
                 general.reserve = try parseReserve(v, path: path, lines: doc.lines)
             default:
@@ -377,6 +397,23 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     default:
                         throw ConfigError(line: at("scroll"), message: "expected number in preset-column-widths")
                     }
+                }
+                // Range-checked, now that the key is actually read: a width is
+                // a fraction of the usable width, and `cyclingWidth` sets it
+                // straight onto the column without a clamp of its own. An
+                // unchecked 99 in this list is a column ninety-nine screens
+                // wide and every other column parked off the edge.
+                guard !ws.isEmpty else {
+                    throw ConfigError(
+                        line: at("scroll"),
+                        message: "preset-column-widths must not be empty"
+                    )
+                }
+                guard ws.allSatisfy({ $0 > 0 && $0 <= 1 }) else {
+                    throw ConfigError(
+                        line: at("scroll"),
+                        message: "preset-column-widths must be fractions in (0, 1]"
+                    )
                 }
                 widths = ws
             }

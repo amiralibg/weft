@@ -78,7 +78,7 @@ private func strip(_ ids: WindowID...) -> ScrollState {
     var c = strip(1, 2)
     c.centerMode = .always
     c.ensureVisible(0, screen: scrollScreen, config: noGaps)
-    #expect(c.viewportX == 0)  // centered would be negative → clamped to 0
+    #expect(c.viewportX == 0)  // the strip fills the screen exactly: no offset
     // .onOverflow centers only what can't fit.
     var o = ScrollState(columns: [Column(windows: [1], width: 1.5)])
     o.centerMode = .onOverflow
@@ -147,10 +147,11 @@ private func strip(_ ids: WindowID...) -> ScrollState {
     // AX leaves 40pt of a window on screen whatever you ask for. A column
     // with less than that showing is parked rather than written to a position
     // the WindowServer will quietly overrule.
-    var s = strip(1, 2)
-    // Scroll so column 1 has 20pt of itself left on screen.
-    s.viewportX = 480
-    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    let s = strip(1, 2)
+    // Scroll so column 1 has 20pt of itself left on screen. Explicit viewport:
+    // a two-column strip fits this screen exactly, so the layout would
+    // otherwise derive its own (centred) one and never reach the sliver.
+    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps, viewportX: 480)
     #expect(parked == [1])
     #expect(frames.keys.sorted() == [2])
 }
@@ -288,4 +289,149 @@ private func strip(_ ids: WindowID...) -> ScrollState {
     #expect(s2.columns[2].windows == [3, 2])
     #expect(s2.focusedWindow == 2)
     #expect(s2.focusCol == 2)
+}
+
+@Test func aLoneColumnSitsInTheMiddleOfTheScreen() {
+    // A single window used to open at strip 0 — hard against the left outer
+    // gap, with half the screen empty beside it. A strip shorter than the
+    // screen has nothing to scroll, so the only honest place for it is the
+    // middle.
+    var s = strip(1)  // one 0.5-width column: 500 of a 1000 screen
+    s.ensureVisible(0, screen: scrollScreen, config: noGaps)
+    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    #expect(parked.isEmpty)
+    #expect(frames[1]!.x == 250)
+    #expect(frames[1]!.width == 500)
+}
+
+@Test func eachNewColumnPushesTheGroupLeftUntilItOverflows() {
+    // Two half-width columns fill the screen exactly, so the first one is
+    // pushed from the middle to the left edge by the arrival of the second.
+    var s = strip(1)
+    s.ensureVisible(0, screen: scrollScreen, config: noGaps)
+    #expect(scrollLayout(s, screen: scrollScreen, config: noGaps).frames[1]!.x == 250)
+    s = s.inserting(2)
+    s.ensureVisible(s.focusCol, screen: scrollScreen, config: noGaps)
+    let two = scrollLayout(s, screen: scrollScreen, config: noGaps).frames
+    #expect(two[1]!.x == 0)
+    #expect(two[2]!.x == 500)
+}
+
+@Test func closingTheRightColumnPullsTheStripBackIntoView() {
+    // Live regression: `ensureVisible` clamped the viewport at 0 and never at
+    // the strip's end, so closing the column the viewport had scrolled to
+    // left `viewportX` past a strip that no longer reached that far. The
+    // survivor was drawn a screen-width to the left — far enough off screen
+    // to be parked — and the user saw one window and a hole.
+    var s = strip(1, 2, 3)
+    s.ensureVisible(2, screen: scrollScreen, config: noGaps)
+    #expect(s.viewportX == 500)  // strip 1500, screen 1000
+    s = s.removing(3)
+    s.ensureVisible(s.focusCol, screen: scrollScreen, config: noGaps)
+    let (frames, parked) = scrollLayout(s, screen: scrollScreen, config: noGaps)
+    #expect(parked.isEmpty)
+    #expect(frames[1]!.x == 0)
+    #expect(frames[2]!.x == 500)
+}
+
+@Test func theViewportNeverScrollsPastTheEndOfTheStrip() {
+    // The same clamp, reached the other way: a stored viewport left over from
+    // a longer strip is corrected by the layout itself, so every reader of
+    // the geometry — drag zones, borders, `query tree` — agrees without
+    // anyone having to write the state back first.
+    var s = strip(1, 2, 3)
+    s.viewportX = 4000
+    #expect(s.effectiveViewportX(usableW: 1000) == 500)
+    s.ensureVisible(0, screen: scrollScreen, config: noGaps)
+    #expect(s.viewportX == 0)
+}
+
+@Test func neverCenterKeepsAShortStripOnTheLeftEdge() {
+    var s = strip(1)
+    s.centerMode = .never
+    s.ensureVisible(0, screen: scrollScreen, config: noGaps)
+    #expect(s.viewportX == 0)
+    #expect(scrollLayout(s, screen: scrollScreen, config: noGaps).frames[1]!.x == 0)
+}
+
+@Test func alwaysCenterKeepsTheFirstAndLastColumnCentered() {
+    // `.always` means the focused column is centred at the ends of the strip
+    // too, so its viewport range is deliberately wider than the strip: it
+    // runs from the first column centred to the last one centred.
+    var s = strip(1, 2, 3, 4)  // strip 2000 on a 1000 screen
+    s.centerMode = .always
+    s.ensureVisible(0, screen: scrollScreen, config: noGaps)
+    #expect(s.viewportX == -250)  // col 0 = [0,500], centred in 1000
+    s.ensureVisible(3, screen: scrollScreen, config: noGaps)
+    #expect(s.viewportX == 1250)  // col 3 = [1500,2000]
+}
+
+@Test func theWidthRingComesFromTheSpacesOwnPresets() {
+    // `[[space]] scroll.preset-column-widths` used to be parsed, validated
+    // and then ignored — the ring was a hard-coded static.
+    var s = strip(1)  // default 0.5
+    s = s.cyclingWidth(presets: [0.25, 0.5, 0.75])
+    #expect(abs(s.columns[0].width - 0.75) < 1e-9)
+    s = s.cyclingWidth(presets: [0.25, 0.5, 0.75])
+    #expect(abs(s.columns[0].width - 0.25) < 1e-9)
+    // An empty or junk ring falls back rather than trapping on modulo zero.
+    s = strip(1).cyclingWidth(presets: [])
+    #expect(abs(s.columns[0].width - 0.667) < 1e-9)
+}
+
+@Test func centerModeReadsTheSpellingTheConfigUses() {
+    #expect(CenterMode(configValue: "on-overflow") == .onOverflow)
+    #expect(CenterMode(configValue: "always") == .always)
+    #expect(CenterMode(configValue: "never") == .never)
+    #expect(CenterMode(configValue: "sometimes") == nil)
+    // The raw value alone would have rejected the config's own spelling.
+    #expect(CenterMode(rawValue: "on-overflow") == nil)
+}
+
+@Test func aPanOnlyMovesTheColumnsThatCrossTheScreen() {
+    // Six half-width columns: strip 3000 on a 1000 screen.
+    let s = strip(1, 2, 3, 4, 5, 6)
+    // One column's worth of pan, from the left edge. Columns 1 and 2 are on
+    // screen, column 3 slides in; nothing else comes near it.
+    let one = scrollPanParticipants(s, screen: scrollScreen, config: noGaps, from: 0, to: 500)
+    #expect(one == [1, 2, 3])
+    // A long jump: everything the strip drags past takes part, including the
+    // columns that are off *both* edges at the two ends of the pan. Testing
+    // visibility at the endpoints alone would have left them parked and the
+    // screen would have gone blank in the middle of the movement.
+    let far = scrollPanParticipants(s, screen: scrollScreen, config: noGaps, from: 0, to: 2000)
+    #expect(far == [1, 2, 3, 4, 5, 6])
+    // No movement, no participants beyond what is already on screen.
+    let still = scrollPanParticipants(s, screen: scrollScreen, config: noGaps, from: 500, to: 500)
+    #expect(still == [2, 3])
+}
+
+@Test func aPanKeepsEveryWindowsSizeAndHeight() {
+    // The premise the whole animation rests on: a pan translates. If a
+    // viewport change could also resize, a frame of it would need an AX write
+    // per window and the §1 argument for allowing it at all falls apart.
+    let s = strip(1, 2, 3)
+    let a = scrollStripFrames(s, screen: scrollScreen, config: noGaps, viewportX: 0)
+    let b = scrollStripFrames(s, screen: scrollScreen, config: noGaps, viewportX: 380)
+    #expect(a.keys.sorted() == b.keys.sorted())
+    for (wid, f) in a {
+        #expect(b[wid]!.width == f.width)
+        #expect(b[wid]!.height == f.height)
+        #expect(b[wid]!.y == f.y)
+        #expect(b[wid]!.x == f.x - 380)
+    }
+}
+
+@Test func theStripFramesOfAnOffScreenColumnAreHonest() {
+    // `scrollLayout` drops a column with too little of itself on screen for AX
+    // to place; the pan needs that same column's real position, because
+    // SLSMoveWindow has no such limit and sliding in from beyond the edge is
+    // the entire effect.
+    let s = strip(1, 2, 3, 4)
+    let culled = scrollLayout(s, screen: scrollScreen, config: noGaps, viewportX: 0)
+    #expect(culled.parked == [3, 4])
+    #expect(culled.frames[3] == nil)
+    let all = scrollStripFrames(s, screen: scrollScreen, config: noGaps, viewportX: 0)
+    #expect(all[3]!.x == 1000)
+    #expect(all[4]!.x == 1500)
 }

@@ -14,6 +14,18 @@ public enum CenterMode: String, Codable, Sendable, Equatable {
     case always
     case never
     case onOverflow
+
+    /// From the spelling `weft.toml` uses. The config writes kebab-case
+    /// (`on-overflow`) and the enum is camel-cased, so a plain `init(rawValue:)`
+    /// would silently reject the only spelling the config parser accepts.
+    public init?(configValue: String) {
+        switch configValue {
+        case "always": self = .always
+        case "never": self = .never
+        case "on-overflow", "onOverflow": self = .onOverflow
+        default: return nil
+        }
+    }
 }
 
 public struct Column: Sendable, Equatable {
@@ -264,17 +276,22 @@ public struct ScrollState: Sendable, Equatable {
     }
 
     /// Cycle the focused column through the preset ring.
-    public func cyclingWidth() -> ScrollState {
+    ///
+    /// `presets` is the space's own ring — `[[space]] scroll.preset-column-widths`
+    /// — falling back to the default one. It was a hard-coded static, so the
+    /// config key was parsed, validated, reported in errors, and then ignored.
+    public func cyclingWidth(presets: [Double] = ScrollState.presets) -> ScrollState {
         guard columns.indices.contains(focusCol) else { return self }
+        let ring = presets.filter { $0 > 0 }.isEmpty ? ScrollState.presets : presets.filter { $0 > 0 }
         var copy = self
         let cur = copy.columns[focusCol].width
         var best = 0
         var bestDist = Double.greatestFiniteMagnitude
-        for (i, p) in ScrollState.presets.enumerated() {
+        for (i, p) in ring.enumerated() {
             let d = abs(p - cur)
             if d < bestDist { bestDist = d; best = i }
         }
-        copy.columns[focusCol].width = ScrollState.presets[(best + 1) % ScrollState.presets.count]
+        copy.columns[focusCol].width = ring[(best + 1) % ring.count]
         return copy
     }
 
@@ -347,7 +364,28 @@ public struct ScrollState: Sendable, Equatable {
     /// the outer inset lands in screen coords).
     public mutating func ensureVisible(_ col: Int, screen: Frame, config: TilingConfig) {
         let (usableW, _, _, _) = scrollUsable(screen: screen, config: config)
-        guard columns.indices.contains(col), usableW > 0, screen.width > 0 else { return }
+        guard usableW > 0, screen.width > 0 else { return }
+        guard !columns.isEmpty else { viewportX = 0; return }
+        let stripW = totalWidth(usableW: usableW)
+        // The strip is shorter than the screen: there is nothing to scroll,
+        // and the only question is where the group sits.
+        //
+        // It used to sit at strip 0 whatever the viewport said, which is how
+        // closing the right-hand column left a hole: `viewportX` was still
+        // parked at the old strip end, so the survivor was drawn a screen
+        // width to the left of the screen — far enough to be parked outright.
+        // Centring the whole group is the honest answer to "one window is
+        // open": it lands in the middle, and each column added after it
+        // pushes the group left rather than the first one staying pinned to
+        // the edge. `.never` means the user asked for edge-aligned, so it is.
+        if stripW <= usableW {
+            viewportX = centerMode == .never ? 0 : (stripW - usableW) / 2
+            return
+        }
+        guard columns.indices.contains(col) else {
+            viewportX = min(max(viewportX, 0), stripW - usableW)
+            return
+        }
         let (x0, x1) = columnRange(col, usableW: usableW)
         // 1. Minimum scroll to fit (left edge first, then right).
         //
@@ -371,7 +409,55 @@ public struct ScrollState: Sendable, Equatable {
             // Only center what can't fit: it never sits fully in view.
             if x1 - x0 > usableW { vx += (x0 + x1) / 2 - mid }
         }
-        viewportX = max(vx, 0)
+        viewportX = clampViewport(vx, usableW: usableW, stripW: stripW)
+    }
+
+    /// The viewport the layout actually draws with — the stored `viewportX`
+    /// put back inside the range the current strip allows.
+    ///
+    /// `viewportX` is *intent*: the last place a focus change panned to. The
+    /// strip underneath it changes without the intent changing at all — a
+    /// column closes, a resize shortens the strip, a space is re-laid out on
+    /// a narrower display — and the stored value is then a scroll position
+    /// that no longer exists. Deriving the drawn viewport instead of trusting
+    /// the stored one is what stops those leaving a hole on one side, and it
+    /// means every reader of the layout (the drag path, `query tree`, the
+    /// divider zones, the borders) agrees without anyone writing state back.
+    public func effectiveViewportX(usableW: Double) -> Double {
+        guard usableW > 0, !columns.isEmpty else { return 0 }
+        let stripW = totalWidth(usableW: usableW)
+        if stripW <= usableW {
+            return centerMode == .never ? 0 : (stripW - usableW) / 2
+        }
+        return clampViewport(viewportX, usableW: usableW, stripW: stripW)
+    }
+
+    /// The scrollable range of `viewportX`, for a strip that overflows.
+    ///
+    /// `.never` and `.onOverflow` stop at the two ends of the strip, so the
+    /// last column cannot be scrolled past into empty space. `.always` keeps
+    /// the focused column centred *including* at the ends — that is what the
+    /// mode means — so its range runs from the first column centred to the
+    /// last one centred, which is deliberately wider.
+    private func clampViewport(_ vx: Double, usableW: Double, stripW: Double) -> Double {
+        let lo: Double
+        let hi: Double
+        switch centerMode {
+        case .always:
+            let (f0, f1) = columnRange(0, usableW: usableW)
+            let (l0, l1) = columnRange(columns.count - 1, usableW: usableW)
+            lo = (f0 + f1) / 2 - usableW / 2
+            hi = (l0 + l1) / 2 - usableW / 2
+        case .never, .onOverflow:
+            lo = 0
+            hi = stripW - usableW
+        }
+        return min(max(vx, lo), max(lo, hi))
+    }
+
+    /// Total strip width in points, in the same units as `columnRange`.
+    public func totalWidth(usableW w: Double) -> Double {
+        columns.reduce(0) { $0 + $1.width * w }
     }
 
     /// Strip-coordinate range of a column in usable-width units (matches the
@@ -446,14 +532,78 @@ public func scrollUsable(screen: Frame, config: TilingConfig) -> (
 /// that reads as a pile of windows stacked in the corner, which is exactly
 /// what it is. Anything AX would clamp gets SLS-parked instead, which has no
 /// such limit.
+/// `viewportX` overrides the state's own viewport, for the one caller that
+/// has a better one: the pan animator, which draws intermediate positions
+/// between two settled viewports and must not have them re-derived under it.
 public func scrollLayout(
     _ state: ScrollState,
     screen: Frame,
-    config: TilingConfig
+    config: TilingConfig,
+    viewportX: Double? = nil
+) -> (frames: [WindowID: Frame], parked: Set<WindowID>) {
+    stripFrames(state, screen: screen, config: config, viewportX: viewportX, cull: true)
+}
+
+/// Every window's frame at a given viewport, with the parking rule switched
+/// off — columns that are off screen get honest off-screen frames instead of
+/// being dropped.
+///
+/// For the pan animator, which moves windows with `SLSMoveWindow`. That has
+/// no clamp (S4), so a column can be *drawn* arriving from beyond the display
+/// edge rather than appearing the instant it becomes legal for AX to place —
+/// which is the difference between a strip that scrolls and a strip that
+/// cuts. Nothing here may be handed to AX; the settle pass at the end of the
+/// pan uses `scrollLayout` for that.
+public func scrollStripFrames(
+    _ state: ScrollState,
+    screen: Frame,
+    config: TilingConfig,
+    viewportX: Double? = nil
+) -> [WindowID: Frame] {
+    stripFrames(state, screen: screen, config: config, viewportX: viewportX, cull: false).frames
+}
+
+/// The windows a pan between two viewports actually drags across `screen`.
+///
+/// Everything else stays where it is — parked beyond the display union — for
+/// the length of the pan. Their true strip positions are hundreds or thousands
+/// of points past the edge, and on a multi-display desktop "past the edge" is
+/// the next monitor, which is the whole reason parking targets
+/// `union.minX - 5000` rather than `-width`.
+///
+/// A pan moves every window monotonically, so the exact question is whether
+/// the interval a window sweeps overlaps the screen at any point — not
+/// whether it is visible at either end. A column can cross the whole screen
+/// during a long jump and be off both edges when the pan starts and stops.
+public func scrollPanParticipants(
+    _ state: ScrollState,
+    screen: Frame,
+    config: TilingConfig,
+    from fromVX: Double,
+    to toVX: Double
+) -> Set<WindowID> {
+    let begin = scrollStripFrames(state, screen: screen, config: config, viewportX: fromVX)
+    let end = scrollStripFrames(state, screen: screen, config: config, viewportX: toVX)
+    var out = Set<WindowID>()
+    for (wid, b) in begin {
+        guard let e = end[wid] else { continue }
+        let lo = min(b.x, e.x)
+        let hi = max(b.x, e.x)
+        if hi + e.width > screen.x, lo < screen.x + screen.width { out.insert(wid) }
+    }
+    return out
+}
+
+private func stripFrames(
+    _ state: ScrollState,
+    screen: Frame,
+    config: TilingConfig,
+    viewportX: Double?,
+    cull: Bool
 ) -> (frames: [WindowID: Frame], parked: Set<WindowID>) {
     let gap = config.innerGap
     let (usableW, usableH, baseX, baseY) = scrollUsable(screen: screen, config: config)
-    let vx = state.viewportX
+    let vx = viewportX ?? state.effectiveViewportX(usableW: usableW)
     /// How much of a column has to be on screen for AX to place it honestly.
     /// The clamp leaves 40pt; 48 keeps a margin over it, and a column narrower
     /// than that is measured against its own width instead so a deliberately
@@ -478,7 +628,7 @@ public func scrollLayout(
         let onScreen = min(drawX + drawW, screen.x + screen.width) - max(drawX, screen.x)
         if onScreen < min(minVisible, drawW) {
             parked.formUnion(col.windows)
-            continue
+            if cull { continue }
         }
         // Rows divide the column height by their stored shares (equal until
         // something resizes them), inner gaps between.

@@ -633,6 +633,14 @@ private struct GeneralTab: View {
                 ) {
                     NumberField(value: $store.stackOffset, range: 0...120) { store.markDirty() }
                 }
+                Row(
+                    label: "Scroll motion",
+                    help: "How long a scroll space takes to slide between columns, in milliseconds. 0 for an instant jump."
+                ) {
+                    NumberField(value: $store.scrollAnimationMs, range: 0...2000) {
+                        store.markDirty()
+                    }
+                }
             }
 
             Card(

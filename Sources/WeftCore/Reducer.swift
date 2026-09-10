@@ -157,7 +157,8 @@ public enum Reducer {
         _ sc: ScrollState,
         screen: Frame,
         config: TilingConfig,
-        command: Command
+        command: Command,
+        presets: [Double] = ScrollState.presets
     ) -> (ScrollState, [Mutation]) {
         let usable = scrollUsable(screen: screen, config: config)
         let usableW = usable.w
@@ -218,7 +219,7 @@ public enum Reducer {
         case .scroll(.moveColumn(let d)):
             next = sc.movingWindowToColumn(d)
         case .scroll(.widthCycle):
-            next = sc.cyclingWidth()
+            next = sc.cyclingWidth(presets: presets)
         case .toggleFullscreen:
             next = sc.togglingFullscreen()
             let (frames, _) = scrollLayout(next, screen: screen, config: config)

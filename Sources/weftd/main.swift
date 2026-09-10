@@ -238,9 +238,9 @@ final class Daemon: @unchecked Sendable {
         syncQueue.async { [weak self] in self?.syncFromSnapshot(initial: true) }
     }
 
-    private func warpMouseToWindow(_ wid: WindowID) {
+    private func warpMouseToWindow(_ wid: WindowID, target: Frame? = nil) {
         guard currentConfig().general.mouseFollowsFocus else { return }
-        guard let frame = WorldReader.frame(of: wid) else { return }
+        guard let frame = target ?? WorldReader.frame(of: wid) else { return }
         if let currentPos = CGEvent(source: nil)?.location,
            frame.contains(x: Double(currentPos.x), y: Double(currentPos.y))
         {
@@ -250,10 +250,17 @@ final class Daemon: @unchecked Sendable {
         CGWarpMouseCursorPosition(center)
     }
 
-    private func focusAndWarp(window: WindowID, pid: Int32) {
+    /// `target` is where the window is *going*, when the caller knows.
+    ///
+    /// The warp used to read the window's live frame, which races the frame
+    /// write it was triggered by: on any retile the cursor landed on the
+    /// window's old rectangle, and during a scroll pan it would chase a window
+    /// that is still crossing the screen — or land off it entirely, on a
+    /// column that has not arrived yet.
+    private func focusAndWarp(window: WindowID, pid: Int32, target: Frame? = nil) {
         noteFocusedWindow(window)
         applier.focusWindow(window, pid: pid)
-        warpMouseToWindow(window)
+        warpMouseToWindow(window, target: target)
         bus.emit(DaemonEvent(kind: .windowFocused, window: window))
     }
 
@@ -541,7 +548,21 @@ final class Daemon: @unchecked Sendable {
             lastDragFrames = nil
             return n
         }
-        if let last { applyFrames(last) }
+        // A strip whose columns were resized may now be shorter than the
+        // screen, or scrolled past its own end. Neither is something the drag
+        // path corrects — it deliberately leaves the viewport alone so the
+        // border does not slide out from under the cursor — so the correction
+        // belongs here, once, when the button comes up, and it supersedes the
+        // coalescer's last frame set rather than following it.
+        if let sid = currentSID(), case .scroll = readSpaces().layouts[sid] {
+            applySpaceLayout(sid, force: true)
+            return
+        }
+        // Forced: the drag moved every window with `SLSMoveWindow`, so the
+        // WindowServer already agrees with the target and the usual diff would
+        // skip the AX write — leaving each app believing the position it had
+        // before the gesture, for the life of the window (S2).
+        if let last { applyFrames(last, force: true) }
     }
 
     /// Republish everything that describes the layout as it is *now*: the
@@ -1044,6 +1065,10 @@ final class Daemon: @unchecked Sendable {
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
                 self.convertLayout(&sp, sid: sid, to: kind)
+                // A space seeded straight into scroll never passed through a
+                // conversion, so this is the only place its declared centre
+                // mode can be stamped on.
+                self.applyScrollSettings(&sp, sid: sid)
             }
             self.spaces = sp
             let currentSids = Set(sp.currentByDisplay.values)
@@ -1089,6 +1114,10 @@ final class Daemon: @unchecked Sendable {
         let tBind0 = Date()
         applier.bind(windows: visible.map { (wid: $0.id, pid: $0.pid) })
         applier.forget(keeping: worldWids)
+        // Same reason as `forgetWindow`, for the windows that died without a
+        // destroyed notification we ever saw — and for whatever `parked.json`
+        // restored at launch that no longer exists.
+        forgetParked(readParked().subtracting(worldWids))
         let tBind = Date()
         // Only the display the user is actually on may raise anything.
         //
@@ -1160,7 +1189,24 @@ final class Daemon: @unchecked Sendable {
             self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
         }
+        // A dead window is not a parked window. Leaving it in the tracked set
+        // put a stale id in `parked.json` forever, and the WindowServer
+        // recycles ids: the next window handed this number was believed
+        // already parked, so the one call that would have moved it off screen
+        // — `reconcileParked`'s diff — never fired for it.
+        forgetParked([wid])
         observers.forgetWindow(wid)
+    }
+
+    /// Drop window ids from the tracked-parked set and persist.
+    private func forgetParked(_ wids: Set<WindowID>) {
+        let changed: Bool = parkedLock.withLock {
+            let next = parkedWindows.subtracting(wids)
+            guard next != parkedWindows else { return false }
+            parkedWindows = next
+            return true
+        }
+        if changed { saveParked() }
     }
 
     private func watchCurrent() {
@@ -1313,6 +1359,10 @@ final class Daemon: @unchecked Sendable {
             // inline: the user is looking at the new space right now, so this
             // is the one event that must not wait out a debounce.
             bordersBridge.renderer.clearOnSpaceChange()
+            // A pan is motion the user is watching. They are not watching this
+            // space any more, so it arrives now rather than being abandoned
+            // half-way across a screen nobody is looking at.
+            panAnimator.finish()
             bus.emit(DaemonEvent(kind: .spaceChanged))
             syncFromSnapshot()
         case .displayChanged:
@@ -1320,6 +1370,11 @@ final class Daemon: @unchecked Sendable {
             // layout sized to a screen that no longer exists, and the sweep
             // below computes frames from these rects.
             refreshScreens()
+            // Every stored strip render describes a screen that may no longer
+            // exist, and a pan in flight is interpolating towards a viewport
+            // computed from it.
+            panAnimator.finish()
+            forgetScrollRender()
             // Scale factors and geometry both changed; every overlay's
             // backing store is sized for a display that may not be there.
             bordersBridge.renderer.clearOnSpaceChange()
@@ -1607,15 +1662,31 @@ final class Daemon: @unchecked Sendable {
         // Fire and forget: the keybind is done as soon as the writes are
         // queued. Z-order and focus follow on the same per-pid queues, so
         // they still land after the frames for each window.
-        applyFrames(frames)
-        outcome.reconcileParked(on: self, frames: frames)
+        var animating = false
+        if let strip = outcome.scroll, !frames.isEmpty {
+            switch renderScroll(
+                sid: strip.sid, state: strip.state, screen: strip.screen,
+                config: strip.config, settled: frames, parkedNow: outcome.parkedNow
+            ) {
+            case .animating:
+                animating = true
+            case .settle(let force):
+                applyFrames(frames, force: force)
+                outcome.reconcileParked(on: self, frames: frames)
+            }
+        } else {
+            applyFrames(frames)
+            outcome.reconcileParked(on: self, frames: frames)
+        }
         raiseFronts(outcome.raises)
         if let focus = outcome.focus, let pid = pid(of: focus) {
-            focusAndWarp(window: focus, pid: pid)
+            focusAndWarp(window: focus, pid: pid, target: frames[focus])
         }
         // The borders moved with the windows. A stale grab zone is a click
-        // swallowed where there is nothing to drag.
-        if !frames.isEmpty { refreshDividerZones() }
+        // swallowed where there is nothing to drag. A pan rebuilds them when
+        // it lands instead — the zones have to describe where the windows
+        // stop, not where they are passing through.
+        if !frames.isEmpty && !animating { refreshDividerZones() }
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
     }
@@ -1633,6 +1704,9 @@ final class Daemon: @unchecked Sendable {
         var frames: [WindowID: Frame] = [:]
         var focus: WindowID?
         var raises: [WindowID] = []
+        /// The strip this command left behind, for the pan animator. Nil for
+        /// every other layout kind, and for a command that changed nothing.
+        var scroll: (sid: SpaceID, state: ScrollState, screen: Frame, config: TilingConfig)?
         var parkedNow: Set<WindowID> = []
         var scope: Set<WindowID> = []
 
@@ -1647,6 +1721,7 @@ final class Daemon: @unchecked Sendable {
     /// frames go out immediately (a keybind) or through the drag coalescer.
     private func reduceOnCore(_ command: Command) -> ReduceOutcome {
         dispatchPrecondition(condition: .notOnQueue(core))
+        var strip: (sid: SpaceID, state: ScrollState, screen: Frame, config: TilingConfig)?
         let (mutations, parkedNow, scope):
             ([Mutation], Set<WindowID>, Set<WindowID>) = core.sync {
             let sid = self.spaces.currentSpace
@@ -1660,10 +1735,13 @@ final class Daemon: @unchecked Sendable {
                 return (m, [], [])
             case .scroll(let sc):
                 let (n, m) = Reducer.reduceScroll(
-                    sc, screen: uScreen, config: tile, command: command
+                    sc, screen: uScreen, config: tile, command: command,
+                    presets: sid.map { self.scrollPresets(for: $0, in: self.spaces) }
+                        ?? ScrollState.presets
                 )
                 if let sid { self.spaces.layouts[sid] = .scroll(n) }
                 guard n != sc else { return (m, [], []) }
+                if let sid { strip = (sid, n, uScreen, tile) }
                 let (_, parked) = scrollLayout(n, screen: uScreen, config: tile)
                 return (m, parked, Set(n.windows))
             case .float(let fl):
@@ -1677,6 +1755,7 @@ final class Daemon: @unchecked Sendable {
             }
         }
         var out = ReduceOutcome(parkedNow: parkedNow, scope: scope)
+        out.scroll = strip
         for m in mutations {
             switch m {
             case .setFrame(let id, let f): out.frames[id] = f
@@ -2325,7 +2404,19 @@ final class Daemon: @unchecked Sendable {
             changed = true
         }
         if clearedOverride { saveLayoutOverrides() }
-        if changed {
+        // Editing `center-focused-column` is not a layout-kind change, so
+        // nothing above would have noticed it. Re-stamp every scroll space.
+        var recentred = false
+        updateSpaces { sp in
+            // Snapshot the keys: the body writes back into the dictionary it
+            // would otherwise be iterating.
+            for sid in Array(sp.layouts.keys) {
+                let was = sp.layouts[sid]
+                applyScrollSettings(&sp, sid: sid)
+                if sp.layouts[sid] != was { recentred = true }
+            }
+        }
+        if changed || recentred {
             syncFromSnapshot()
         }
     }
@@ -2333,6 +2424,40 @@ final class Daemon: @unchecked Sendable {
     /// The `[[space]] layout` values the last config load saw, per label. Only
     /// a *change* between loads counts as the user re-deciding in the file.
     private var lastDeclaredLayouts: [String: LayoutKind] = [:]
+
+    // MARK: - Per-space scroll settings
+
+    /// The `[[space]] scroll = { … }` block for a space, found by its label.
+    ///
+    /// Both keys in that block were parsed, type-checked and range-checked by
+    /// `WeftConfig` and then read by nobody: `center-focused-column` never
+    /// left the file and `preset-column-widths` never left it either. A
+    /// config key that validates and does nothing is worse than one that does
+    /// not exist, because the user has no way to tell.
+    private func scrollDecl(for sid: SpaceID, in sp: SpaceState) -> SpaceScrollDecl? {
+        guard let label = sp.labels[sid], !label.isEmpty else { return nil }
+        return currentConfig().spaces.first(where: { $0.label == label })?.scroll
+    }
+
+    /// The column-width ring for a space: its own, or the default one.
+    private func scrollPresets(for sid: SpaceID, in sp: SpaceState) -> [Double] {
+        scrollDecl(for: sid, in: sp)?.presetColumnWidths ?? ScrollState.presets
+    }
+
+    /// Stamp the declared centre mode onto a space's strip.
+    ///
+    /// `centerMode` is state rather than a lookup because the layout maths
+    /// reads it on every frame, so it has to be put there — at conversion, at
+    /// first sight of a space, and on every config reload, which is where a
+    /// user who has just edited the file expects to see it take effect.
+    private func applyScrollSettings(_ sp: inout SpaceState, sid: SpaceID) {
+        guard case .scroll(var sc) = sp.layouts[sid] else { return }
+        let want = scrollDecl(for: sid, in: sp)?.centerFocusedColumn
+            .flatMap { CenterMode(configValue: $0) } ?? .onOverflow
+        guard sc.centerMode != want else { return }
+        sc.centerMode = want
+        sp.layouts[sid] = .scroll(sc)
+    }
 
     /// Convert one space's layout preserving membership. INTO float captures
     /// live SLS frames as the remembered arrangement.
@@ -2342,8 +2467,10 @@ final class Daemon: @unchecked Sendable {
         switch (kind, cur) {
         case (.scroll, .tiling(let t)):
             sp.layouts[sid] = .scroll(scrollFromTree(t))
+            applyScrollSettings(&sp, sid: sid)
         case (.scroll, .float(let f)):
             sp.layouts[sid] = .scroll(scrollFromFloat(f))
+            applyScrollSettings(&sp, sid: sid)
         case (.scroll, .scroll), (.bsp, .tiling), (.float, .float):
             break  // already that kind (guarded above; listed for exhaustiveness)
         case (.bsp, .scroll(let s)):
@@ -2676,10 +2803,10 @@ final class Daemon: @unchecked Sendable {
     ///
     /// Failure accounting (refuser strikes → auto-float) happens in the
     /// completion, off the caller's thread.
-    private func applyFrames(_ frames: [WindowID: Frame]) {
+    private func applyFrames(_ frames: [WindowID: Frame], force: Bool = false) {
         dispatchPrecondition(condition: .notOnQueue(core))
         guard !frames.isEmpty else { return }
-        applier.apply(frames: frames, pids: allPids()) { [weak self] result in
+        applier.apply(frames: frames, pids: allPids(), force: force) { [weak self] result in
             self?.noteApplyFailures(result)
         }
     }
@@ -2791,6 +2918,175 @@ final class Daemon: @unchecked Sendable {
         return "\(layout.kind.rawValue) focus=\(layout.focus.map(String.init) ?? "none") windows=\(layout.windows.sorted())"
     }
 
+    // MARK: - Scroll pans (viewport animation)
+
+    private let panAnimator = PanAnimator()
+    private let panLock = NSLock()
+
+    /// What a scroll space looked like the last time it was drawn.
+    ///
+    /// The viewport a pan starts from, and the geometry that says whether the
+    /// change since then *is* a pan. Frames here are the uncrossed strip —
+    /// parked columns included — because a column sliding in from off screen
+    /// has to be interpolated from somewhere real.
+    private struct ScrollRender {
+        var vx: Double
+        var frames: [WindowID: Frame]
+    }
+    private var lastScrollRender: [SpaceID: ScrollRender] = [:]
+
+    /// What the caller still has to do after `renderScroll`.
+    private enum ScrollDraw {
+        /// The animator took the frames; its landing writes them.
+        case animating
+        /// Write the settled frames now. `force` when a pan was interrupted
+        /// to get here: windows are sitting at interpolated positions that
+        /// the apps never heard about, so the AX write has to happen even
+        /// where the WindowServer already agrees with the target.
+        case settle(force: Bool)
+    }
+
+    /// Draw a scroll space's frames, as motion when the change is a pure pan.
+    ///
+    /// "Pure pan" means the only thing that changed since the last draw is the
+    /// viewport — every window the same size in the same row at the same
+    /// height, just further along. A width cycle, a resize, a column inserted
+    /// mid-strip and a display change all fail that test and are drawn the way
+    /// they always were, in one write. Interpolating those would need an AX
+    /// size write per window per frame, which is the cost §1 rules out.
+    private func renderScroll(
+        sid: SpaceID,
+        state: ScrollState,
+        screen: Frame,
+        config: TilingConfig,
+        settled: [WindowID: Frame],
+        parkedNow: Set<WindowID>
+    ) -> ScrollDraw {
+        let usableW = scrollUsable(screen: screen, config: config).w
+        let toVX = state.effectiveViewportX(usableW: usableW)
+        let toAll = scrollStripFrames(state, screen: screen, config: config, viewportX: toVX)
+        // Read-and-replace under one lock: two renders of the same strip can
+        // land from different queues (a keybind on `incoming`, a sweep on
+        // `syncQueue`), and splitting this in two let the second one read the
+        // first one's target as though it were where the windows are.
+        let previous: ScrollRender? = panLock.withLock {
+            let was = lastScrollRender[sid]
+            lastScrollRender[sid] = ScrollRender(vx: toVX, frames: toAll)
+            return was
+        }
+
+        let ms = currentConfig().general.scrollAnimationMs
+        guard ms > 0, state.fullscreen == nil, !toAll.isEmpty, let previous else {
+            return .settle(force: panAnimator.cancel(sid: sid))
+        }
+        // Would the last draw's geometry, re-derived from the strip as it is
+        // now, land exactly where it actually did? If not, something other
+        // than the viewport moved and this is not a pan.
+        let atLast = scrollStripFrames(
+            state, screen: screen, config: config, viewportX: previous.vx
+        )
+        let pure = atLast.allSatisfy { wid, f in
+            guard let p = previous.frames[wid] else { return false }
+            return abs(p.x - f.x) < 1 && abs(p.y - f.y) < 1
+                && abs(p.width - f.width) < 1 && abs(p.height - f.height) < 1
+        }
+        guard pure else { return .settle(force: panAnimator.cancel(sid: sid)) }
+        // A pan already heading here keeps going. Sweeps re-derive the same
+        // layout for all sorts of reasons — a focus notification, a space
+        // event, a rule re-check — and restarting the pan on each of them
+        // would reset the clock and leave the strip creeping.
+        let running = panAnimator.state(of: sid)
+        if let running, abs(running.target - toVX) < 1 { return .animating }
+        // Otherwise a pan in flight continues from where it has reached, so a
+        // held-down key reads as one scroll rather than a series of restarts.
+        let fromVX = running?.current ?? previous.vx
+        guard abs(toVX - fromVX) > 1 else {
+            return .settle(force: panAnimator.cancel(sid: sid))
+        }
+        let scope = Set(state.windows)
+        // Only the columns that cross this display at some point in the pan
+        // take part in it. The rest stay SLS-parked beyond the display union
+        // where they already are: their true strip positions are hundreds or
+        // thousands of points off the edge, and on a multi-display desktop
+        // "off the edge" is *the next monitor* — which is the whole reason
+        // parking targets `union.minX - 5000` rather than `-width`.
+        //
+        // Motion is monotonic, so the exact test is whether the interval each
+        // window sweeps overlaps the screen at all.
+        let participants = scrollPanParticipants(
+            state, screen: screen, config: config, from: fromVX, to: toVX
+        )
+        guard !participants.isEmpty else {
+            return .settle(force: panAnimator.cancel(sid: sid))
+        }
+        let parkX = (SpaceControl.displayLayout().map { $0.frame.x }.min() ?? screen.x) - 5000
+        panAnimator.run(
+            sid: sid,
+            from: fromVX,
+            to: toVX,
+            duration: Double(ms) / 1000.0,
+            onFrame: { [weak self] vx in
+                guard let self else { return }
+                let all = scrollStripFrames(
+                    state, screen: screen, config: config, viewportX: vx
+                )
+                var moves: [WindowID: Frame] = [:]
+                var onScreen: [WindowID: Frame] = [:]
+                for wid in participants {
+                    guard let f = all[wid] else { continue }
+                    if f.x < screen.x + screen.width, f.x + f.width > screen.x {
+                        // Genuinely part-way off the edge, which is exactly
+                        // what `SLSMoveWindow` can do and AX cannot: the
+                        // WindowServer clips it, so a column arrives by
+                        // sliding in rather than appearing once it fits.
+                        moves[wid] = f
+                        onScreen[wid] = f
+                    } else {
+                        // Not on this display yet (or any more) — hold it off
+                        // past every display rather than at its true strip
+                        // position, which could be a neighbouring monitor.
+                        moves[wid] = Frame(x: parkX, y: f.y, width: f.width, height: f.height)
+                    }
+                }
+                self.applier.movePositions(moves)
+                guard self.bordersBridge.drawsBorders else { return }
+                // A border drawn around a column that is still off screen is
+                // a rectangle floating in the void.
+                self.bordersBridge.renderer.update(frames: onScreen, scope: participants)
+            },
+            onEnd: { [weak self] end in
+                guard let self else { return }
+                switch end {
+                case .cancelled:
+                    return  // the daemon is writing the settled frames itself
+                case .superseded(by: let other) where other == sid:
+                    return  // the newer pan on this strip owns these windows
+                case .landed, .superseded:
+                    break
+                }
+                // The forced apply is the point of the whole arrangement: the
+                // pan moved every window behind its app's back, and this is
+                // where each app is told where it now is. A pan cut short by
+                // another display's strip settles here too — leaving those
+                // windows frozen part-way across the screen is the one outcome
+                // that has to be impossible.
+                self.applyFrames(settled, force: true)
+                self.reconcileParked(parkedNow: parkedNow, frames: settled, scope: scope)
+                self.refreshDividerZones()
+            }
+        )
+        return .animating
+    }
+
+    /// Forget a space's last draw, so the next one cannot be mistaken for a
+    /// continuation of it. Layout conversions and display changes both make
+    /// the stored geometry describe a strip that no longer exists.
+    private func forgetScrollRender(_ sid: SpaceID? = nil) {
+        panLock.withLock {
+            if let sid { lastScrollRender.removeValue(forKey: sid) } else { lastScrollRender = [:] }
+        }
+    }
+
     // MARK: - Scroll apply + parking (M5)
 
     /// Parked windows (SLS-parked off-screen). Persisted across launches so
@@ -2811,16 +3107,19 @@ final class Daemon: @unchecked Sendable {
     /// visible on *another display*: raising a window there hands that
     /// display the active menu bar, which turned `move display` — a move that
     /// is not supposed to follow — into a display switch.
+    /// `force` skips the apply-path diff, for a caller that has been moving
+    /// windows with `SLSMoveWindow` and needs each app told where it ended up.
     private func applySpaceLayout(
-        _ sid: SpaceID, stealFocus: Bool = false, raiseFocus: Bool = true
+        _ sid: SpaceID, stealFocus: Bool = false, raiseFocus: Bool = true, force: Bool = false
     ) {
         let screen = self.usableScreen(for: sid)
         let config = currentConfig().general.asTilingConfig()
         guard let spaceLayout = readSpaces().layouts[sid] else { return }
         switch spaceLayout {
         case .tiling(let tree):
+            forgetScrollRender(sid)
             let frames = layout(tree, in: screen, config: config)
-            applyFrames(frames)
+            applyFrames(frames, force: force)
             // A space that was scroll a moment ago can still have columns
             // SLS-parked at -5000. bsp gives every window a frame, so nothing
             // here is meant to be hidden: bring them all back, or they stay
@@ -2840,15 +3139,24 @@ final class Daemon: @unchecked Sendable {
                 }
             }
             let (frames, parkedNow) = scrollLayout(sc, screen: screen, config: config)
-            applyFrames(frames)
-            reconcileParked(parkedNow: parkedNow, frames: frames, scope: Set(sc.windows))
+            switch renderScroll(
+                sid: sid, state: sc, screen: screen, config: config,
+                settled: frames, parkedNow: parkedNow
+            ) {
+            case .animating:
+                break  // the pan writes the frames when it lands
+            case .settle(let interrupted):
+                applyFrames(frames, force: force || interrupted)
+                reconcileParked(parkedNow: parkedNow, frames: frames, scope: Set(sc.windows))
+            }
             if let focus = sc.focusedWindow, raiseFocus {
                 raiseFronts([focus])
                 if stealFocus, let pid = pids[focus] {
-                    focusAndWarp(window: focus, pid: pid)
+                    focusAndWarp(window: focus, pid: pid, target: frames[focus])
                 }
             }
         case .float(let fl):
+            forgetScrollRender(sid)
             // Never position floats — but do put back anything this space
             // parked while it was a scroll strip, to its remembered frame.
             reconcileParked(parkedNow: [], frames: fl.remembered, scope: Set(fl.windows))
@@ -2911,12 +3219,25 @@ final class Daemon: @unchecked Sendable {
         parkedNow: Set<WindowID>, frames: [WindowID: Frame], scope: Set<WindowID>
     ) {
         let before = readParked()
-        let toPark = parkedNow.subtracting(before)
+        let applier = self.applier
+        let unionMinX = SpaceControl.displayLayout().map { $0.frame.x }.min() ?? 0
+        let parkX = unionMinX - 5000
+        // The tracked set is a claim about the screen, and it can be wrong in
+        // both directions: a park the WindowServer dropped, a window whose id
+        // was recycled onto a new window that was never parked at all. Both
+        // leave a window recorded as parked while it sits in the layout's way,
+        // and a window recorded as parked is one this diff will never park.
+        // So the entries that matter — the ones this layout wants hidden —
+        // are checked against the WindowServer rather than believed. One SLS
+        // bounds read each, no app IPC, only for columns that are off screen
+        // anyway.
+        let stale = before.intersection(parkedNow).filter {
+            !applier.isParked($0, leftOf: unionMinX)
+        }
+        let toPark = parkedNow.subtracting(before).union(stale)
         let toUnpark = before.intersection(scope).subtracting(parkedNow)
         guard !toPark.isEmpty || !toUnpark.isEmpty else { return }
-        let applier = self.applier
         let pids = self.pids
-        let parkX = (SpaceControl.displayLayout().map { $0.frame.x }.min() ?? 0) - 5000
         // Async, not sync.
         //
         // `unpark` is the nudge protocol: an SLS move plus two AX writes taken

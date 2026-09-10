@@ -311,3 +311,53 @@ private func exampleText() throws -> String {
         contentsOf: root.appendingPathComponent("examples/weft.toml"), encoding: .utf8
     )
 }
+
+@Test func scrollAnimationIsValidatedAndDefaulted() throws {
+    let on = try loadConfig("""
+        [general]
+        scroll-animation-ms = 220
+        """)
+    #expect(on.general.scrollAnimationMs == 220)
+    let off = try loadConfig("""
+        [general]
+        scroll-animation-ms = 0
+        """)
+    #expect(off.general.scrollAnimationMs == 0)
+    // Absent means the default motion, not no motion.
+    #expect(try loadConfig("[general]\ninner-gap = 8\n").general.scrollAnimationMs == 140)
+    // The line number is what makes a config error actionable.
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nscroll-animation-ms = -1\n")
+    }
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nscroll-animation-ms = \"fast\"\n")
+    }
+}
+
+@Test func presetColumnWidthsAreRangeChecked() throws {
+    let ok = try loadConfig("""
+        [[space]]
+        label = "web"
+        layout = "scroll"
+        scroll = { preset-column-widths = [0.25, 0.5, 1.0] }
+        """)
+    #expect(ok.spaces[0].scroll?.presetColumnWidths == [0.25, 0.5, 1.0])
+    // A width is a fraction of the usable width and is written straight onto
+    // the column, so an out-of-range one is a column many screens wide.
+    #expect(throws: ConfigError.self) {
+        try loadConfig("""
+            [[space]]
+            label = "web"
+            layout = "scroll"
+            scroll = { preset-column-widths = [0.5, 99] }
+            """)
+    }
+    #expect(throws: ConfigError.self) {
+        try loadConfig("""
+            [[space]]
+            label = "web"
+            layout = "scroll"
+            scroll = { preset-column-widths = [] }
+            """)
+    }
+}

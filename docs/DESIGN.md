@@ -26,8 +26,20 @@ Hard constraints:
 
 - **Native macOS Spaces only.** No virtual/emulated workspaces. Space identity comes from
   SkyLight; we never fake it by parking windows off-screen to simulate a workspace.
-- **No animations, anywhere.** No interpolation, no `NSAnimationContext`, no easing.
-  Frame changes are single writes.
+- **No animations, anywhere — with one carve-out.** No interpolation, no
+  `NSAnimationContext`, no easing. Frame changes are single writes.
+
+  The carve-out is the scroll strip's **viewport pan** (`scroll-animation-ms`,
+  140 ms by default, 0 to turn it off). The rule exists because interpolating a
+  retile means an AX write per window per frame — a cross-process round trip an
+  app can be slow at — so the layout falls behind whatever is driving it. A pan
+  costs none of that: every window keeps its size and its Y and moves the same
+  distance along X, so a frame is one `SLSTransaction` of positions, which is
+  WindowServer-local, atomic, and already what a border drag does at mouse rate.
+  The single AX write that resyncs each app's own idea of its position (S2)
+  happens once, when the pan lands. Anything that is not a pure pan — a width
+  cycle, a resize, a column inserted mid-strip, a display change — fails that
+  test and is still drawn in one write. See `Sources/weftd/ScrollPan.swift`.
 - **Event-driven.** Zero polling timers in steady state; idle CPU must be 0%.
 - SIP-off / scripting addition is acceptable and assumed.
 
@@ -164,8 +176,24 @@ struct ScrollState {
 - Placement: `screenX = stripX(col) - viewportX + display.minX`. Windows that straddle the
   display edge are placed genuinely partially off-screen; macOS clips them correctly.
 - Column widths cycle a preset ring (`[0.333, 0.5, 0.667, 1.0]`, configurable), same as niri.
-- `center-focused-column = "always" | "never" | "on-overflow"`.
+- `center-focused-column = "always" | "never" | "on-overflow"`. Declared per space in
+  `[[space]] scroll = { … }`, alongside `preset-column-widths`; both are read at conversion,
+  at first sight of a space, and on every config reload.
 - Focusing a column scrolls the *minimum* distance to bring it fully into view.
+- **The drawn viewport is derived, not stored.** `viewportX` is *intent* — where the last
+  focus change panned to — and the strip under it changes without the intent changing: a
+  column closes, a resize shortens the strip, the space is re-laid out on a narrower display.
+  `effectiveViewportX` puts the stored value back inside the range the current strip allows,
+  and `scrollLayout` draws with that, so the drag path, `query tree`, the divider zones and
+  the borders all agree without anyone writing state back. Without it, closing the column the
+  viewport had scrolled to left `viewportX` past the end of a strip that no longer reached
+  that far: the survivor was drawn a screen-width to the left, far enough off screen to be
+  parked, and the user saw one window and a hole.
+- **A strip shorter than the screen is centred**, so a lone window sits in the middle and each
+  column added after it pushes the group left. `center-focused-column = "never"` opts out and
+  keeps the group on the left edge.
+- **The pan is animated** (`scroll-animation-ms`) — the one carve-out from §1's no-animation
+  rule, and the reasoning is there.
 - **Parking — via `SLSMoveWindow`, not AX** *(S4)*. Columns entirely outside
   `[viewportX - margin, viewportX + width + margin]` are moved **once** to
   `globalDisplayUnion.minX - 5000` and flagged parked; scrolling then costs nothing for them
@@ -389,6 +417,7 @@ default-layout = "bsp"
 mouse-modifier = "alt"
 mouse-follows-focus = true
 focus-follows-mouse = false
+scroll-animation-ms = 140       # scroll-space pan duration; 0 = instant
 
 [[space]]
 label  = "code"
