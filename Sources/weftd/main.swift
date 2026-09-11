@@ -1028,6 +1028,7 @@ final class Daemon: @unchecked Sendable {
                 self.unbindableSince[wid] = first
             }
             self.spaceMoveAttempts = self.spaceMoveAttempts.intersection(worldWids)
+            self.spaceMoveDeferredLogged = self.spaceMoveDeferredLogged.intersection(worldWids)
             var bySpace: [SpaceID: [WindowID]] = [:]
             var unmanagedNow: Set<WindowID> = []
             let showing = Set(sp.currentByDisplay.values)
@@ -1087,8 +1088,30 @@ final class Daemon: @unchecked Sendable {
                         } else {
                             fputs("weftd: rule wants '\(w.app)' (\(w.id)) on unknown space '\(target)'\n", stderr)
                         }
-                    case .wait, .skip:
-                        break
+                    case .wait:
+                        // The change that stopped app sheets and popovers
+                        // being carried to other desktops. Logged once per
+                        // window so a report can show it firing — and show
+                        // whether the window it held back was a real one.
+                        if self.spaceMoveDeferredLogged.insert(w.id).inserted {
+                            fputs(
+                                "weftd: holding '\(w.app)' (\(w.id)) — rule wants space "
+                                    + "'\(outcome.space ?? "?")', waiting for AX to say what it is\n",
+                                stderr
+                            )
+                        }
+                    case .skip:
+                        // Closes the story on a window that was held: AX has
+                        // answered, and the answer was "a panel, not a
+                        // window". Left where it is, deliberately.
+                        if self.standardWindow[w.id] == false,
+                           self.spaceMoveDeferredLogged.remove(w.id) != nil {
+                            fputs(
+                                "weftd: '\(w.app)' (\(w.id)) is a panel, not a window — "
+                                    + "left on this desktop\n",
+                                stderr
+                            )
+                        }
                     }
                     if !outcome.manage {
                         unmanagedNow.insert(w.id)
@@ -2435,6 +2458,11 @@ final class Daemon: @unchecked Sendable {
     private var unbindableSince: [WindowID: Date] = [:]
     /// Space-rule move attempts (tried once per window lifetime; SA-gated).
     private var spaceMoveAttempts: Set<WindowID> = []
+    /// Windows already logged as waiting on a classification. The wait is
+    /// re-evaluated on every sweep, so without this the log would carry one
+    /// line per window per sweep and be useless for exactly the slow, rare
+    /// problem it is there to catch.
+    private var spaceMoveDeferredLogged: Set<WindowID> = []
     /// pid → bundle id (immutable per pid; NSRunningApplication is cheap).
     private var bundleCache: [Int32: String] = [:]
     private let bundleLock = NSLock()
@@ -3210,6 +3238,11 @@ private final class ApplyResultBox: @unchecked Sendable {
 
 ignoreSIGPIPE()
 setlinebuf(stderr)  // launchd/log captures must see lines instantly, not on exit
+
+// First line of every run, so a log someone sends back names the build that
+// produced it. A bug report against "weft" is unactionable when the fix for it
+// shipped two releases ago.
+fputs("weftd: \(WeftVersion.full) starting (pid \(ProcessInfo.processInfo.processIdentifier))\n", stderr)
 
 // Check Accessibility without triggering a macOS modal prompt
 if !Permissions.accessibility() {
