@@ -136,8 +136,16 @@ private func tapCallback(
     let box = Unmanaged<TapBox>.fromOpaque(refcon).takeUnretainedValue()
 
     // The footgun every event-tap implementation hits once (§6): re-enable.
+    //
+    // And drop any drag in progress. A tap that goes down mid-drag never sees
+    // the mouse-up that would clear the latch, so it comes back believing a
+    // drag is still running and swallows every drag and up that follows —
+    // the pointer stops working in whatever the user does next, with nothing
+    // on screen to explain it. The gesture is already lost by the time we get
+    // here; the only question is whether the latch outlives it.
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         box.lock.withLock {
+            box.isDragging = false
             if let tap = box.tap { CGEvent.tapEnable(tap: tap, enable: true) }
         }
         return Unmanaged.passUnretained(event)
@@ -160,7 +168,16 @@ private func tapCallback(
                 || box.stackZones.contains { $0.contains(x: x, y: y) }
             return onChrome ? .border : nil
         }
-        guard let btn = claimed else { return Unmanaged.passUnretained(event) }
+        guard let btn = claimed else {
+            // An unclaimed press also ends any drag still on the books. Two
+            // downs with no up between them means the up went somewhere we
+            // never saw it — a space switch, a modal, an app that grabbed the
+            // pointer — and the second press is proof the first gesture is
+            // over. Without this the latch survives until some unrelated
+            // mouse-up happens to clear it.
+            box.lock.withLock { box.isDragging = false }
+            return Unmanaged.passUnretained(event)
+        }
         box.lock.withLock {
             box.isDragging = true
             box.dragButton = btn
