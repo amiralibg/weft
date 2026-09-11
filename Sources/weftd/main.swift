@@ -104,6 +104,11 @@ final class Daemon: @unchecked Sendable {
     /// bare mouse-down. Written on the sync/apply paths, read on the incoming
     /// queue; the tap gets its own copy of just the rectangles.
     private var dividerZones: [Divider] = []
+    /// Where stack members peek out behind the front one, on the visible
+    /// spaces. Published to the tap as bare rects; kept here with the member
+    /// each belongs to, so a claimed click can be resolved. Under
+    /// `dividerLock`, alongside the divider zones it is refreshed with.
+    private var stackPeekZones: [StackPeek] = []
     private let dividerLock = NSLock()
 
     /// Whether Accessibility was already granted when this process started.
@@ -331,7 +336,15 @@ final class Daemon: @unchecked Sendable {
                 // taken: grabbing a border is not selecting a window, and
                 // pulling focus across the screen on every drag would be
                 // exactly the "windows moving by themselves" complaint.
-                let zones = dividerLock.withLock { dividerZones }
+                // A stack strip first: a click on a member peeking out
+                // behind the front one means "that one", and it is the one
+                // bare click here that *should* take focus.
+                let (zones, peeks) = dividerLock.withLock { (dividerZones, stackPeekZones) }
+                let px = Double(location.x), py = Double(location.y)
+                if let peek = peeks.first(where: { $0.rect.contains(x: px, y: py) }) {
+                    raiseStackMember(peek.member)
+                    return
+                }
                 guard let d = divider(
                     at: Double(location.x), y: Double(location.y), in: zones
                 ) else { return }
@@ -485,6 +498,29 @@ final class Daemon: @unchecked Sendable {
         applyFramesCoalesced(frames)
     }
 
+    /// A click on a stack's peeking strip: bring that member to the front.
+    ///
+    /// The same state change `stack next` makes, aimed at one member rather
+    /// than the next one along. No cursor warp: the pointer is already on the
+    /// strip the user clicked, and yanking it to the window's centre would
+    /// be the opposite of what they just did.
+    private func raiseStackMember(_ wid: WindowID) {
+        let sp = readSpaces()
+        guard let sid = sp.visibleSpaces.first(where: {
+            sp.layouts[$0]?.windows.contains(wid) == true
+        }), let pid = pid(of: wid) else { return }
+        updateSpaces { s in
+            if case .tiling(let t)? = s.layouts[sid], t.windows.contains(wid) {
+                s.layouts[sid] = .tiling(t.focusing(wid))
+            }
+        }
+        applySpaceLayout(sid)
+        noteFocusedWindow(wid)
+        applier.focusWindow(wid, pid: pid)
+        bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
+        bus.emit(stateChangedEvent())
+    }
+
     /// Latest-wins frame writes, for drags.
     ///
     /// AX frame writes are cross-process and take single-digit milliseconds
@@ -543,12 +579,18 @@ final class Daemon: @unchecked Sendable {
         let cfg = currentConfig().general
         let wantBorders = bordersBridge.drawsBorders
         guard cfg.mouseBorderResize || wantBorders else {
-            dividerLock.withLock { dividerZones = [] }
+            dividerLock.withLock {
+                dividerZones = []
+                stackPeekZones = []
+            }
             input.updateDividerZones([])
+            input.updateStackZones([])
             return
         }
         let config = cfg.asTilingConfig()
         var all: [Divider] = []
+        var peeks: [StackPeek] = []
+        var positions: [WindowID: StackPosition] = [:]
         var borderFrames: [WindowID: Frame] = [:]
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
@@ -564,6 +606,8 @@ final class Daemon: @unchecked Sendable {
                 // border to grab and every pair overlaps anyway.
                 grabbable = tree.fullscreen == nil
                 frames = WeftCore.layout(tree, in: screen, config: config)
+                peeks += stackPeeks(in: tree, frames: frames)
+                positions.merge(stackPositions(in: tree)) { a, _ in a }
             case .float(let fl):
                 grabbable = false
                 // A float space has no computed geometry — the windows are
@@ -577,12 +621,19 @@ final class Daemon: @unchecked Sendable {
                 all += dividers(in: frames, innerGap: cfg.innerGap)
             }
         }
-        dividerLock.withLock { dividerZones = all }
+        let clickablePeeks = cfg.mouseBorderResize ? peeks : []
+        dividerLock.withLock {
+            dividerZones = all
+            stackPeekZones = clickablePeeks
+        }
         input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
+        input.updateStackZones(clickablePeeks.map(\.rect))
         // Only windows in a layout, which is what makes menu-bar popovers,
         // Spotlight and every other transient panel border-free without a
         // single heuristic: they were never in a layout to begin with.
         if wantBorders {
+            // Before the update, so the repaint it triggers draws the marks.
+            bordersBridge.renderer.setStackPositions(positions)
             bordersBridge.renderer.update(
                 frames: borderFrames, focused: sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
             )

@@ -159,6 +159,10 @@ public struct Keymap: Sendable, Equatable {
                 ("alt-shift-s", "stack split east"),
                 ("alt-bracketleft", "stack prev"),
                 ("alt-bracketright", "stack next"),
+                // Freed by the scroll layout, and easier to reach than the
+                // brackets for the thing you do most with a stack.
+                ("alt-n", "stack next"),
+                ("alt-p", "stack prev"),
                 ("alt-u", "stack unstack"),
                 ("alt-1", "space focus 1"),
                 ("alt-2", "space focus 2"),

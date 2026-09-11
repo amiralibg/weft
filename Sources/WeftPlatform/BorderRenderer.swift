@@ -67,6 +67,8 @@ public final class BorderRenderer: @unchecked Sendable {
         var scale: Double
         var style: Style
         var context: CGContext?
+        /// Set on the front member of a stack: what the pips say.
+        var stack: StackPosition?
     }
 
     private let cid: SLConnectionID
@@ -75,6 +77,9 @@ public final class BorderRenderer: @unchecked Sendable {
     private var style = Style()
     private var enabled = false
     private var focused: WindowID?
+    /// The front member of every stack on screen, and its position. Read by
+    /// `place`, so a change repaints through the ordinary update path.
+    private var stackPositions: [WindowID: StackPosition] = [:]
     /// Every SLS call here has to happen in order and none of them may run on
     /// a caller's thread — a drag calls `update` from the mouse queue and an
     /// apply calls it from the apply queue.
@@ -147,6 +152,12 @@ public final class BorderRenderer: @unchecked Sendable {
         queue.async { self.sync(frames: frames, focused: focused, scope: scope) }
     }
 
+    /// Which windows are the front of a stack, and where in it. Call before
+    /// `update`: the repaint that follows is what draws the marks.
+    public func setStackPositions(_ positions: [WindowID: StackPosition]) {
+        lock.withLock { stackPositions = positions }
+    }
+
     /// Same, keeping whichever window is already the focused one. Used by the
     /// drag path, which changes geometry and nothing else.
     public func update(frames: [WindowID: Frame], scope: Set<WindowID>? = nil) {
@@ -216,7 +227,7 @@ public final class BorderRenderer: @unchecked Sendable {
 
     private func place(_ wid: WindowID, target: Frame, color: UInt32, style: Style) {
         let scale = Self.scaleFactor(for: target)
-        let existing = lock.withLock { overlays[wid] }
+        let (existing, stack) = lock.withLock { (overlays[wid], stackPositions[wid]) }
         guard var overlay = existing else {
             create(wid, target: target, color: color, style: style, scale: scale)
             return
@@ -232,7 +243,8 @@ public final class BorderRenderer: @unchecked Sendable {
             create(wid, target: target, color: color, style: style, scale: scale)
             return
         }
-        if sameSize && samePlace && overlay.color == color { return }
+        let sameMark = overlay.stack == stack
+        if sameSize && samePlace && overlay.color == color && sameMark { return }
         let frame = Self.overlayFrame(for: target, style: style)
         if !sameSize {
             // Shape carries the origin too, so this is one call, not a resize
@@ -245,7 +257,7 @@ public final class BorderRenderer: @unchecked Sendable {
         } else if !samePlace {
             var origin = frame.origin
             SLSMoveWindow(cid, overlay.wid, &origin)
-            if overlay.color == color {
+            if overlay.color == color && sameMark {
                 overlay.target = target
                 lock.withLock { overlays[wid] = overlay }
                 order(overlay.wid, above: wid)
@@ -254,6 +266,7 @@ public final class BorderRenderer: @unchecked Sendable {
         }
         overlay.target = target
         overlay.color = color
+        overlay.stack = stack
         lock.withLock { overlays[wid] = overlay }
         draw(wid)
         // Ordering is z-order, and z-order changes under us whenever the user
@@ -296,7 +309,8 @@ public final class BorderRenderer: @unchecked Sendable {
         lock.withLock {
             overlays[wid] = Overlay(
                 wid: overlayWID, target: target, color: color,
-                scale: scale, style: style, context: nil
+                scale: scale, style: style, context: nil,
+                stack: stackPositions[wid]
             )
         }
         draw(wid)
@@ -394,7 +408,40 @@ public final class BorderRenderer: @unchecked Sendable {
         context.setStrokeColor(Self.cgColor(overlay.color))
         context.addPath(path)
         context.strokePath()
+        if let stack = overlay.stack, stack.count > 1 {
+            Self.drawStackPips(in: context, bounds: bounds, stack: stack, color: overlay.color, style: style)
+        }
         context.flush()
+    }
+
+    /// A row of dots centred on the top edge: one per stack member, the front
+    /// one solid.
+    ///
+    /// A stack's slot otherwise looks like a single window — the peeking
+    /// strips say *something* is behind it, not how much or which one this
+    /// is. Dots rather than a "2/4" label because a label is text, and text
+    /// in a CGContext whose orientation is wrong comes out mirrored; a row of
+    /// circles reads the same either way up. Capped at eight: past that the
+    /// row stops being countable at a glance, and the point is the glance.
+    static func drawStackPips(
+        in context: CGContext, bounds: CGRect, stack: StackPosition, color: UInt32, style: Style
+    ) {
+        let shown = min(stack.count, 8)
+        let front = min(max(stack.index, 1), shown) - 1
+        let diameter = max(5, style.width + 2)
+        let gap = diameter * 0.8
+        let rowWidth = Double(shown) * diameter + Double(shown - 1) * gap
+        // Quartz: origin bottom-left, so the top edge is maxY. Centred on
+        // the stroke, which runs `width` points outside the window edge.
+        let cy = bounds.maxY - style.width / 2
+        var x = bounds.midX - rowWidth / 2
+        let solid = Self.cgColor((color & 0x00ff_ffff) | 0xff00_0000)
+        let dim = Self.cgColor((color & 0x00ff_ffff) | 0x6600_0000)
+        for i in 0..<shown {
+            context.setFillColor(i == front ? solid : dim)
+            context.fillEllipse(in: CGRect(x: x, y: cy - diameter / 2, width: diameter, height: diameter))
+            x += diameter + gap
+        }
     }
 
     // MARK: - Geometry

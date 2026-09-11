@@ -109,6 +109,10 @@ private final class TapBox: @unchecked Sendable {
     /// to swallow the click before returning, and it may not block. A scan of
     /// a few dozen rects is tens of nanoseconds.
     var dividerZones: [Frame] = []
+    /// The strips where a stack's hidden members peek out behind the front
+    /// one. A bare click there raises that member. Same rules as the divider
+    /// zones: a flat array, scanned on the tap thread, never a query.
+    var stackZones: [Frame] = []
     /// Off unless the user has asked for border dragging.
     var borderDragEnabled = false
     var onCommand: ((String) -> Void)?
@@ -149,7 +153,11 @@ private func tapCallback(
             // passed straight through, so the tap is invisible in normal use.
             guard box.borderDragEnabled, type == .leftMouseDown else { return nil }
             let x = Double(loc.x), y = Double(loc.y)
-            return box.dividerZones.contains { $0.contains(x: x, y: y) } ? .border : nil
+            // Claimed as `.border` either way: the daemon tells a stack strip
+            // from a divider by hit-testing its own copy of both.
+            let onChrome = box.dividerZones.contains { $0.contains(x: x, y: y) }
+                || box.stackZones.contains { $0.contains(x: x, y: y) }
+            return onChrome ? .border : nil
         }
         guard let btn = claimed else { return Unmanaged.passUnretained(event) }
         box.lock.withLock {
@@ -272,12 +280,24 @@ public final class InputManager: @unchecked Sendable {
         }
     }
 
-    /// Whether a bare click on a border starts a resize. Off means the tap
-    /// never claims an unmodified click at all.
+    /// Republish the stack peek strips. Same cost model as the divider zones.
+    public func updateStackZones(_ zones: [Frame]) {
+        box.lock.withLock {
+            guard box.stackZones != zones else { return }
+            box.stackZones = zones
+        }
+    }
+
+    /// Whether a bare click on a border starts a resize — and on a stack's
+    /// peeking strip, raises that member. Off means the tap never claims an
+    /// unmodified click at all.
     public func setBorderDragEnabled(_ enabled: Bool) {
         box.lock.withLock {
             box.borderDragEnabled = enabled
-            if !enabled { box.dividerZones = [] }
+            if !enabled {
+                box.dividerZones = []
+                box.stackZones = []
+            }
         }
     }
 

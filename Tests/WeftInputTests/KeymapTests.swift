@@ -55,6 +55,9 @@ import Testing
     #expect(try action("default", "alt-bracketleft") == .send("stack prev"))
     #expect(try action("default", "alt-bracketright") == .send("stack next"))
     #expect(try action("default", "alt-u") == .send("stack unstack"))
+    // Freed by the scroll layout; the brackets above stay as aliases.
+    #expect(try action("default", "alt-n") == .send("stack next"))
+    #expect(try action("default", "alt-p") == .send("stack prev"))
 }
 
 @Test func defaultKeymapCoversM2() throws {

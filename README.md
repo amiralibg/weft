@@ -31,6 +31,10 @@ its own.
   all). Switch a space between them at runtime; window membership and focus
   survive the change.
 - **Stacks** — collapse several windows into one slot and cycle through them.
+  The windows behind show as a row of title bars you can click to bring one
+  forward, and a row of dots on the front window's border says how many there
+  are and which one you are looking at. `stack all` puts the whole space in one
+  stack; `stack move <dir>` drops the focused window into its neighbour's.
 - **Modes** — modal layers, like vim's. The shipped config puts resizing behind
   one so `h/j/k/l` can be bare keys while it is active.
 - **Window rules** — regex on app name or window title; send an app to a space,
@@ -192,7 +196,7 @@ QWERTY, Colemak and Dvorak.
 | `⌥V` / `⌥⇧V` | Next window splits vertically / horizontally |
 | `⌥\` | Flip the split under the focused window |
 | `⌥B` | Even out every split on this space |
-| `⌥W` `⌥]` `⌥[` `⌥U` | Stack: wrap / next / prev / unstack |
+| `⌥W` `⌥N` `⌥P` `⌥U` | Stack: wrap / next / prev / unstack (`⌥]` `⌥[` work too) |
 | `⌥⇧B` `⌥⇧F` | Switch this space to bsp / float |
 | `⌥⌃H` `⌥⌃L` | Focus the display west / east |
 | `⌥⌃⇧H` `⌥⌃⇧L` | Send the window to that display and follow it |

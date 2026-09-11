@@ -148,8 +148,15 @@ struct Container {
 - **Stack rendering is free**: every member gets the *same* frame; only z-order changes.
   Raising the active child is one `SLSOrderWindow` call — no AX, no resize, no repaint of
   the others. Switching stack members is the cheapest operation in the whole WM.
-- Stack decoration (which window is active, how many) is not drawn by weft. It is published
-  as state for sketchybar to render — see §10. weft never puts a pixel on screen.
+- Stack decoration is drawn by weft's in-process border renderer
+  (`WeftPlatform/BorderRenderer.swift`): a row of dots on the front member's border, one per
+  member, the front one solid (`stackPositions`). Members behind show as title-bar strips
+  above the front one, and a bare click on a strip raises that member — the strips are hit
+  zones published to the event tap beside the divider zones (`stackPeeks`), under the same
+  `mouse-border-resize` opt-in. Stack state is still published on the bus for sketchybar
+  (§10) for anyone who wants it in their bar instead.
+- `stack all` puts every window on the space in one stack (again to undo); `stack move <dir>`
+  pushes the focused window into the neighbour's stack — the mirror of `stack split`.
 
 ### 4.2 Scroll engine — removed 2026-09-10
 

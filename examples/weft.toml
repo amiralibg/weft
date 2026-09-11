@@ -130,6 +130,8 @@ reserve = 0
 "alt-w" = "stack toggle"
 "alt-bracketright" = "stack next"
 "alt-bracketleft" = "stack prev"
+"alt-n" = "stack next"
+"alt-p" = "stack prev"
 "alt-u" = "stack unstack"
 
 # Change this space's layout on the fly.

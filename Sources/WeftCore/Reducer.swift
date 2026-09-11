@@ -136,6 +136,11 @@ public enum Reducer {
             tree = state.tree.cyclingStack(by: -1)
         case .unstack:
             tree = state.tree.unstacking()
+        case .all:
+            tree = state.tree.stackingAll()
+        case .move(let dir):
+            let frames = layout(state.tree, in: state.screen, config: state.config)
+            tree = state.tree.movingIntoStack(towards: dir, frames: frames)
         }
         guard tree != state.tree else { return (state, []) }
         let newState = State(tree: tree, screen: state.screen, config: state.config)

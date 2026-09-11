@@ -170,10 +170,13 @@ final class CheatsheetModel: ObservableObject {
 
     private static func stackSummary(_ words: [String]) -> String {
         switch words.dropFirst().first {
-        case "wrap": return "Stack the windows here into one slot"
+        case "wrap", "toggle": return "Stack the windows here into one slot, or back out"
         case "next": return "Next window in the stack"
         case "prev": return "Previous window in the stack"
         case "unstack": return "Pull the window out of its stack"
+        case "all": return "Every window on this space in one stack, or back out"
+        case "move" where words.count > 2: return "Put this window in the stack to the \(words[2])"
+        case "split" where words.count > 2: return "Pull the window to the \(words[2]) into this stack"
         default: return words.joined(separator: " ")
         }
     }

@@ -512,6 +512,49 @@ extension Tree {
         return copy.focusing(focused)
     }
 
+    /// `stack all`: every window on the space in one stack, the focused one
+    /// in front — the "one window at a time here" gesture. Again to undo: a
+    /// space that is already one stack goes back to side by side, the same
+    /// way `stack toggle` takes a window back out.
+    public func stackingAll() -> Tree {
+        guard let root, let focused = focus, root.windows.contains(focused) else { return self }
+        if case .container(let c) = root, c.layout == .stack { return unstacking() }
+        let ids = root.windows
+        guard ids.count > 1 else { return self }
+        var copy = self
+        copy.root = .container(Container(
+            layout: .stack,
+            children: ids.map { .window($0) },
+            active: ids.firstIndex(of: focused) ?? 0
+        ))
+        copy.fullscreen = nil
+        return copy.focusing(focused)
+    }
+
+    /// `stack move <dir>`: take the focused window out of its slot and put it
+    /// in the stack of the neighbour that way, making that neighbour a stack
+    /// if it is not one yet. The mirror of `stack split`, which pulls the
+    /// neighbour into *your* slot instead.
+    public func movingIntoStack(towards dir: Direction, frames: [WindowID: Frame]) -> Tree {
+        guard root != nil, let focused = focus else { return self }
+        guard let neighbor = Reducer.neighbour(of: focused, in: frames, towards: dir) else { return self }
+        var tree = removing(focused)
+        guard let r = tree.root else { return self }
+        if let sp = stackPath(in: r, target: neighbor) {
+            tree.root = appendToStack(r, target: neighbor, newID: focused, at: sp)
+        } else {
+            tree.root = replaceLeaf(
+                r, target: neighbor,
+                with: .container(Container(
+                    layout: .stack,
+                    children: [.window(neighbor), .window(focused)],
+                    active: 1
+                ))
+            )
+        }
+        return tree.focusing(focused)
+    }
+
     /// Resize the focused window along an axis by points (positive grows).
     /// Finds the nearest ancestor container on that axis and shifts the ratio
     /// between the focused child and its neighbour. Clamped to [0.1, 0.9].
@@ -725,6 +768,96 @@ public struct TreeView: Codable, Sendable, Equatable {
             )
         }
     }
+}
+
+// MARK: - Stack introspection (the indicator and the click targets)
+
+/// Where a stack's front member sits in it. `index` is 1-based: it is the
+/// number drawn for the user, not an array subscript.
+public struct StackPosition: Sendable, Equatable {
+    public var index: Int
+    public var count: Int
+
+    public init(index: Int, count: Int) {
+        self.index = index
+        self.count = count
+    }
+}
+
+/// The front member of every stack of two or more, and where it sits.
+///
+/// A stack is invisible otherwise: its slot looks like one window. This is
+/// what the border renderer marks, so "there are three windows here and this
+/// is the first" can be read without cycling through them.
+public func stackPositions(in tree: Tree) -> [WindowID: StackPosition] {
+    guard let root = tree.root else { return [:] }
+    var out: [WindowID: StackPosition] = [:]
+    forEachStack(root) { c in
+        let active = min(max(c.active, 0), c.children.count - 1)
+        if let front = c.children[active].windows.first {
+            out[front] = StackPosition(index: active + 1, count: c.children.count)
+        }
+    }
+    return out
+}
+
+/// A strip of a hidden stack member that shows behind the front one, and the
+/// member it belongs to.
+public struct StackPeek: Sendable, Equatable {
+    public var rect: Frame
+    public var member: WindowID
+
+    public init(rect: Frame, member: WindowID) {
+        self.rect = rect
+        self.member = member
+    }
+}
+
+/// Where each stack's hidden members peek out, as click targets.
+///
+/// The layout insets every member from the top by its distance from the
+/// front one (`maxVisibleStackLayers`), so the members behind show as a row
+/// of title-bar strips above it. Each distinct top edge up to the front
+/// member's is one strip, owned by whichever member is frontmost at that
+/// edge — members past the visible-layer cap share an edge, and the one in
+/// front of the others is the one a click there actually lands on.
+///
+/// Nothing is clickable when the offset is too thin to hit, or while a
+/// window is zoomed over the whole space.
+public func stackPeeks(
+    in tree: Tree, frames: [WindowID: Frame], minHeight: Double = 4
+) -> [StackPeek] {
+    guard let root = tree.root, tree.fullscreen == nil else { return [] }
+    var out: [StackPeek] = []
+    forEachStack(root) { c in
+        let active = min(max(c.active, 0), c.children.count - 1)
+        // z mirrors `stackChain`: the front member on top, then later
+        // children above earlier ones.
+        var ownerByTop: [Double: (wid: WindowID, frame: Frame, z: Int)] = [:]
+        for (i, child) in c.children.enumerated() {
+            guard let wid = child.windows.first, let f = frames[wid] else { continue }
+            let z = i == active ? Int.max : i
+            if let cur = ownerByTop[f.y], cur.z >= z { continue }
+            ownerByTop[f.y] = (wid, f, z)
+        }
+        let tops = ownerByTop.keys.sorted()
+        // The last edge is the front member's own frame, not a strip.
+        for (i, top) in tops.enumerated() where i + 1 < tops.count {
+            let height = tops[i + 1] - top
+            guard height >= minHeight, let owner = ownerByTop[top] else { continue }
+            out.append(StackPeek(
+                rect: Frame(x: owner.frame.x, y: top, width: owner.frame.width, height: height),
+                member: owner.wid
+            ))
+        }
+    }
+    return out
+}
+
+private func forEachStack(_ node: Node, _ body: (Container) -> Void) {
+    guard case .container(let c) = node else { return }
+    if c.layout == .stack, c.children.count > 1 { body(c) }
+    for child in c.children { forEachStack(child, body) }
 }
 
 /// Order chain for fronting `wid`: first window of each stack child, with the

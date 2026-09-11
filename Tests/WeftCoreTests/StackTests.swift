@@ -197,3 +197,96 @@ private func tree(_ ids: WindowID...) -> Tree {
     // And the inset never touches the horizontal axis.
     #expect(Set(frames.values.map(\.x)) == [0])
 }
+
+// MARK: - stack all / stack move
+
+@Test func stackAllPutsEveryWindowInOneStackAndTogglesBack() {
+    let t = tree(1, 2, 3).focusing(2)
+    let all = t.stackingAll()
+    guard case .container(let c)? = all.root else {
+        Issue.record("expected a container root")
+        return
+    }
+    #expect(c.layout == .stack)
+    #expect(all.windows.sorted() == [1, 2, 3])
+    #expect(all.focus == 2)
+    #expect(stackPositions(in: all)[2]?.count == 3)
+    // Again: back to side by side, nothing lost.
+    let back = all.stackingAll()
+    guard case .container(let b)? = back.root else {
+        Issue.record("expected a container root")
+        return
+    }
+    #expect(b.layout == .splitV)
+    #expect(back.windows.sorted() == [1, 2, 3])
+}
+
+@Test func stackMovePushesTheFocusedWindowIntoTheNeighboursSlot() {
+    let base = tree(1, 2).focusing(1)  // 1 west, 2 east
+    let frames = layout(base, in: stackScreen, config: .none)
+    let moved = base.movingIntoStack(towards: .east, frames: frames)
+    let after = layout(moved, in: stackScreen, config: .none)
+    #expect(after[1] == after[2])
+    #expect(moved.focus == 1)
+    #expect(stackPositions(in: moved)[1] == StackPosition(index: 2, count: 2))
+}
+
+@Test func stackMoveJoinsAnExistingStack() {
+    var t = tree(1, 2, 3)          // 1 west; 2 and 3 share the east half
+    t = t.focusing(2).togglingStack()
+    t = t.focusing(1)
+    let frames = layout(t, in: stackScreen, config: .none)
+    let moved = t.movingIntoStack(towards: .east, frames: frames)
+    #expect(moved.windows.sorted() == [1, 2, 3])
+    #expect(moved.focus == 1)
+    #expect(stackPositions(in: moved)[1]?.count == 3)
+}
+
+@Test func stackMoveWithNoNeighbourIsANoOp() {
+    let t = tree(1, 2).focusing(2)  // 2 is the eastmost window
+    let frames = layout(t, in: stackScreen, config: .none)
+    #expect(t.movingIntoStack(towards: .east, frames: frames) == t)
+}
+
+@Test func stackAllAndMoveGrammar() throws {
+    #expect(try Command.parse("stack all") == .stack(.all))
+    #expect(try Command.parse("stack move east") == .stack(.move(.east)))
+    #expect(try Command.parse("stack move left") == .stack(.move(.west)))
+    #expect(throws: CommandParseError.self) { try Command.parse("stack move") }
+    #expect(throws: CommandParseError.self) { try Command.parse("stack all now") }
+}
+
+// MARK: - Peek strips (click targets)
+
+private let peekConfig = TilingConfig(
+    innerGap: 0,
+    outerGap: TilingConfig.OuterGap(top: 0, bottom: 0, left: 0, right: 0),
+    stackOffset: 8
+)
+
+@Test func peekStripsBelongToTheHiddenMembersAboveTheFrontOne() {
+    // Front member first: depth 2 (y+16); the others at y+0 and y+8.
+    let t = tree(1, 2, 3).focusing(1).stackingAll()
+    let frames = layout(t, in: stackScreen, config: peekConfig)
+    let peeks = stackPeeks(in: t, frames: frames)
+    #expect(peeks == [
+        StackPeek(rect: Frame(x: 0, y: 0, width: 1000, height: 8), member: 2),
+        StackPeek(rect: Frame(x: 0, y: 8, width: 1000, height: 8), member: 3),
+    ])
+    // The front member's own frame is never a strip.
+    #expect(!peeks.contains { $0.member == 1 })
+}
+
+@Test func aFlatOrZoomedStackHasNoPeekStrips() {
+    let t = tree(1, 2, 3).focusing(1).stackingAll()
+    #expect(stackPeeks(in: t, frames: layout(t, in: stackScreen, config: .none)).isEmpty)
+    let zoomed = t.togglingFullscreen()
+    let frames = layout(zoomed, in: stackScreen, config: peekConfig)
+    #expect(stackPeeks(in: zoomed, frames: frames).isEmpty)
+}
+
+@Test func onlyStacksOfTwoOrMoreAreMarked() {
+    #expect(stackPositions(in: tree(1, 2)).isEmpty)
+    let lone = Tree().inserting(1).focusing(1).togglingStack()
+    #expect(stackPositions(in: lone).isEmpty)
+}

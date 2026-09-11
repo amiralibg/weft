@@ -65,6 +65,10 @@ public enum StackCommand: Sendable, Equatable {
     case prev
     /// Convert the focused stack back to a vertical split.
     case unstack
+    /// Every window on the space in one stack; again to undo.
+    case all
+    /// Put the focused window into the neighbour's stack in `dir`.
+    case move(Direction)
 }
 
 public enum QueryKind: String, Sendable, Equatable {
@@ -261,19 +265,20 @@ extension Command {
             case "next": return .stack(.next)
             case "prev": return .stack(.prev)
             case "unstack": return .stack(.unstack)
-            case "split":
+            case "all":
+                guard parts.count == 2 else { throw CommandParseError.badArgs(input) }
+                return .stack(.all)
+            case "split", "move":
                 guard parts.count == 3 else { throw CommandParseError.badArgs(input) }
+                let dir: Direction
                 switch parts[2] {
-                case "west": return .stack(.split(.west))
-                case "east": return .stack(.split(.east))
-                case "north": return .stack(.split(.north))
-                case "south": return .stack(.split(.south))
-                case "left": return .stack(.split(.west))
-                case "right": return .stack(.split(.east))
-                case "up": return .stack(.split(.north))
-                case "down": return .stack(.split(.south))
+                case "west", "left": dir = .west
+                case "east", "right": dir = .east
+                case "north", "up": dir = .north
+                case "south", "down": dir = .south
                 default: throw CommandParseError.badArgs(input)
                 }
+                return parts[1] == "split" ? .stack(.split(dir)) : .stack(.move(dir))
             default: throw CommandParseError.badArgs(input)
             }
         case "insert":

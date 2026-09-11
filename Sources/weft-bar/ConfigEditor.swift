@@ -1856,9 +1856,11 @@ enum CommandCatalog {
             "insertion bsp", "insertion manual",
         ]),
         Group(name: "Stack", commands: [
-            "stack toggle", "stack next", "stack prev", "stack unstack",
+            "stack toggle", "stack next", "stack prev", "stack unstack", "stack all",
             "stack split west", "stack split east",
             "stack split north", "stack split south",
+            "stack move west", "stack move east",
+            "stack move north", "stack move south",
         ]),
         Group(name: "Spaces", commands: [
             "space focus 1", "space focus 2", "space focus 3",
