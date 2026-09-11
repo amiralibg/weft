@@ -426,7 +426,7 @@ events = ["space_changed", "window_focused", "space_windows",
 
 [integrations.borders]
 enabled = true
-args    = ["style=round", "width=5.0", "hidpi=on"]
+args    = ["style=round", "width=2.0", "hidpi=on"]
 supervise = true                  # restart if it dies; stop it when weftd exits
 active-color = { bsp = "0xffe1e3e4", float = "0xfff5a97f" }
 mode-color   = { resize = "0xffed8796" }

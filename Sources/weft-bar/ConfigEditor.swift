@@ -1274,7 +1274,7 @@ private struct AdvancedPane: View {
                     LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
                     Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
                     LabeledContent("Arguments") {
-                        TextField("width=5.0 style=round", text: store.bind(\.bordersArgs))
+                        TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
                             .disabled(store.bordersArgsLocked)
