@@ -9,6 +9,24 @@ public enum ServiceManager {
             .appendingPathComponent("\(label).plist")
     }
 
+    /// Where the daemon's output goes.
+    ///
+    /// `~/Library/Logs` rather than `/tmp`: a log that a reboot deletes is no
+    /// use for the bugs worth reporting, which are the ones that took a day to
+    /// show up. It is also where Console.app looks, so the log is reachable
+    /// without knowing a path.
+    public static var logDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/weft")
+    }
+
+    public static var logURL: URL { logDirectory.appendingPathComponent("weftd.log") }
+    public static var errLogURL: URL { logDirectory.appendingPathComponent("weftd.err.log") }
+
+    /// Where older installs wrote, still read by `weftctl logs` so an upgrade
+    /// does not hide the log that has the problem in it.
+    public static let legacyLogPaths = ["/tmp/weftd.err.log", "/tmp/weftd.out.log"]
+
     public static func locateWeftd() -> String {
         // 1. Check same directory as weftctl
         let execPath = CommandLine.arguments[0]
@@ -50,9 +68,9 @@ public enum ServiceManager {
             <key>KeepAlive</key>
             <true/>
             <key>StandardOutPath</key>
-            <string>/tmp/weftd.out.log</string>
+            <string>\(logURL.path)</string>
             <key>StandardErrorPath</key>
-            <string>/tmp/weftd.err.log</string>
+            <string>\(errLogURL.path)</string>
             <key>ProcessType</key>
             <string>Interactive</string>
         </dict>
@@ -76,6 +94,11 @@ public enum ServiceManager {
     }
 
     public static func install() {
+        // launchd will not create it, and a StandardErrorPath it cannot open
+        // is dropped silently — the daemon runs with no log at all.
+        try? FileManager.default.createDirectory(
+            at: logDirectory, withIntermediateDirectories: true
+        )
         let weftdPath = locateWeftd()
         let plistContent = generatePlist(weftdPath: weftdPath)
         let dir = plistURL.deletingLastPathComponent()

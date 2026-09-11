@@ -96,7 +96,8 @@ say "Removing the app"
 remove ${WEFT_APP_PATH:+"$WEFT_APP_PATH"} "$HOME/Applications/WeftBar.app" "/Applications/WeftBar.app"
 
 say "Removing logs and leftovers"
-remove "$SOCKET" /tmp/weftd.out.log /tmp/weftd.err.log \
+remove "$SOCKET" "$HOME/Library/Logs/weft" \
+    /tmp/weftd.out.log /tmp/weftd.err.log \
     "$HOME/Library/Logs/weft-install.log" "$HOME/Library/Logs/weft-update.log" \
     "$STATE"
 

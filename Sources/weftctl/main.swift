@@ -15,6 +15,7 @@ func usage() -> Never {
           weftctl app toggle <bundle-id>            # launch/focus/hide
           weftctl subscribe [--all]    # live event stream (Ctrl-C to exit)
           weftctl doctor               # diagnostic health check
+          weftctl logs [-n N] [-f]     # the daemon's log, for a bug report
           weftctl rescue               # bring back windows stranded off every display
           weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
           weftctl trace reset          # clear the daemon's phase samples
@@ -59,6 +60,17 @@ ignoreSIGPIPE()
 // 1. Doctor command
 if args[0] == "doctor" {
     Doctor.run()
+    exit(0)
+}
+
+// 1b. Logs. The point is that reporting a problem is one command, not a path
+// to remember plus a guess at which of two files moved in some release.
+if args[0] == "logs" {
+    let follow = args.contains("-f") || args.contains("--follow")
+    let lines = args.firstIndex(of: "-n").flatMap { i in
+        i + 1 < args.count ? Int(args[i + 1]) : nil
+    } ?? 200
+    Logs.run(follow: follow, lines: lines)
     exit(0)
 }
 
