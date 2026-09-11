@@ -2096,6 +2096,47 @@ private struct MissingBinary: View {
 
 // MARK: - Advanced
 
+/// Where `weftctl` lives, for anyone who wants it — and said to be optional,
+/// because it is: WeftBar installs the engine, and everything the terminal
+/// can do here has a button somewhere in this window.
+private struct CommandLineCard: View {
+    private static let binDir = ("~/.local/bin" as NSString).expandingTildeInPath
+    private static let pathLine = #"export PATH="$HOME/.local/bin:$PATH""#
+    @State private var copied = false
+
+    private var installed: Bool {
+        FileManager.default.isExecutableFile(atPath: Self.binDir + "/weftctl")
+    }
+
+    var body: some View {
+        Card(title: "Command line", subtitle: "Optional — nothing in weft needs it.") {
+            if installed {
+                Text("`weftctl` is installed in `~/.local/bin`. To run it from a terminal, add that folder to your shell's PATH:")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Text(Self.pathLine)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button(copied ? "Copied" : "Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(Self.pathLine, forType: .string)
+                        copied = true
+                    }
+                    .controlSize(.small)
+                }
+            } else {
+                Text("The engine is not installed yet. Open **Permissions…** from the menu bar and weft will install it.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private struct AdvancedTab: View {
     @ObservedObject var store: ConfigStore
     @State private var preview = ""
@@ -2116,6 +2157,8 @@ private struct AdvancedTab: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            CommandLineCard()
 
             if let error = store.validationError {
                 Card(title: "Validation") {

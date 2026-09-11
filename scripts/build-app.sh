@@ -28,6 +28,24 @@ mkdir -p "$APP/Contents/Resources"
 
 cp "$BINDIR/weft-bar" "$BIN"
 
+# The engine rides inside the app, so installing weft can be "open the app"
+# and updating it can be "replace the app". It is never run from here:
+# WeftBar copies it to ~/.local/bin and signs it there on launch
+# (scripts/app-install.sh says why). The installer and the two shell
+# libraries it shares with install.sh travel with it, so there is one copy of
+# the signing and yabai hand-off logic, not a Swift port that could drift.
+for b in weftd weftctl; do
+    if [ -x "$BINDIR/$b" ]; then
+        cp "$BINDIR/$b" "$APP/Contents/MacOS/$b"
+    else
+        echo "WARNING: no $b at $BINDIR — this WeftBar.app cannot install the engine"
+    fi
+done
+cp "$DIR/scripts/app-install.sh" "$DIR/scripts/lib-codesign.sh" \
+   "$DIR/scripts/lib-agents.sh" "$DIR/scripts/install-release.sh" \
+   "$APP/Contents/Resources/"
+cp "$DIR/examples/weft.toml" "$APP/Contents/Resources/weft.toml"
+
 # Icon, drawn at build time by scripts/make-icon.swift.
 ICONSET="$DIR/build/WeftBar.iconset"
 rm -rf "$ICONSET"

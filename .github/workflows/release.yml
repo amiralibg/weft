@@ -172,6 +172,17 @@ jobs:
             --wait
           xcrun stapler staple build/WeftBar.app || true
 
+      # The app on its own, for anyone who will not open a terminal: it
+      # carries the engine and installs it on first launch. Zipped after
+      # notarisation so the staple is inside; ditto keeps the bundle's
+      # symlinks and extended attributes, which a plain zip would flatten.
+      - name: Zip the app on its own
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent build/WeftBar.app "WeftBar-$VERSION.zip"
+          shasum -a 256 "WeftBar-$VERSION.zip" > "WeftBar-$VERSION.zip.sha256"
+          cat "WeftBar-$VERSION.zip.sha256"
+
       - name: Write the release notes
         run: |
           set -euo pipefail
@@ -191,6 +202,9 @@ jobs:
           \`\`\`
 
           Or download the archive below, unpack it, and run \`./install.sh\`.
+
+          **No terminal?** Download \`WeftBar-$VERSION.zip\`, drag WeftBar into
+          Applications and open it — it installs the engine itself.
 
           Then open **WeftBar**, which walks you through granting \`weftd\` three macOS
           permissions: Accessibility, Input Monitoring and Screen Recording (that last
@@ -225,4 +239,6 @@ jobs:
             --title "weft $VERSION" \
             --notes-file NOTES.md \
             "weft-$VERSION-macos-universal.tar.gz" \
-            "weft-$VERSION-macos-universal.tar.gz.sha256"
+            "weft-$VERSION-macos-universal.tar.gz.sha256" \
+            "WeftBar-$VERSION.zip" \
+            "WeftBar-$VERSION.zip.sha256"

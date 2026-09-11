@@ -253,6 +253,16 @@ final class Daemon: @unchecked Sendable {
     /// behind the sweep, so the worst case is a command that answers late
     /// rather than one that fails.
     func start() {
+        // Said once, at the top of the log, because it explains everything
+        // after it: with Stage Manager on, macOS moves windows weft has just
+        // placed, and each of those moves reads like a weft bug.
+        if SystemChecks.stageManagerEnabled() {
+            fputs(
+                "weftd: WARNING Stage Manager is on — macOS will move windows weft places. "
+                    + "Turn it off: \(SystemChecks.stageManagerSetting)\n",
+                stderr
+            )
+        }
         // On the sync queue, not the caller's: `main` calls this and then
         // enters `CFRunLoopRun`, and the main run loop is where NSWorkspace
         // delivers app-launch, app-quit and space-change notifications. Doing

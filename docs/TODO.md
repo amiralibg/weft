@@ -54,10 +54,12 @@ parts: checksum verification, quarantine clearing, the stable self-signed
 identity that keeps grants alive across updates, and (as of `4814ccd`) a
 download progress bar.
 
-- [ ] `weftctl update`, and/or a WeftBar menu item, that runs the same script.
-- [ ] Restart the service afterwards and say what version it landed on.
-- [ ] Respect `check-for-updates = false` — someone who turned the check off did
-      not ask for an updater either.
+- [x] A WeftBar menu item that runs the same script — the release's own
+      `install-release.sh`, carried in the app bundle, after a confirmation.
+- [ ] Say what version it landed on. The script restarts the service and
+      reopens the app, but nothing yet tells the user the update took.
+- [x] Respect `check-for-updates = false` — the update item only ever appears
+      when the check found something.
 
 ---
 
@@ -102,9 +104,10 @@ startup." Nothing in `Sources/` mentions it. With it on, macOS and weft fight
 over the same windows and the symptom — windows snapping back after a tile —
 reads as a weft bug, so the report arrives pointing at the wrong thing.
 
-- [ ] Read `com.apple.WindowManager GloballyEnabled` at startup.
-- [ ] Report it in `weftctl doctor` and as a one-line banner in WeftBar. Name
-      the setting and where it lives, the way the permission rows do.
+- [x] Read `com.apple.WindowManager GloballyEnabled` at startup
+      (`WeftPlatform/SystemChecks.swift`).
+- [x] Report it in `weftctl doctor` and as a line at the top of WeftBar's menu
+      that opens Desktop & Dock.
 
 ### 7. `weftctl rescue` is invisible
 
@@ -127,9 +130,9 @@ validated with line numbers, cross-checks against live desktops — but
 `.github/` has no issue templates, and there is no way to get doctor's output
 out of the app for someone who never opens a terminal.
 
-- [ ] A **Copy diagnostics** item in WeftBar: doctor's output plus version,
-      macOS build and capability set, straight to the clipboard.
-- [ ] An issue template that asks for exactly that and nothing else.
+- [x] A **Copy Diagnostics** item in WeftBar: doctor's output plus version,
+      macOS build and the tail of the last install, straight to the clipboard.
+- [x] An issue template that asks for exactly that and nothing else.
 
 ---
 

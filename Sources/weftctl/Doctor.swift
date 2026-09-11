@@ -259,6 +259,15 @@ public enum Doctor {
             print("      ensure yabai.osax or weft-sa is loaded into Dock.app.")
         }
 
+        // Stage Manager arranges windows too. With it on, macOS and weft move
+        // the same windows and the symptom reads as a weft bug.
+        if SystemChecks.stageManagerEnabled() {
+            print("[\u{2717}] Stage Manager: ON — macOS will move windows weft has just placed.")
+            print("    Turn it off: \(SystemChecks.stageManagerSetting)")
+        } else {
+            print("[\u{2713}] Stage Manager: off")
+        }
+
         // 4 & 5. Optional helpers. Reported against the config rather than on
         // their own: "borders not found" is fine when it is switched off and a
         // silent no-op when it is switched on, and only the second is a

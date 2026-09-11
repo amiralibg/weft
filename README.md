@@ -71,6 +71,15 @@ verifies its checksum, installs `weftd` and `weftctl` into `~/.local/bin` and
 `WeftBar.app` into `~/Applications`, seeds a config, registers the launchd
 service, and opens Setup. No toolchain, no compile.
 
+**Without a terminal:** download `WeftBar-<version>.zip` from the
+[releases page](https://github.com/amiralibg/weft/releases/latest), open it,
+and drag **WeftBar** into Applications. The first time you open it macOS will
+say it cannot check the app — it is not notarised — so go to **System Settings ›
+Privacy & Security** and click **Open Anyway**. WeftBar then installs the engine
+itself (into `~/.local/bin`, signed so your permissions survive updates), writes
+a starting config, and walks you through the permissions. Updating is the same:
+use **Update to weft …** in its menu, or replace the app.
+
 Prefer to look before you run it? Download the archive from the
 [releases page](https://github.com/amiralibg/weft/releases/latest), check it,
 and run the `install.sh` inside:

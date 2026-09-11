@@ -10,10 +10,11 @@ import WeftCore
 /// from months ago — which nobody does, so in practice every install stays on
 /// whatever version it started on.
 ///
-/// What it deliberately does NOT do: download anything, replace anything, or
-/// run an installer. It surfaces a version number and the command to run. An
-/// updater that swaps a running window manager's binaries underneath itself is
-/// a much larger promise than a menu bar line, and it is not one this makes.
+/// What this type deliberately does NOT do: download anything, replace
+/// anything, or run an installer. It answers "is there a newer version", and
+/// nothing else. Acting on the answer is WeftBar's menu item, and only when
+/// the user clicks it and confirms — it runs the release's own
+/// `install-release.sh`, the same path as the curl one-liner.
 public enum UpdateCheck {
     public struct Result: Codable, Sendable, Equatable {
         /// Latest tag as published, e.g. "0.2.0" (the leading "v" is stripped).

@@ -1,3 +1,4 @@
+import WeftCore
 import AppKit
 import WeftPlatform
 import Carbon.HIToolbox
@@ -157,6 +158,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // a menu bar that appears late, and giving up on it gave a Setup
         // window that reappears forever.
         Task { @MainActor in
+            // The engine this app carries goes in first. A fresh machine has
+            // no weftd to grant anything to, and an app that was updated by
+            // replacing it is running against an older engine until it does.
+            let needsInstall = await Task.detached { EngineInstaller.needsInstall() }.value
+            if needsInstall {
+                let installed = FileManager.default.isExecutableFile(
+                    atPath: EngineInstaller.binDir.appendingPathComponent("weftctl").path
+                )
+                guard installed else {
+                    // First run: say what is about to happen and let them
+                    // press the button — it starts a login service and pauses
+                    // yabai/skhd, which is not something to do unannounced.
+                    OnboardingWindowController.shared.showInstall()
+                    return
+                }
+                // An update. Replacing the app *was* the decision; catching
+                // the engine up is not worth a question. Only a failure is.
+                let outcome = await EngineInstaller.install(step: { _ in })
+                self.state.refresh()
+                guard outcome.ok else {
+                    OnboardingWindowController.shared.showInstall()
+                    return
+                }
+            }
             guard await OnboardingWindowController.shouldShow() else { return }
             OnboardingWindowController.shared.show()
         }
@@ -284,6 +309,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
+        if SystemChecks.stageManagerEnabled() {
+            let item = NSMenuItem(
+                title: "Stage Manager is on — turn it off for weft",
+                action: #selector(openStageManagerSettings), keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil
+            )
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
+
         let spaces = state.spaces
         guard state.daemonUp != false, !spaces.isEmpty else {
             let item = NSMenuItem(title: "weftd not responding", action: nil, keyEquivalent: "")
@@ -385,6 +423,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         configItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         menu.addItem(configItem)
 
+        let diagItem = NSMenuItem(
+            title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: ""
+        )
+        diagItem.target = self
+        diagItem.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
+        menu.addItem(diagItem)
+
         menu.addItem(.separator())
 
         // Retry / Restart Weft
@@ -443,9 +488,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         OnboardingWindowController.shared.show()
     }
 
+    /// Update in place: the release's own installer, run from this bundle.
+    ///
+    /// `install-release.sh` already downloads, checks the checksum, keeps the
+    /// signing identity, restarts the service and reopens the app — the same
+    /// path the curl one-liner takes, not a second updater to keep in step
+    /// with it. The release page is still the answer when the app sits
+    /// somewhere this user cannot replace it, or the build carries no script.
     @objc private func openUpdatePage() {
-        guard let update = latestUpdate, let url = URL(string: update.url) else { return }
-        NSWorkspace.shared.open(url)
+        guard let update = latestUpdate else { return }
+        let releasePage = URL(string: update.url)
+        let appDir = Bundle.main.bundleURL.deletingLastPathComponent()
+        guard let script = Bundle.main.url(forResource: "install-release", withExtension: "sh"),
+              FileManager.default.isWritableFile(atPath: appDir.path)
+        else {
+            if let releasePage { NSWorkspace.shared.open(releasePage) }
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Update weft to \(update.latest)?"
+        alert.informativeText = "Weft downloads the release, checks it, and restarts itself. "
+            + "Your settings and permissions are kept."
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Release Notes")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            break
+        case .alertSecondButtonReturn:
+            if let releasePage { NSWorkspace.shared.open(releasePage) }
+            return
+        default:
+            return
+        }
+        // Output to a file, never a pipe: the installer quits WeftBar before
+        // replacing it, and a write into a pipe whose reader has exited kills
+        // the writer — half-way through swapping the app.
+        let log = EngineInstaller.logURL.deletingLastPathComponent()
+            .appendingPathComponent("weft-update.log")
+        try? FileManager.default.createDirectory(
+            at: log.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: log.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: log) else {
+            if let releasePage { NSWorkspace.shared.open(releasePage) }
+            return
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [script.path]
+        var env = ProcessInfo.processInfo.environment
+        env["WEFT_VERSION"] = "v\(update.latest)"
+        // Replace *this* copy, wherever the user put it — not a second one
+        // in ~/Applications next to an old one in /Applications.
+        env["WEFT_APP_DIR"] = appDir.path
+        p.environment = env
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = handle
+        p.standardError = handle
+        do {
+            try p.run()
+        } catch {
+            if let releasePage { NSWorkspace.shared.open(releasePage) }
+        }
+    }
+
+    @objc private func openStageManagerSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Everything a bug report needs, on the clipboard, with no terminal:
+    /// `weftctl doctor`, the versions, and the end of the last install.
+    @objc private func copyDiagnostics() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var parts: [String] = [
+                "weft \(WeftVersion.current) — \(ProcessInfo.processInfo.operatingSystemVersionString)",
+                "WeftBar: \(Bundle.main.bundlePath)",
+                "Stage Manager: \(SystemChecks.stageManagerEnabled() ? "ON" : "off")",
+            ]
+            if let url = ConfigEditorWindowController.weftctlURL() {
+                parts.append("--- weftctl doctor ---\n" + Self.output(of: url, ["doctor"]))
+            } else {
+                parts.append("--- weftctl not found ---")
+            }
+            if let log = try? String(contentsOf: EngineInstaller.logURL, encoding: .utf8) {
+                let tail = log.split(separator: "\n", omittingEmptySubsequences: false).suffix(40)
+                parts.append("--- last install ---\n" + tail.joined(separator: "\n"))
+            }
+            let text = parts.joined(separator: "\n\n")
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
+    }
+
+    nonisolated private static func output(of url: URL, _ args: [String]) -> String {
+        let p = Process()
+        p.executableURL = url
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return "could not run \(url.path): \(error)" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Ask once per launch; `UpdateCheck` decides whether that turns into a
@@ -453,8 +604,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ///
     /// Nothing here blocks and nothing here nags: no dialog, no badge that
     /// cannot be dismissed, no download. A menu item appears saying which
-    /// version exists, and clicking it opens the release page. Anyone who
-    /// wants none of it sets `check-for-updates = false`.
+    /// version exists; clicking it asks, then updates in place
+    /// (`openUpdatePage`). Anyone who wants none of it sets
+    /// `check-for-updates = false`.
     private func checkForUpdate() {
         let enabled = ConfigStore.readCheckForUpdates()
         UpdateCheck.refreshIfNeeded(enabled: enabled) { [weak self] result in

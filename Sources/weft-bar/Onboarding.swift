@@ -135,8 +135,13 @@ final class SetupModel: ObservableObject {
     /// Seconds the current step has been waiting. Drives the "still nothing?"
     /// hint rather than a spinner that says the same thing forever.
     @Published var waitedSeconds = 0
+    /// Installing the engine this app carries: the step the installer is on,
+    /// and — when it stopped — the last thing it said.
+    @Published var installStep = ""
+    @Published var installing = false
+    @Published var installError: String?
 
-    enum Page: Int { case welcome, permissions, done }
+    enum Page: Int { case welcome, permissions, done, install }
 
     private var timer: Timer?
     private var stepStarted: Date?
@@ -331,6 +336,47 @@ final class SetupModel: ObservableObject {
 
     // MARK: Actions
 
+    func runInstall() {
+        guard !installing else { return }
+        installing = true
+        installError = nil
+        installStep = "Starting"
+        Task { @MainActor [weak self] in
+            let outcome = await EngineInstaller.install { step in
+                Task { @MainActor in self?.installStep = step }
+            }
+            guard let self else { return }
+            if outcome.ok {
+                // The service was just bootstrapped; give it a moment to open
+                // its socket before the permissions page asks it anything.
+                _ = await OnboardingWindowController.awaitDaemon()
+                self.installing = false
+                self.refresh()
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                    self.page = .welcome
+                }
+            } else {
+                self.installing = false
+                let lines = outcome.log.split(separator: "\n").map(String.init)
+                    .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                self.installError = lines.suffix(3).joined(separator: "\n")
+            }
+        }
+    }
+
+    /// The engine is not answering. Install the one this app carries if none
+    /// is in place yet; otherwise restart the one that is.
+    func startEngine() {
+        let installed = FileManager.default.isExecutableFile(
+            atPath: EngineInstaller.binDir.appendingPathComponent("weftctl").path
+        )
+        if !installed, EngineInstaller.bundledWeftctl != nil {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { page = .install }
+        } else {
+            restartEngine()
+        }
+    }
+
     func beginPermissions() {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
             page = requiredGranted ? .done : .permissions
@@ -493,6 +539,7 @@ struct SetupView: View {
 
             Group {
                 switch model.page {
+                case .install: InstallPage(model: model, onClose: onClose).transition(pageTransition)
                 case .welcome: WelcomePage(model: model, onClose: onClose).transition(pageTransition)
                 case .permissions:
                     PermissionsPage(model: model, onClose: onClose).transition(pageTransition)
@@ -534,6 +581,101 @@ private struct SetupBackdrop: View {
             )
         }
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - Page 0: the engine
+
+/// Shown when this app carries an engine that is not installed yet, or when
+/// catching it up after an app update failed. One button, and a plain account
+/// of what it does: it registers a login service and pauses yabai/skhd, and
+/// nobody should find either out afterwards.
+private struct InstallPage: View {
+    @ObservedObject var model: SetupModel
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            AppIcon()
+                .frame(width: 96, height: 96)
+                .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
+
+            Text("Install Weft")
+                .font(.system(size: 30, weight: .semibold))
+                .padding(.top, 22)
+            Text("One click puts the engine in place. No terminal.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+
+            VStack(alignment: .leading, spacing: 16) {
+                Bullet(
+                    symbol: "shippingbox",
+                    title: "The engine",
+                    text: "**weftd** and **weftctl** go in `~/.local/bin`, signed so macOS keeps their permissions when weft updates."
+                )
+                Bullet(
+                    symbol: "doc.text",
+                    title: "A starting config",
+                    text: "Written to `~/.config/weft/weft.toml`, or migrated from your yabai/skhd setup. A config you already have is kept."
+                )
+                Bullet(
+                    symbol: "power",
+                    title: "Runs at login",
+                    text: "Registered as a login service. If yabai or skhd is running it is paused — uninstalling weft puts it back."
+                )
+            }
+            .padding(.top, 30)
+            .frame(maxWidth: 440, alignment: .leading)
+
+            Spacer()
+
+            VStack(spacing: 14) {
+                if model.installing {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text(model.installStep)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(height: 32)
+                } else {
+                    Button(action: model.runInstall) {
+                        Text(model.installError == nil ? "Install" : "Try again")
+                            .frame(width: 190)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
+                }
+
+                if let error = model.installError {
+                    VStack(spacing: 6) {
+                        Label("The install stopped", systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                        Button("Show the full log") {
+                            NSWorkspace.shared.open(EngineInstaller.logURL)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: 460)
+                }
+
+                if !model.installing {
+                    CloseButton(action: onClose)
+                }
+            }
+            .padding(.bottom, 44)
+        }
     }
 }
 
@@ -601,7 +743,7 @@ private struct WelcomePage: View {
                 .disabled(!model.daemonReachable)
 
                 if !model.daemonReachable {
-                    DaemonUnreachableNotice()
+                    DaemonUnreachableNotice(model: model)
                 } else if model.canDismiss {
                     CloseButton(action: onClose)
                 }
@@ -615,29 +757,21 @@ private struct WelcomePage: View {
     }
 }
 
-/// The one failure the flow cannot walk anyone out of: with no daemon there is
-/// nothing to grant anything to, and every row below would read "missing" for
-/// the wrong reason. Say which command fixes it rather than just flagging it.
+/// The one failure the flow cannot walk anyone through on its own: with no
+/// daemon there is nothing to grant anything to. It used to name a command to
+/// go and type; now it is a button — installing the engine if this app carries
+/// one that is not in place, restarting it otherwise.
 private struct DaemonUnreachableNotice: View {
+    @ObservedObject var model: SetupModel
+
     var body: some View {
         VStack(spacing: 8) {
             Label("The weft engine isn’t answering", systemImage: "exclamationmark.triangle.fill")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.orange)
-            HStack(spacing: 6) {
-                Text("Start it with")
-                Text("weftctl service start")
-                    .font(.system(size: 11, design: .monospaced))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
-                    )
-                    .textSelection(.enabled)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            Button(model.isRestarting ? "Starting…" : "Start the engine", action: model.startEngine)
+                .disabled(model.isRestarting)
+                .controlSize(.small)
         }
     }
 }
@@ -1496,6 +1630,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         model.startPolling()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open on the engine page: nothing is installed yet, or catching it up
+    /// after an app update failed.
+    func showInstall() {
+        model.page = .install
+        show()
     }
 
     func hide() {
