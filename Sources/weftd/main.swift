@@ -1959,11 +1959,17 @@ final class Daemon: @unchecked Sendable {
             let wid: WindowID
             if let w = widOpt {
                 wid = w
-            } else {
-                guard let f = currentLayout().focus else {
-                    return IPCResponse(ok: false, error: "nothing focused")
-                }
+            } else if let f = currentLayout().focus {
                 wid = f
+            } else if let f = FocusedWindow.current() {
+                // No layout focus does not mean nothing is focused: a window a
+                // rule unmanaged is in no layout, so it can never be the
+                // layout's focus, and "send this window to another desktop"
+                // came back "nothing focused" for exactly the windows most
+                // likely to need sending. Ask the system what is in front.
+                wid = f
+            } else {
+                return IPCResponse(ok: false, error: "nothing focused")
             }
             return moveWindow(wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)")
         case .label(let name):
@@ -2029,8 +2035,17 @@ final class Daemon: @unchecked Sendable {
     /// very often visible on the other monitor right now, so leaving it for
     /// the next sweep showed the window at its old size for a beat.
     private func moveWindow(_ wid: WindowID, toSpace sid: SpaceID, label: String) -> IPCResponse {
-        if !currentLayout().windows.contains(wid) && !ScriptingAddition.isAvailable() {
-            return IPCResponse(ok: false, error: "wid \(wid) is not on the current space (needs weft-sa to move background windows)")
+        // Layout membership is not the same question as "is it here". An
+        // unmanaged window sits on the current space in no layout at all, and
+        // testing the layout sent it down the background-window path and
+        // refused the move on a desktop the window was already on. Ask the
+        // WindowServer where the window is; only fall back to the layout when
+        // it has nothing to say.
+        if !currentLayout().windows.contains(wid), !ScriptingAddition.isAvailable() {
+            let onCurrent = currentSID().map { SpaceControl.spacesForWindow(wid).contains($0) } ?? false
+            if !onCurrent {
+                return IPCResponse(ok: false, error: "wid \(wid) is not on the current space (needs weft-sa to move background windows)")
+            }
         }
         guard SpaceControl.moveWindowToSpace(wid, sid) else {
             return IPCResponse(ok: false, error: "WindowServer ignored the move (needs weft-sa) — nothing changed")

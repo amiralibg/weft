@@ -1050,3 +1050,29 @@ private final class VerdictSink: @unchecked Sendable {
         lock.withLock { verdicts }
     }
 }
+
+/// The window the user is actually looking at, whether or not weft manages it.
+///
+/// Every command that acts on "the focused window" reads the layout's focus,
+/// which only ever names a window in a layout. A window a rule unmanaged is in
+/// no layout, so it is never the layout's focus: commands aimed at it either
+/// said "nothing focused" or quietly acted on some tiled window elsewhere on
+/// the desktop. Asking the system instead costs one AX round trip and is only
+/// reached on that fallback, never on the tiling path.
+public enum FocusedWindow {
+    public static func current() -> WindowID? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        for attr in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appEl, attr as CFString, &value) == .success,
+                  let el = value as! AXUIElement?
+            else { continue }
+            var wid: UInt32 = 0
+            if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                return WindowID(wid)
+            }
+        }
+        return nil
+    }
+}
