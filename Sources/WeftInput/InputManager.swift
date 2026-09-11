@@ -1,3 +1,4 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import WeftCore
@@ -364,6 +365,13 @@ public final class InputManager: @unchecked Sendable {
     @discardableResult
     public func start() -> Bool {
         if tapInstalled { return true }
+        // Not until Accessibility is granted. An active tap needs it, and
+        // asking for the tap without it is what makes macOS put up its own
+        // "would like to control this computer" dialog — from a process with
+        // no window, at startup, on top of the Setup window whose job is
+        // exactly that permission. The check is silent; the retry loop
+        // creates the tap the moment the switch is on.
+        guard AXIsProcessTrusted() else { return false }
         let done = DispatchSemaphore(value: 0)
         let result = StartResult()
         // Tap creation + source install happen on the tap thread, so the

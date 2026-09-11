@@ -1,3 +1,4 @@
+import ApplicationServices
 import AppKit
 import CoreGraphics
 import Foundation
@@ -211,6 +212,9 @@ public enum SpaceControl {
         // Hardware keycodes for 1..9 (ANSI positions, layout-independent).
         let keycodes: [Int64] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
         guard (1...9).contains(n) else { return false }
+        // Posting keys without Accessibility is refused, and the refusal is a
+        // system dialog. Nothing a keypress can do is worth one of those.
+        guard AXIsProcessTrusted() else { return false }
         let keycode = CGKeyCode(keycodes[n - 1])
         let flags = CGEventFlags.maskControl
         // Tag both events with the "WEFT" marker the input tap checks for.

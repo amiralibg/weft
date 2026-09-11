@@ -143,8 +143,8 @@ keep their permissions.
 That is the whole job. Weft notices the switch within a second and moves
 itself on to the next permission — no restart, no clicking Continue.
 
-If there is no weftd row in a list — it should be there, weftd asks for
-both on startup — click "No weftd row in the list?" in the Setup window.
+If macOS asks first, choose "Open System Settings". If there is still no
+weftd row in a list, click "No weftd row in the list?" in the Setup window.
 It reveals weftd in Finder and copies its path, so you can drag it onto
 the list, or use + and Cmd-Shift-G to paste the path. (The + browser
 cannot reach ~/.local/bin on its own: a dotted folder is hidden.)

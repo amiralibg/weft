@@ -230,7 +230,10 @@ final class Daemon: @unchecked Sendable {
     /// which calls `request-input-access` over the socket at the step where
     /// the user is already reading about Input Monitoring.
     private func requestInputAccess(reason: String) {
-        if !Daemon.setupIsRunning() || reason == "Setup asked" {
+        // Only ever for Setup. weftd used to ask by itself when no Setup
+        // window was open, which put a system dialog up out of nowhere; now
+        // every permission prompt comes from a Setup step the user clicked.
+        if reason == "Setup asked" {
             _ = CGRequestListenEventAccess()
             fputs("weftd: requested Input Monitoring (\(reason)) — weftd should now be listed "
                 + "in System Settings › Privacy & Security › Input Monitoring; switch it on\n",
@@ -1712,6 +1715,20 @@ final class Daemon: @unchecked Sendable {
             // run and not the last hour of desktop use.
             Trace.reset()
             return IPCResponse(ok: true, output: "trace reset")
+        case "request-accessibility":
+            // Setup's Accessibility step, and the only place weftd asks for
+            // it. Asking is what lists weftd in System Settings, and it shows
+            // macOS's own dialog — so it happens right after the user clicked
+            // the step that says so, never at startup.
+            let trusted = AXIsProcessTrustedWithOptions(
+                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            )
+            return IPCResponse(ok: true, output: trusted ? "Accessibility already granted" : "requested Accessibility")
+        case "request-screen-recording":
+            // The same, for Screen Recording: without the request macOS never
+            // lists weftd there, and the user has to add it with the + button.
+            let granted = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+            return IPCResponse(ok: true, output: granted ? "Screen Recording already granted" : "requested Screen Recording")
         case "request-input-access":
             // Ask TCC to list weftd under Input Monitoring, on demand.
             //
@@ -2431,7 +2448,11 @@ final class Daemon: @unchecked Sendable {
             fputs("weft: config error: \(error) — keeping running config\n", stderr)
             return
         }
-        configLock.withLock { _config = next }
+        let previous: ValidatedConfig = configLock.withLock {
+            let old = _config
+            _config = next
+            return old
+        }
         // Loaded, but not everything in it did anything. Said on every load
         // rather than once: the file is the thing being edited, and a warning
         // that only appears at startup is one nobody connects to the key.
@@ -2447,6 +2468,16 @@ final class Daemon: @unchecked Sendable {
         bordersBridge.applyConfig(next.integrations.borders, currentLayout: currentSpaceLayoutKind(), currentMode: input.currentMode)
         sketchybarBridge.updateConfig(next.integrations.sketchybar)
         applyDeclaredLayouts()
+        // Gaps, stack offset and screen reserve shape every frame, and a
+        // reload that changes any of them re-tiles now, from the values just
+        // loaded. Settings used to ask for a re-tile itself, straight after
+        // writing the file; that sweep usually beat this reload and drew the
+        // old values, so every change showed up one step behind.
+        let reshaped = previous.general.asTilingConfig() != next.general.asTilingConfig()
+            || previous.general.reserve != next.general.reserve
+        if !initial, reshaped {
+            syncQueue.async { [weak self] in self?.syncFromSnapshot() }
+        }
         fputs("weft: config loaded (\(next.spaces.count) spaces, \(next.rules.count) rules, \(next.keymap.modes.count) modes)\n", stderr)
     }
 

@@ -160,9 +160,10 @@ Screen Recording is not about recording. Without it macOS redacts
 `kCGWindowName` for every window `weftd` does not own, so every title comes back
 empty: title-matching rules stop matching, and the switcher lists blank rows.
 
-The Setup window opens each System Settings pane in turn. In each one, find the
-row named **weftd** and turn its switch on — weft notices within a second and
-moves itself along. Nothing needs restarting.
+The Setup window takes you through them one at a time. At each step macOS may
+ask first — choose **Open System Settings** — and then you find the row named
+**weftd** and turn its switch on. Weft notices within a second and moves itself
+along. Nothing needs restarting.
 
 In practice you will often only be asked for Accessibility. macOS lets a
 process that already holds Accessibility open an event tap, so keybinds go live
@@ -170,11 +171,13 @@ the moment that switch flips, and Setup marks Input Monitoring **Covered** and
 moves past it rather than claiming you granted it. Turning it on as well is
 harmless if you would rather have it explicit.
 
-`weftd` asks the system for both permissions on launch, which is what makes
-macOS *list* it, so the row should already be there waiting. If it is not, the
-Setup window's "No weftd row in the list?" section reveals the binary in Finder
-and copies its path — `~/.local/bin` is a hidden directory, so the pane's `+`
-browser cannot reach it on its own.
+macOS only lists an app after the app asks, and asking is what shows its
+dialog. So `weftd` never asks on its own — Setup asks at the step you are on,
+which is why the dialog appears right after you click and never out of nowhere.
+If a `weftd` row still isn't there, the Setup window's "No weftd row in the
+list?" section reveals the binary in Finder and copies its path —
+`~/.local/bin` is a hidden directory, so the pane's `+` browser cannot reach it
+on its own.
 
 Reopen it any time from the menu-bar icon → **Permissions…**, or:
 
@@ -340,8 +343,8 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ## Uninstall
 
-**From the app:** click the weft icon in the menu bar → **Uninstall Weft…**, or
-Settings › Advanced → **Uninstall Weft…**. It asks first, and offers to remove
+**From the app:** open Settings (weft icon in the menu bar → **Settings…**), go
+to **Advanced**, and click **Uninstall Weft…** at the bottom. It asks first, and offers to remove
 your settings and permissions too. Your windows are left exactly where they are.
 
 **From a terminal**, with the script that ships inside the app:

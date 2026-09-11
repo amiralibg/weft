@@ -451,13 +451,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateItem?.isHidden = true
         if let updateItem { menu.addItem(updateItem) }
 
-        let uninstallItem = NSMenuItem(
-            title: "Uninstall Weft…", action: #selector(uninstallWeft), keyEquivalent: ""
-        )
-        uninstallItem.target = self
-        uninstallItem.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
-        menu.addItem(uninstallItem)
-
         // Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
@@ -559,10 +552,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             if let releasePage { NSWorkspace.shared.open(releasePage) }
         }
-    }
-
-    @objc private func uninstallWeft() {
-        Uninstaller.confirmAndRun()
     }
 
     @objc private func openStageManagerSettings() {

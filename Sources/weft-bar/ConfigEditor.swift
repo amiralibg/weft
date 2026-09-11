@@ -1351,7 +1351,10 @@ private struct AdvancedPane: View {
                 }
                 Button(health.isRestarting ? "Restarting…" : "Restart Engine") { health.restart() }
                     .disabled(health.isRestarting)
+                // The one place to remove weft — Settings, not the menu bar,
+                // where a destructive item sits one slip away from Quit.
                 Button("Uninstall Weft…", role: .destructive) { Uninstaller.confirmAndRun() }
+                    .foregroundStyle(.red)
             }
         }
         .formStyle(.grouped)

@@ -353,10 +353,11 @@ final class ConfigStore: ObservableObject {
         status = validated.warnings.isEmpty
             ? .ok("Saved — weftd reloads within 100 ms.")
             : Self.loadedStatus(validated, verb: "Saved")
-        // Fire and forget: the daemon picks the file up from FSEvents on its
-        // own within 100 ms, so this is a nudge, not a dependency — and Save
-        // must not freeze the window while a sweep runs.
-        BarIPC.post("sync")
+        // No nudge. This used to post `sync` straight after the write, and the
+        // sweep it started usually ran before weftd had reloaded the file — so
+        // it re-tiled with the old gaps, and every change showed the one
+        // before it. weftd re-tiles when the reload itself changes anything
+        // that shapes the layout, which is the only moment that is right.
         return true
     }
 
