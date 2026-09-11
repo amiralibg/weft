@@ -274,7 +274,7 @@ enabled = false
 supervise = true
 
 # Passed straight through to the borders binary.
-args = ["width=5.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "style=round", "hidpi=on"]
+args = ["width=2.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "style=round", "hidpi=on"]
 
 # Recolour the border by the current layout, and by the active mode. Handy for
 # modes: the border turns red the moment you enter the resize layer.

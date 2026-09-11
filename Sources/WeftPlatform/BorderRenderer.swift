@@ -47,7 +47,7 @@ public final class BorderRenderer: @unchecked Sendable {
         public var autoRadius: Bool
 
         public init(
-            width: Double = 4,
+            width: Double = 2,
             radius: Double = 10,
             activeColor: UInt32 = 0xff7a_a2f7,
             inactiveColor: UInt32 = 0x4041_4868,

@@ -187,7 +187,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
 
     /// Stroke width the native renderer should use.
     public var resolvedWidth: Double {
-        width ?? arg("width").flatMap(Double.init) ?? 4
+        width ?? arg("width").flatMap(Double.init) ?? 2
     }
 
     /// Colour for everything that is not focused.

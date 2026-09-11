@@ -93,7 +93,7 @@ final class ConfigStore: ObservableObject {
     // Integrations
     @Published var bordersEnabled = false
     @Published var bordersBackend = "native"
-    @Published var bordersWidth = 4.0
+    @Published var bordersWidth = 2.0
     @Published var bordersRadius = 10.0
     /// Follow each window's own corners. Stored as the *absence* of
     /// `radius`: a number in the file is an override, and writing one on
@@ -200,7 +200,7 @@ final class ConfigStore: ObservableObject {
         bordersBackend = b?.string("backend") ?? "native"
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
-            ?? 4
+            ?? 2
         bordersAutoRadius = b?.double("radius") == nil
         bordersActiveColor = Self.firstColor(in: b?.rawValue("active-color")) ?? "0xff7aa2f7"
         activeColorEdited = false
