@@ -84,14 +84,11 @@ case ":$PATH:" in
     *) echo "NOTE: $BINDIR is not on PATH. Add:"; echo "  export PATH=\"$BINDIR:\$PATH\"" ;;
 esac
 
-# Before the service, not after: `weftctl service install` bootstraps weftd
-# immediately, and weftd + yabai both driving the same windows is a fight the
-# user watches happen. skhd goes too — its keybinds still fire yabai commands
-# at a desktop weft now owns.
-if [ "${WEFT_KEEP_WM:-0}" = 1 ]; then
-    echo "==> leaving yabai/skhd running (WEFT_KEEP_WM=1) — expect them to fight weft"
-else
-    echo "==> stopping any running yabai/skhd (uninstall.sh puts them back)"
+# Other software is left alone unless asked. WEFT_PAUSE_WM=1 pauses a running
+# yabai/skhd before the service starts — two window managers driving the same
+# windows is a fight — and records it, so uninstall.sh restarts exactly that.
+if [ "${WEFT_PAUSE_WM:-0}" = 1 ]; then
+    echo "==> pausing yabai/skhd (WEFT_PAUSE_WM=1)"
     weft_stop_wms
 fi
 
@@ -156,5 +153,5 @@ cannot reach ~/.local/bin on its own: a dotted folder is hidden.)
 
 Check status anytime:      weftctl doctor
 Settings window:           open -a WeftBar --args --settings
-Back to yabai + skhd:      ./scripts/uninstall.sh
+Uninstall:                 ./scripts/uninstall.sh   (--purge removes settings too)
 EOF

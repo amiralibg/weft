@@ -43,7 +43,7 @@ for b in weftd weftctl; do
 done
 cp "$DIR/scripts/app-install.sh" "$DIR/scripts/lib-codesign.sh" \
    "$DIR/scripts/lib-agents.sh" "$DIR/scripts/install-release.sh" \
-   "$APP/Contents/Resources/"
+   "$DIR/scripts/uninstall.sh" "$APP/Contents/Resources/"
 cp "$DIR/examples/weft.toml" "$APP/Contents/Resources/weft.toml"
 
 # Icon, drawn at build time by scripts/make-icon.swift.

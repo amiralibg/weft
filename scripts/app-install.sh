@@ -18,7 +18,7 @@
 #
 #   WEFT_BUNDLE     path to WeftBar.app (required)
 #   PREFIX          binaries go to $PREFIX/bin (default ~/.local)
-#   WEFT_KEEP_WM=1  leave yabai/skhd running (they will fight weft)
+#   WEFT_PAUSE_WM=1 pause a running yabai/skhd first (uninstall restarts it)
 set -euo pipefail
 
 BUNDLE="${WEFT_BUNDLE:?WEFT_BUNDLE must point at WeftBar.app}"
@@ -89,12 +89,11 @@ else
     echo "    wrote ~/.config/weft/weft.toml"
 fi
 
-if [ "${WEFT_KEEP_WM:-0}" = 1 ]; then
-    echo "    leaving yabai/skhd running (WEFT_KEEP_WM=1) — expect them to fight weft"
-else
-    # Before the service: weftd and yabai both driving the same windows is a
-    # fight the user watches happen. Recorded, so uninstall puts them back.
-    say "Pausing yabai and skhd if they are running"
+# Other software is left alone unless asked: switching off someone else's
+# tools is not an installer's call. WEFT_PAUSE_WM=1 pauses a running
+# yabai/skhd and records it; uninstall.sh restarts exactly what it recorded.
+if [ "${WEFT_PAUSE_WM:-0}" = 1 ]; then
+    say "Pausing yabai and skhd"
     # shellcheck source=lib-agents.sh
     . "$RES/lib-agents.sh"
     weft_stop_wms

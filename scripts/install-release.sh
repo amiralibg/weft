@@ -14,7 +14,7 @@
 #   WEFT_VERSION=v0.1.0   install a specific tag instead of the latest
 #   PREFIX=/opt/homebrew  binaries go to $PREFIX/bin        (default ~/.local)
 #   WEFT_APP_DIR=...      WeftBar.app goes here             (default ~/Applications)
-#   WEFT_KEEP_WM=1        leave yabai/skhd running          (they will fight weft)
+#   WEFT_PAUSE_WM=1       pause a running yabai/skhd first  (uninstall restarts it)
 #   WEFT_NO_SERVICE=1     install the files but do not register the launchd job
 #   WEFT_NO_OPEN=1        do not open Setup at the end
 set -euo pipefail
@@ -247,10 +247,9 @@ fi
 
 # ----------------------------------------------------------- other managers
 
-if [ "${WEFT_KEEP_WM:-0}" = 1 ]; then
-    say "leaving yabai/skhd alone (WEFT_KEEP_WM=1) — expect them to fight weft"
-elif [ -f "$STAGE/lib-agents.sh" ]; then
-    say "stopping any running yabai/skhd (uninstall.sh puts them back)"
+# Other software is left alone unless asked; see install.sh.
+if [ "${WEFT_PAUSE_WM:-0}" = 1 ] && [ -f "$STAGE/lib-agents.sh" ]; then
+    say "pausing yabai/skhd (WEFT_PAUSE_WM=1)"
     # shellcheck source=lib-agents.sh
     . "$STAGE/lib-agents.sh"
     weft_stop_wms

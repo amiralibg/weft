@@ -1,108 +1,143 @@
 #!/usr/bin/env bash
-# Fully uninstall weft and hand the desktop back to yabai + skhd.
+# Remove weft from this Mac.
 #
-#   ./scripts/uninstall.sh          # keep ~/.config/weft (reinstall-friendly)
-#   ./scripts/uninstall.sh --purge  # also delete config + onboarded flag
+#   uninstall.sh            remove weft, keep your settings for a reinstall
+#   uninstall.sh --purge    remove everything: settings, the signing identity,
+#                           and weft's rows in Privacy & Security
+#   uninstall.sh --dry-run  list what would be removed, and remove nothing
 #
-# Mirrors scripts/install.sh.
-set -e
+# This is also what "Uninstall Weft…" in the menu bar runs: WeftBar carries
+# this script and passes its own location as WEFT_APP_PATH.
+#
+# Your windows are not touched. They stay where they are, as ordinary windows.
+set -u
 
-# lib-agents.sh lives beside this script in a release archive, and one level
-# up under scripts/ in a clone. Find it either way, and survive not finding it
-# at all: uninstalling weft must work even when the helper that puts yabai back
-# is missing — the alternative is a half-removed window manager.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-LIB=""
-for candidate in "$HERE/lib-agents.sh" "$HERE/../scripts/lib-agents.sh"; do
-    [ -f "$candidate" ] && LIB="$candidate" && break
-done
-if [ -n "$LIB" ]; then
-    # shellcheck source=lib-agents.sh
-    . "$LIB"
-else
-    echo "NOTE: lib-agents.sh not found — cannot restore yabai/skhd automatically."
-    weft_restore_wms() {
-        echo "    skipped: restart yabai/skhd yourself, or re-run from a clone of the repo"
-    }
-fi
-BINDIR="${PREFIX:-$HOME/.local}/bin"
-APPDIR="${WEFT_APP_DIR:-$HOME/Applications}"
 PURGE=0
-[ "${1:-}" = "--purge" ] && PURGE=1
+DRY=0
+for arg in "$@"; do
+    case "$arg" in
+        --purge) PURGE=1 ;;
+        --dry-run | -n) DRY=1 ;;
+        -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
 
-# Scroll layouts park off-screen columns by moving them ~5000px west of every
-# display. Killing weftd with columns parked strands those windows where no
-# amount of clicking finds them, so unpark before anything else — while the
-# daemon that knows about them is still alive.
-if [ -x "$BINDIR/weftctl" ]; then
-    echo "==> rescuing parked windows"
-    "$BINDIR/weftctl" rescue || echo "    (daemon not running — nothing to rescue)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+BINDIR="${PREFIX:-$HOME/.local}/bin"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/weft"
+SOCKET="${TMPDIR:-/tmp/}weft-${USER:-$(id -un)}.sock"
+PLIST="$HOME/Library/LaunchAgents/com.weft.weftd.plist"
+KEYCHAIN="$HOME/Library/Keychains/weft-signing.keychain-db"
+
+say() { printf '==> %s\n' "$*"; }
+
+# Remove paths, or in a dry run name them.
+remove() {
+    for path in "$@"; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        if [ "$DRY" = 1 ]; then
+            echo "    would remove $path"
+        elif rm -rf "$path"; then
+            echo "    removed $path"
+        fi
+    done
+}
+
+[ "$DRY" = 1 ] && say "Dry run — nothing will be removed"
+
+# A window left off every display — dragged there, or stranded by an
+# unplugged monitor — comes back while the engine that knows where it
+# belongs is still running.
+if [ "$DRY" = 0 ] && [ -x "$BINDIR/weftctl" ]; then
+    say "Bringing back any window that is off screen"
+    "$BINDIR/weftctl" rescue >/dev/null 2>&1 || true
 fi
 
-echo "==> stopping weft service"
-if [ -x "$BINDIR/weftctl" ]; then
-    "$BINDIR/weftctl" service stop || true
-    "$BINDIR/weftctl" service uninstall || true
+say "Stopping the engine"
+if [ "$DRY" = 1 ]; then
+    /bin/launchctl print "gui/$(id -u)/com.weft.weftd" >/dev/null 2>&1 \
+        && echo "    would stop the com.weft.weftd login service"
 else
-    # Binary already gone: bootout directly.
-    /bin/launchctl bootout "gui/$(id -u)/com.weft.weftd" 2>/dev/null || true
-    rm -f "$HOME/Library/LaunchAgents/com.weft.weftd.plist"
+    /bin/launchctl bootout "gui/$(id -u)/com.weft.weftd" >/dev/null 2>&1 || true
+    killall weftd >/dev/null 2>&1 || true
+fi
+remove "$PLIST"
+
+say "Quitting the menu bar app"
+if [ "$DRY" = 0 ]; then
+    killall WeftBar weft-bar >/dev/null 2>&1 || true
 fi
 
-echo "==> killing processes"
-killall weftd weft-bar WeftBar 2>/dev/null || true
-sleep 1
-if pgrep -fl "weftd|weft-bar|WeftBar" >/dev/null 2>&1; then
-    echo "    leftover weft processes:"
-    pgrep -fl "weftd|weft-bar|WeftBar" || true
-else
-    echo "    no weft processes running"
+# Earlier versions paused other tools when they were installed, and recorded
+# exactly which ones. Put those back, and only those. A Mac weft never paused
+# anything on has no record, and nothing here runs. Done before the app goes:
+# the helper that knows how may live inside it.
+if [ -s "$STATE/displaced-agents" ]; then
+    for lib in "$HERE/lib-agents.sh" "$HERE/../scripts/lib-agents.sh"; do
+        [ -f "$lib" ] || continue
+        say "Restarting what weft paused when it was installed"
+        if [ "$DRY" = 1 ]; then
+            cut -f1 "$STATE/displaced-agents" | sed 's/^/    would restart /'
+        else
+            # shellcheck source=lib-agents.sh
+            . "$lib"
+            weft_restore_wms
+        fi
+        break
+    done
 fi
 
-echo "==> removing binaries from $BINDIR"
-rm -f "$BINDIR/weftd" "$BINDIR/weftctl" "$BINDIR/weft-bar"
+say "Removing the engine"
+remove "$BINDIR/weftd" "$BINDIR/weftctl" "$BINDIR/weft-bar" \
+    "$BINDIR/.weftd.new" "$BINDIR/.weftctl.new"
 
-echo "==> removing WeftBar.app"
-rm -rf "$APPDIR/WeftBar.app" "/Applications/WeftBar.app"
+say "Removing the app"
+remove ${WEFT_APP_PATH:+"$WEFT_APP_PATH"} "$HOME/Applications/WeftBar.app" "/Applications/WeftBar.app"
+
+say "Removing logs and leftovers"
+remove "$SOCKET" /tmp/weftd.out.log /tmp/weftd.err.log \
+    "$HOME/Library/Logs/weft-install.log" "$HOME/Library/Logs/weft-update.log" \
+    "$STATE"
 
 if [ "$PURGE" = 1 ]; then
-    echo "==> purging config"
-    rm -rf "$HOME/.config/weft"
-    # The signing keychain goes with a purge and only with a purge. It holds
-    # the identity every TCC grant is keyed to, so removing it on a plain
-    # uninstall would silently cost the user a full re-grant of all three
-    # permissions the next time they installed — for a reinstall that was
-    # meant to change nothing.
-    echo "==> removing the weft signing identity"
-    security delete-keychain "$HOME/Library/Keychains/weft-signing.keychain-db" 2>/dev/null \
-        && echo "    deleted weft-signing.keychain-db (a future install re-grants once)" \
-        || echo "    none present"
+    say "Removing your settings"
+    remove "$HOME/.config/weft"
+
+    # The identity every permission grant is keyed to. Only on a purge: keep
+    # it, and a reinstall keeps its permissions without asking again.
+    say "Removing weft's signing identity"
+    if [ -f "$KEYCHAIN" ]; then
+        if [ "$DRY" = 1 ]; then
+            echo "    would remove $KEYCHAIN"
+        elif security delete-keychain "$KEYCHAIN" >/dev/null 2>&1; then
+            echo "    removed $KEYCHAIN"
+        fi
+    fi
+
+    say "Removing weft from Privacy & Security"
+    for id in com.weft.weftd com.weft.bar; do
+        if [ "$DRY" = 1 ]; then
+            echo "    would reset the permissions granted to $id"
+        else
+            tccutil reset All "$id" >/dev/null 2>&1 || true
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "    if a weftd row is still listed in System Settings, select it and press −"
 else
-    echo "    kept ~/.config/weft (use --purge to delete)"
-    echo "    kept the weft signing identity, so a reinstall keeps its permissions"
+    echo "    kept your settings (~/.config/weft) and the signing identity, so a"
+    echo "    reinstall picks up where you left off — run with --purge to remove them too"
 fi
 
-# Restore the exact agents install.sh stopped, by label and plist path. See
-# lib-agents.sh for why `brew services start yabai` is the wrong thing: it
-# starts a different agent than the one that was running and leaves two
-# registered, both RunAtLoad.
-echo "==> starting yabai + skhd"
-weft_restore_wms
-sleep 1
-
-# Scripting addition: only needed if it was uninstalled for weft testing.
-if ! yabai --check-sa 2>/dev/null; then
-    echo "NOTE: yabai scripting addition not loaded."
-    echo "  If you uninstalled it earlier, restore with:"
-    echo "    sudo yabai --install-sa && yabai --load-sa"
-    echo "  (requires SIP with scripting-addition exception; then log out/in)"
-fi
-
-echo
-echo "==> verifying"
-pgrep -fl "yabai|skhd" || echo "WARNING: yabai/skhd do not appear to be running"
-if pgrep -fl "weftd|weft-bar" >/dev/null 2>&1; then
-    echo "WARNING: weft processes still alive (see above)"
-else
-    echo "weft fully uninstalled."
+if [ "$DRY" = 0 ]; then
+    if pgrep -x weftd >/dev/null 2>&1; then
+        echo "WARNING: weftd is still running"
+    else
+        say "Weft is removed"
+    fi
+    # Run from the app, nobody is watching this output: the app has quit.
+    if [ -n "${WEFT_APP_PATH:-}" ]; then
+        osascript -e 'display notification "Weft has been removed from this Mac." with title "Weft"' \
+            >/dev/null 2>&1 || true
+    fi
 fi

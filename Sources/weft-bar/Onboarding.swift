@@ -623,7 +623,7 @@ private struct InstallPage: View {
                 Bullet(
                     symbol: "power",
                     title: "Runs at login",
-                    text: "Registered as a login service. If yabai or skhd is running it is paused — uninstalling weft puts it back."
+                    text: "Starts by itself when you log in. Remove it any time with Uninstall Weft… in the menu bar."
                 )
             }
             .padding(.top, 30)

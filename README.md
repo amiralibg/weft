@@ -6,7 +6,7 @@
 
 <p align="center">
   A tiling window manager for macOS.<br>
-  Tiling and keybinds in one native daemon — no <code>yabai</code> + <code>skhd</code> pair, no shell out per keypress.
+  Fast, light, native tiling — with your keyboard shortcuts built in.
 </p>
 
 <p align="center">
@@ -19,9 +19,10 @@
 
 ## What it is
 
-Weft tiles your windows and owns your keybinds in a single process. A keypress
-is matched inside the daemon's event tap and dispatched in-process — there is no
-`fork` + `exec` of a CLI per binding, which is the design `skhd` is stuck with.
+Weft arranges your windows for you and runs your keyboard shortcuts, in one
+small native app. A shortcut is handled inside weft the instant you press it —
+nothing is launched per keypress — so focusing, moving, resizing and switching
+windows happens with no wait, and weft stays out of the way the rest of the time.
 
 It talks to the WindowServer through SkyLight and moves windows through the
 Accessibility API, so it manages **native macOS spaces** rather than inventing
@@ -108,11 +109,6 @@ Either way, if `~/.local/bin` is not on your `PATH`:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
-
-> **If you already run yabai or skhd**, the installer stops them first — two
-> window managers driving the same windows is a fight you get to watch. It
-> records exactly which launchd agents it stopped, and `uninstall.sh` puts those
-> back. Pass `WEFT_KEEP_WM=1` to skip that.
 
 ### About the released binaries
 
@@ -296,30 +292,6 @@ a window), validates the config with line numbers, and cross-checks it against
 reality: rules and keybinds pointing at desktops that do not exist, integrations
 switched on whose binary is not installed.
 
-## Coming from yabai + skhd
-
-```bash
-weftctl migrate           # print the translated weft.toml
-weftctl migrate --write   # write it to ~/.config/weft/weft.toml
-```
-
-`install.sh` runs this for you when it finds a `yabairc` or `skhdrc` and no
-existing weft config — your own keybinds are the only ones that will feel right,
-and seeding a demo config over them makes a working install look broken.
-
-## Instant space switching (optional)
-
-Without help, switching desktops uses the Mission Control `⌃N` shortcut, which
-covers desktops 1–9 and plays the system animation.
-
-Weft also speaks the Dock scripting-addition protocol. If you already have
-yabai's loaded (`sudo yabai --install-sa && yabai --load-sa`, which needs SIP
-configured with a scripting-addition exception), weft drives it and space
-switches become instant and animation-free — and sticky windows and
-non-activating window moves start working too.
-
-Entirely optional. `weftctl doctor` reports which capabilities you have.
-
 ## Integrations
 
 Both are off by default, because both drive a program weft does not install.
@@ -329,8 +301,9 @@ Both are off by default, because both drive a program weft does not install.
 | [JankyBorders](https://github.com/FelixKratz/JankyBorders) | Highlight around the focused window, recoloured per layout and per mode | `brew install FelixKratz/formulae/borders` |
 | [SketchyBar](https://github.com/FelixKratz/SketchyBar) | Fires `--trigger weft_event` with `WEFT_*` variables on layout, space and focus changes | `brew install FelixKratz/formulae/sketchybar` |
 
-Turn them on in `[integrations.*]`, or in Settings → Integrations, which tells
-you whether the binary is actually there.
+Weft draws its own window borders out of the box (Settings › Appearance), so
+JankyBorders is only for people who already use it. Turn either on in
+Settings › Advanced, which tells you whether the program is actually installed.
 
 ## Building from source
 
@@ -367,13 +340,33 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ## Uninstall
 
+**From the app:** click the weft icon in the menu bar → **Uninstall Weft…**, or
+Settings › Advanced → **Uninstall Weft…**. It asks first, and offers to remove
+your settings and permissions too. Your windows are left exactly where they are.
+
+**From a terminal**, with the script that ships inside the app:
+
 ```bash
-./scripts/uninstall.sh
+~/Applications/WeftBar.app/Contents/Resources/uninstall.sh            # keep your settings
+~/Applications/WeftBar.app/Contents/Resources/uninstall.sh --purge    # remove everything
+~/Applications/WeftBar.app/Contents/Resources/uninstall.sh --dry-run  # only list what it would remove
 ```
 
-Stops and removes the service, the binaries and the app, and restores whatever
-yabai/skhd launchd agents `install.sh` stopped — by the labels it actually
-recorded, not by guessing. Your `~/.config/weft` is left alone.
+(From a release archive or a clone it is `./uninstall.sh` or `./scripts/uninstall.sh`.)
+
+What it removes:
+
+| | Kept without `--purge` |
+|---|---|
+| The engine (`~/.local/bin/weftd`, `weftctl`) and its login service | |
+| WeftBar.app, wherever it is | |
+| Logs and temporary files | |
+| Your settings (`~/.config/weft`) | ✓ — a reinstall picks up where you left off |
+| Weft's signing identity | ✓ — a reinstall keeps its permissions |
+| Weft's rows in Privacy & Security | ✓ |
+
+macOS sometimes keeps a `weftd` row in Privacy & Security after a purge; select
+it and press **−** to clear it.
 
 ## Layout of the repo
 

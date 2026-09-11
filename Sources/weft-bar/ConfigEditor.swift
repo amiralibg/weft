@@ -1351,6 +1351,7 @@ private struct AdvancedPane: View {
                 }
                 Button(health.isRestarting ? "Restarting…" : "Restart Engine") { health.restart() }
                     .disabled(health.isRestarting)
+                Button("Uninstall Weft…", role: .destructive) { Uninstaller.confirmAndRun() }
             }
         }
         .formStyle(.grouped)
