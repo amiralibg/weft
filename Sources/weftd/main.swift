@@ -1752,7 +1752,15 @@ final class Daemon: @unchecked Sendable {
         case "request-screen-recording":
             // The same, for Screen Recording: without the request macOS never
             // lists weftd there, and the user has to add it with the + button.
-            let granted = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+            // Requested unconditionally, not `preflight || request`. The
+            // preflight answers out of a per-process cache and `screenRecording()`
+            // falls back to "can I read anyone else's window title", which a
+            // handful of windows answer yes to without the grant — so a
+            // short-circuit could skip the one call that registers weftd, and
+            // the row the user is being sent to flip would never exist. Asking
+            // when the answer is already yes costs one no-op call.
+            let asked = CGRequestScreenCaptureAccess()
+            let granted = asked || CGPreflightScreenCaptureAccess()
             return IPCResponse(ok: true, output: granted ? "Screen Recording already granted" : "requested Screen Recording")
         case "request-input-access":
             // Ask TCC to list weftd under Input Monitoring, on demand.

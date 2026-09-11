@@ -436,12 +436,26 @@ final class SetupModel: ObservableObject {
         // at, and nowhere else: asking is what makes macOS list weftd, and it
         // puts up macOS's own dialog. Fire and forget — the request is weftd's
         // to make (the grant is per binary), and the pane opens either way.
+        //
+        // Waited on, not fired and forgotten. `post` hands the request to a
+        // background queue and returns immediately, so the pane opened in the
+        // same breath — and System Settings renders that list once, on open,
+        // from whatever TCC holds at that instant. Losing the race meant the
+        // pane appeared with no weftd row in it, which is precisely the state
+        // the step exists to avoid: the user is told to flip a switch that is
+        // not there, and ends up adding the binary by hand with the + button.
+        // The reply costs a few milliseconds on a unix socket, and it means
+        // the row is registered before anything is drawn.
+        let command: String
         switch kind {
-        case .accessibility: BarIPC.post("request-accessibility")
-        case .inputMonitoring: BarIPC.post("request-input-access")
-        case .screenRecording: BarIPC.post("request-screen-recording")
+        case .accessibility: command = "request-accessibility"
+        case .inputMonitoring: command = "request-input-access"
+        case .screenRecording: command = "request-screen-recording"
         }
-        NSWorkspace.shared.open(url)
+        Task.detached {
+            _ = BarIPC.send(command)
+            await MainActor.run { NSWorkspace.shared.open(url) }
+        }
     }
 
     func revealBinary() {
