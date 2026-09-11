@@ -287,3 +287,33 @@ public struct PlatformCapability: Codable, Sendable {
         )
     }
 }
+
+extension SpaceControl {
+    /// How many ordinary desktops exist right now, across every display.
+    ///
+    /// Fullscreen and tiled spaces (type != 0) are not desktops: nothing can be
+    /// labelled onto them and no rule can send a window there. Used by
+    /// `weftctl migrate`, which has no daemon to ask, to avoid writing space
+    /// labels for desktops the user does not have — a label with no desktop
+    /// behind it resolves to nothing and every rule and keybind naming it fails
+    /// silently, which is the worst way for a generated config to be wrong.
+    public static func desktopCount() -> Int {
+        let cid = SLSMainConnectionID()
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return 0 }
+        var total = 0
+        for displayDict in raw {
+            for spaceDict in displayDict["Spaces"] as? [[String: Any]] ?? [] {
+                let rawID: UInt64
+                if let n = spaceDict["id64"] as? NSNumber {
+                    rawID = n.uint64Value
+                } else if let i = spaceDict["id"] as? NSNumber {
+                    rawID = i.uint64Value
+                } else {
+                    continue
+                }
+                if SLSSpaceGetType(cid, rawID) == 0 { total += 1 }
+            }
+        }
+        return total
+    }
+}

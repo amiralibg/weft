@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WeftPlatform
 
 public enum Migrate {
     /// skhd chord spelling → weft chord spelling. Hardware keycodes are
@@ -345,12 +346,37 @@ public enum Migrate {
         toml += "# changes. Off until you ask for it.\n"
         toml += "enabled = false\n\n"
 
+        // Labels are handed to desktops in order, so a yabai config that named
+        // ten of them on a Mac with four writes six labels that resolve to
+        // nothing. Every rule and keybind naming one of those fails silently —
+        // a window "sent" to a desktop that does not exist simply stays put —
+        // and the generated file gives no hint which half is live. Write the
+        // ones that have a desktop behind them; leave the rest in, commented,
+        // with the reason and what to do about it.
         if !spaces.isEmpty {
-            for s in spaces.sorted(by: { $0.index < $1.index }) {
+            let ordered = spaces.sorted(by: { $0.index < $1.index })
+            let desktops = SpaceControl.desktopCount()
+            let live = desktops > 0 ? Array(ordered.prefix(desktops)) : ordered
+            let orphaned = desktops > 0 ? Array(ordered.dropFirst(desktops)) : []
+            for s in live {
                 toml += "[[space]]\n"
                 toml += "label = \"\(s.label)\"\n"
                 if let l = s.layout {
                     toml += "layout = \"\(l)\"\n"
+                }
+                toml += "\n"
+            }
+            if !orphaned.isEmpty {
+                toml += "# Your yabai config named \(ordered.count) desktops; this Mac has \(desktops).\n"
+                toml += "# Labels are assigned to desktops in order, so the ones below have no\n"
+                toml += "# desktop behind them: rules and keybinds naming them would do nothing,\n"
+                toml += "# silently. Add desktops in Mission Control, then uncomment.\n"
+                for s in orphaned {
+                    toml += "# [[space]]\n"
+                    toml += "# label = \"\(s.label)\"\n"
+                    if let l = s.layout {
+                        toml += "# layout = \"\(l)\"\n"
+                    }
                 }
                 toml += "\n"
             }
