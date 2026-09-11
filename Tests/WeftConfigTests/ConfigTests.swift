@@ -120,6 +120,69 @@ import Testing
     #expect(matchRules(ordered, app: "Ghostty", bundleID: nil, title: "")?.space == "first")
 }
 
+@Test func aFloatRuleStillPlacesItsWindow() {
+    // `manage = false` and `space = "main"` on one rule are two instructions,
+    // not one. The space half used to be dropped on the floor: the window was
+    // marked unmanaged and the sweep moved on before the move was considered,
+    // so a floating window declared onto a desktop stayed wherever it opened
+    // and could not be sent anywhere either.
+    let outcome = matchRules(
+        [Rule(app: "^WireGuard$", space: "main", manage: false)],
+        app: "WireGuard", bundleID: nil, title: ""
+    )
+    #expect(outcome == RuleOutcome(space: "main", manage: false))
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: true, alreadyAttempted: false)
+            == .move("main")
+    )
+}
+
+@Test func anUnclassifiedWindowIsNotCarriedBetweenDesktops() {
+    let outcome = RuleOutcome(space: "web", manage: true)
+    // AX has not answered yet: wait for it rather than guess. Guessing "yes"
+    // is how an app's sheet or popover gets moved to a desktop its parent is
+    // not on, which leaves the parent rendering but deaf to clicks and
+    // scrolls — the tiling path can afford that guess, this one cannot.
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: nil, alreadyAttempted: false)
+            == .wait
+    )
+    // A panel or popover is never carried anywhere.
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: false, alreadyAttempted: false)
+            == .skip
+    )
+    // A real window is.
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: true, alreadyAttempted: false)
+            == .move("web")
+    )
+}
+
+@Test func waitingDoesNotBurnTheOneMoveAWindowGets() {
+    // `.wait` must not record an attempt, or the reclassify sweep that exists
+    // to answer the question would find the window already spent.
+    let outcome = RuleOutcome(space: "web", manage: true)
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: nil, alreadyAttempted: true)
+            == .skip
+    )
+    #expect(
+        spaceMoveDecision(outcome: outcome, isStandardWindow: true, alreadyAttempted: true)
+            == .skip
+    )
+    // No space in the rule is nothing to decide.
+    #expect(
+        spaceMoveDecision(
+            outcome: RuleOutcome(space: nil, manage: true),
+            isStandardWindow: true, alreadyAttempted: false
+        ) == .skip
+    )
+    #expect(
+        spaceMoveDecision(outcome: nil, isStandardWindow: true, alreadyAttempted: false) == .skip
+    )
+}
+
 @Test func parsesSpaceLayoutAndReserve() throws {
     let cfg = try loadConfig("""
         [general]

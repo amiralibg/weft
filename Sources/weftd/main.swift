@@ -1054,20 +1054,45 @@ final class Daemon: @unchecked Sendable {
                     continue
                 }
                 if let outcome = matchRules(cfg.rules, app: w.app, bundleID: bundle, title: w.title) {
-                    if !outcome.manage {
-                        unmanagedNow.insert(w.id)
-                        continue
-                    }
-                    // Resolve against the in-progress labels (just seeded
-                    // above), not the still-unwritten global — otherwise
-                    // first-sync moves always miss with "unknown space".
-                    if let target = outcome.space, !self.spaceMoveAttempts.contains(w.id) {
+                    // The space half of a rule is independent of the tiling
+                    // half, and is read first: `manage = false` says "do not
+                    // lay this window out", not "leave it wherever it opened".
+                    // A float with `space = "main"` used to be dropped here
+                    // before the move was ever considered, so the rule did
+                    // half of what it said and said nothing about the rest.
+                    //
+                    // Only windows AX has positively classified as standard
+                    // are moved. A cross-space move is the one thing in a
+                    // sweep that does not correct itself next time round: get
+                    // it wrong and the window is on another desktop, and an
+                    // app whose sheet or popover was carried off alone stops
+                    // routing clicks and scrolls to the parent it left behind.
+                    // `nil` here is "AX has not answered yet" — the 1.1s
+                    // reclassify sweep is already scheduled, and leaving the
+                    // window out of `spaceMoveAttempts` lets that sweep do the
+                    // move once the answer is in. Tiling can afford to guess
+                    // (§S0); this cannot.
+                    switch spaceMoveDecision(
+                        outcome: outcome,
+                        isStandardWindow: self.standardWindow[w.id],
+                        alreadyAttempted: self.spaceMoveAttempts.contains(w.id)
+                    ) {
+                    case .move(let target):
                         self.spaceMoveAttempts.insert(w.id)
+                        // Resolve against the in-progress labels (just seeded
+                        // above), not the still-unwritten global — otherwise
+                        // first-sync moves always miss with "unknown space".
                         if let sid = sp.resolveSpace(target) {
                             pendingMoves.append(RuleMove(wid: w.id, app: w.app, sid: sid, label: target))
                         } else {
                             fputs("weftd: rule wants '\(w.app)' (\(w.id)) on unknown space '\(target)'\n", stderr)
                         }
+                    case .wait, .skip:
+                        break
+                    }
+                    if !outcome.manage {
+                        unmanagedNow.insert(w.id)
+                        continue
                     }
                 }
                 if self.strikes[w.id, default: 0] >= 2 {

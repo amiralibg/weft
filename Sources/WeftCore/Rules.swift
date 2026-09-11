@@ -66,3 +66,45 @@ public func matchRules(
     }
     return RuleOutcome(space: rule.space, manage: rule.manage ?? true)
 }
+
+/// What a sweep should do about the `space` half of a matched rule.
+///
+/// Split out of the sweep so the decision can be tested on its own: it is the
+/// one part of window placement that does not correct itself on the next pass.
+/// Tiling writes frames every time round the loop, so a wrong guess costs a
+/// frame; a cross-space move happens once and leaves the window on another
+/// desktop, and an app whose sheet or popover was carried off alone stops
+/// routing clicks and scrolls to the parent it left behind.
+public enum SpaceMoveDecision: Sendable, Equatable {
+    /// Move it now.
+    case move(String)
+    /// AX has not classified the window yet. Do not move, and do not record an
+    /// attempt — the reclassify sweep asks again once the answer is in.
+    case wait
+    /// Nothing to do: no space in the rule, already tried, or not a window a
+    /// rule may carry between desktops.
+    case skip
+}
+
+/// - Parameters:
+///   - outcome: the matched rule, or nil when none matched.
+///   - isStandardWindow: AX's verdict — `true` a real window, `false` a panel
+///     or popover, `nil` not answered yet.
+///   - alreadyAttempted: whether this window has had its one move this launch.
+///
+/// `manage` is deliberately not consulted. The two halves of a rule are
+/// independent: `manage = false` says "do not lay this window out", not
+/// "leave it on whatever desktop it opened on", and a float with
+/// `space = "main"` used to have the space half silently dropped.
+public func spaceMoveDecision(
+    outcome: RuleOutcome?,
+    isStandardWindow: Bool?,
+    alreadyAttempted: Bool
+) -> SpaceMoveDecision {
+    guard let target = outcome?.space, !alreadyAttempted else { return .skip }
+    switch isStandardWindow {
+    case .some(true): return .move(target)
+    case .some(false): return .skip
+    case nil: return .wait
+    }
+}
