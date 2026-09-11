@@ -805,6 +805,12 @@ public final class AXApplier: @unchecked Sendable {
         return name
     }
 
+    /// Whether weft holds an AX element for this window — i.e. whether a
+    /// frame write to it can be more than a WindowServer-only move.
+    public func isBound(_ wid: WindowID) -> Bool {
+        lock.withLock { windowElements[wid] != nil }
+    }
+
     /// The app's AX element, created once per pid with the 0.15 s ceiling
     /// every cross-process call here relies on.
     private func appElement(for pid: Int32) -> AXUIElement {

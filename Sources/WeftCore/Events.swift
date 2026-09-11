@@ -8,7 +8,10 @@
 // format stays stable for future clients: one `kind`, optional fields.
 
 public enum ObserverEvent: Sendable, Equatable {
-    case windowCreated(pid: Int32)
+    /// `wid` is the new window when the notification could name it. It usually
+    /// can, and knowing which window to wait for is what lets the daemon stop
+    /// sweeping the moment that window lands rather than on a fixed timer.
+    case windowCreated(pid: Int32, wid: WindowID?)
     case windowDestroyed(WindowID)
     case windowMoved(WindowID)
     case windowResized(WindowID)

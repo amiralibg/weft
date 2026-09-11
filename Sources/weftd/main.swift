@@ -1221,11 +1221,90 @@ final class Daemon: @unchecked Sendable {
         syncQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
+    // MARK: - Creation ladder
+
+    /// Windows a creation notification named that have not landed yet, and
+    /// when each was announced. Touched only from `syncQueue`, like the other
+    /// sweep timers.
+    private var awaitedWindows: [WindowID: DispatchTime] = [:]
+    private var pendingLadder: DispatchWorkItem?
+    /// When the ladder sweeps, in ms after the newest creation.
+    ///
+    /// This replaces a fixed pair — one sweep at 20 ms and one at 300 ms — for
+    /// the case where the notification names the window. A newborn window
+    /// usually has no space membership and no AX element at 20 ms, so in
+    /// practice it landed on the 300 ms sweep every time: the visible beat
+    /// before a new window takes its slot. Sweeping on a doubling schedule and
+    /// stopping the moment the window is tiled and bound lands a native app
+    /// in one or two rungs; a slow Electron launch walks further up and ends
+    /// no worse than before. The last rung is past the old 300 ms on purpose
+    /// — it is the heal for a window that took its time.
+    private static let creationLadderMs: [Int] = [16, 32, 64, 128, 256, 512]
+
+    private func awaitWindow(_ wid: WindowID) {
+        if awaitedWindows[wid] == nil { awaitedWindows[wid] = .now() }
+        // Restart from the fastest rung: the newest window deserves the quick
+        // sweeps, and anything older still waiting is checked on each of them.
+        runLadder(rung: 0, origin: .now())
+    }
+
+    private func runLadder(rung: Int, origin: DispatchTime) {
+        pendingLadder?.cancel()
+        guard rung < Self.creationLadderMs.count else {
+            // Out of rungs. Record what never settled so the trace says so,
+            // and leave those windows to the ordinary sweeps.
+            for (wid, t0) in awaitedWindows {
+                Trace.record("create.settle", ms: Self.ms(since: t0), detail: "\(wid) did not settle")
+            }
+            awaitedWindows.removeAll()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.syncFromSnapshot()
+            self.settleAwaited(rung: rung)
+            if !self.awaitedWindows.isEmpty {
+                self.runLadder(rung: rung + 1, origin: origin)
+            }
+        }
+        pendingLadder = work
+        syncQueue.asyncAfter(
+            deadline: origin + .milliseconds(Self.creationLadderMs[rung]), execute: work
+        )
+    }
+
+    /// Drop every awaited window that has landed: in a layout with an AX
+    /// element bound (so its frame write is real), or judged unmanaged (a
+    /// rule, a dialog, a panel — landed, just not tiled).
+    private func settleAwaited(rung: Int) {
+        guard !awaitedWindows.isEmpty else { return }
+        let sp = readSpaces()
+        let unmanaged = core.sync { self.unmanaged }
+        for (wid, t0) in awaitedWindows {
+            let tiled = applier.isBound(wid)
+                && sp.layouts.values.contains { $0.windows.contains(wid) }
+            guard tiled || unmanaged.contains(wid) else { continue }
+            awaitedWindows.removeValue(forKey: wid)
+            Trace.record(
+                "create.settle", ms: Self.ms(since: t0),
+                detail: "\(wid) after \(rung + 1) sweep(s)\(tiled ? "" : ", unmanaged")"
+            )
+        }
+    }
+
+    private static func ms(since t0: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds &- t0.uptimeNanoseconds) / 1_000_000
+    }
+
     private func handleObserverEvent(_ event: ObserverEvent) {
         switch event {
-        case .windowCreated(let pid):
-            bus.emit(DaemonEvent(kind: .windowCreated, app: "pid=\(pid)"))
-            scheduleSync()
+        case .windowCreated(let pid, let wid):
+            bus.emit(DaemonEvent(kind: .windowCreated, window: wid, app: "pid=\(pid)"))
+            if let wid {
+                awaitWindow(wid)
+            } else {
+                scheduleSync()
+            }
         case .windowDestroyed(let wid):
             bus.emit(DaemonEvent(kind: .windowDestroyed, window: wid))
             // Drop the window from every layout immediately so the survivors
@@ -2660,6 +2739,14 @@ final class Daemon: @unchecked Sendable {
         }
         core.sync {
             for wid in result.failedIDs {
+                // A window with no AX element is not refusing anything — it is
+                // not reachable *yet*. A newborn window spends its first few
+                // sweeps like that, and the creation ladder sweeps it several
+                // times in that window, so counting these would auto-float a
+                // perfectly ordinary new window before it ever had a chance.
+                // One that stays unreachable is judged by the unbindable
+                // timer in the sweep instead, which is the check built for it.
+                if case .noAXElement? = result.failureReasons[wid] { continue }
                 let n = (self.strikes[wid] ?? 0) + 1
                 self.strikes[wid] = n
                 if n == 2 {

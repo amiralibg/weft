@@ -57,7 +57,7 @@ private func axCallback(
             // Deminimize: element is valid again — treat like a creation.
             var pid: pid_t = 0
             AXUIElementGetPid(element, &pid)
-            sinkHolder.fire(.windowCreated(pid: pid))
+            sinkHolder.fire(.windowCreated(pid: pid, wid: wid))
             return
         }
         if let event {
@@ -71,7 +71,12 @@ private func axCallback(
     case created:
         var pid: pid_t = 0
         AXUIElementGetPid(element, &pid)
-        sinkHolder.fire(.windowCreated(pid: pid))
+        // The element *is* the new window. Naming it costs one local call and
+        // lets the daemon wait for this window specifically; 0 happens for a
+        // window still being assembled, and falls back to a plain sweep.
+        var wid: UInt32 = 0
+        let named = _AXUIElementGetWindow(element, &wid) == .success && wid != 0
+        sinkHolder.fire(.windowCreated(pid: pid, wid: named ? wid : nil))
     case focusedChanged:
         var wid: UInt32 = 0
         let ok = _AXUIElementGetWindow(element, &wid) == .success && wid != 0
