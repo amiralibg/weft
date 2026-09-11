@@ -46,7 +46,12 @@ final class BordersBridge: @unchecked Sendable {
                 radius: config.radius ?? 10,
                 activeColor: BorderRenderer.parseColor(config.resolvedActiveColor) ?? 0xff7a_a2f7,
                 inactiveColor: BorderRenderer.parseColor(config.resolvedInactiveColor) ?? 0x4041_4868,
-                showInactive: config.showInactive
+                showInactive: config.showInactive,
+                // No radius in the config means "match the window": each
+                // border follows its own window's corners, and 10 is only
+                // the fallback for a window the WindowServer says nothing
+                // about. A number in the config is a deliberate override.
+                autoRadius: config.radius == nil
             ))
         }
         lock.withLock {

@@ -1924,9 +1924,15 @@ private struct IntegrationsTab: View {
                             store.markDirty()
                         }
                     }
-                    Row(label: "Corner radius", help: "Match your windows' own corners. macOS rounds them by about 10px.") {
-                        DecimalField(value: $store.bordersRadius, range: 0...40, unit: "px") {
-                            store.markDirty()
+                    Row(label: "Corners", help: "macOS rounds windows differently by kind. Matching reads each window's own corners.") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("Match each window's own corners", isOn: $store.bordersAutoRadius)
+                                .onChange(of: store.bordersAutoRadius) { _, _ in store.markDirty() }
+                            if !store.bordersAutoRadius {
+                                DecimalField(value: $store.bordersRadius, range: 0...40, unit: "px") {
+                                    store.markDirty()
+                                }
+                            }
                         }
                     }
                     Row(label: "Unfocused windows", help: "Outline every window in the layout, not just the focused one.") {

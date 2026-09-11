@@ -27,6 +27,10 @@ public struct Container: Sendable, Equatable {
     public var ratios: [Double]
     /// Stack: index of the visible child. Clamped to children on every op.
     public var active: Int
+    /// Stack: what it replaced, so unstacking puts that back instead of
+    /// inventing an equal side-by-side split. Nil for splits, and for a
+    /// stack weft did not build (it then unstacks side by side).
+    public var origin: StackOrigin?
 
     public init(layout: ContainerLayout, children: [Node], ratios: [Double], active: Int = 0) {
         self.layout = layout
@@ -42,6 +46,32 @@ public struct Container: Sendable, Equatable {
         let n = max(children.count, 1)
         self.ratios = Array(repeating: 1.0 / Double(n), count: children.count)
         self.active = min(max(active, 0), max(children.count - 1, 0))
+    }
+}
+
+/// What a stack replaced when it was made.
+///
+/// Unstacking used to turn every stack into an equal side-by-side split,
+/// whatever it had been: a top/bottom pair came back left/right, a 70/30
+/// split came back 50/50, and a neighbour pulled in with `stack split` stayed
+/// in the stack's slot instead of going home. Recording the arrangement at
+/// the moment of stacking is the only way to know what "back" means.
+public struct StackOrigin: Sendable, Equatable {
+    public enum Scope: Sendable, Equatable {
+        /// The stack took the place of this subtree (`stack toggle`,
+        /// `stack all`): restore it in the stack's slot.
+        case subtree
+        /// The stack pulled a window in from elsewhere (`stack split`,
+        /// `stack move`): only the whole tree as it was puts that window back.
+        case root
+    }
+
+    public var scope: Scope
+    public var node: Node
+
+    public init(scope: Scope, node: Node) {
+        self.scope = scope
+        self.node = node
     }
 }
 
@@ -445,7 +475,9 @@ extension Tree {
         guard let path = pathTo(root, target: focused) else { return self }
         if path.isEmpty {
             var copy = self
-            copy.root = .container(Container(layout: .stack, children: [.window(focused)], active: 0))
+            var stack = Container(layout: .stack, children: [.window(focused)], active: 0)
+            stack.origin = StackOrigin(scope: .subtree, node: root)
+            copy.root = .container(stack)
             return copy.focusing(focused)
         }
         let parentPath = Array(path.dropLast())
@@ -453,6 +485,7 @@ extension Tree {
               case .container(var c) = parent,
               c.layout != .stack
         else { return self }
+        c.origin = StackOrigin(scope: .subtree, node: parent)
         c.layout = .stack
         c.active = parentPath.isEmpty ? 0 : path.last ?? 0
         var copy = self
@@ -471,14 +504,13 @@ extension Tree {
         if let sp = stackPath(in: r, target: focused) {
             tree.root = appendToStack(r, target: focused, newID: neighbor, at: sp)
         } else {
-            tree.root = replaceLeaf(
-                r, target: focused,
-                with: .container(Container(
-                    layout: .stack,
-                    children: [.window(focused), .window(neighbor)],
-                    active: 0
-                ))
+            var stack = Container(
+                layout: .stack,
+                children: [.window(focused), .window(neighbor)],
+                active: 0
             )
+            if let original = root { stack.origin = StackOrigin(scope: .root, node: original) }
+            tree.root = replaceLeaf(r, target: focused, with: .container(stack))
         }
         return tree.focusing(focused)
     }
@@ -497,16 +529,51 @@ extension Tree {
         return focusing(member)
     }
 
-    /// Convert the focused stack back to a vertical split. Not in a
-    /// stack → no-op.
+    /// Undo the focused stack: put back what it replaced. Not in a stack →
+    /// no-op.
+    ///
+    /// Exact when the stack still holds the windows it was made from — the
+    /// recorded arrangement comes back, proportions and all. When windows
+    /// have joined or left since, the recording describes a different set,
+    /// so the stack keeps the *shape* it replaced (top/bottom stays
+    /// top/bottom) with even proportions. A stack with no record unstacks
+    /// side by side, as it always did.
+    ///
+    /// A stack that pulled a window in from elsewhere (`stack split`,
+    /// `stack move`) restores the whole tree as it was, since that is the
+    /// only arrangement that has the window's old slot in it — which means
+    /// resizes made elsewhere while it was stacked go back too.
     public func unstacking() -> Tree {
         guard let root, let focused = focus,
               let sp = stackPath(in: root, target: focused),
               let node = nodeAt(root, path: sp),
               case .container(var c) = node
         else { return self }
-        c.layout = .splitV
-        c.ratios = Array(repeating: 1.0 / Double(max(c.children.count, 1)), count: c.children.count)
+        if let origin = c.origin {
+            let members = Set(node.windows)
+            switch origin.scope {
+            case .subtree where Set(origin.node.windows) == members:
+                var copy = self
+                copy.root = replacing(root, at: sp, with: origin.node)
+                return copy.focusing(focused)
+            case .root where Set(origin.node.windows) == Set(root.windows):
+                var copy = self
+                copy.root = origin.node
+                return copy.focusing(focused)
+            default:
+                break
+            }
+        }
+        if let origin = c.origin, case .container(let was) = origin.node, was.layout != .stack {
+            c.layout = was.layout
+            c.ratios = was.ratios.count == c.children.count
+                ? was.ratios
+                : Array(repeating: 1.0 / Double(max(c.children.count, 1)), count: c.children.count)
+        } else {
+            c.layout = .splitV
+            c.ratios = Array(repeating: 1.0 / Double(max(c.children.count, 1)), count: c.children.count)
+        }
+        c.origin = nil
         var copy = self
         copy.root = replacing(root, at: sp, with: .container(c))
         return copy.focusing(focused)
@@ -522,11 +589,13 @@ extension Tree {
         let ids = root.windows
         guard ids.count > 1 else { return self }
         var copy = self
-        copy.root = .container(Container(
+        var stack = Container(
             layout: .stack,
             children: ids.map { .window($0) },
             active: ids.firstIndex(of: focused) ?? 0
-        ))
+        )
+        stack.origin = StackOrigin(scope: .subtree, node: root)
+        copy.root = .container(stack)
         copy.fullscreen = nil
         return copy.focusing(focused)
     }
@@ -543,14 +612,13 @@ extension Tree {
         if let sp = stackPath(in: r, target: neighbor) {
             tree.root = appendToStack(r, target: neighbor, newID: focused, at: sp)
         } else {
-            tree.root = replaceLeaf(
-                r, target: neighbor,
-                with: .container(Container(
-                    layout: .stack,
-                    children: [.window(neighbor), .window(focused)],
-                    active: 1
-                ))
+            var stack = Container(
+                layout: .stack,
+                children: [.window(neighbor), .window(focused)],
+                active: 1
             )
+            if let original = root { stack.origin = StackOrigin(scope: .root, node: original) }
+            tree.root = replaceLeaf(r, target: neighbor, with: .container(stack))
         }
         return tree.focusing(focused)
     }

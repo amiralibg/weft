@@ -129,6 +129,7 @@ public enum WorldReader {
         let app: String
         let title: String
         let pid: Int32
+        let onScreen: Bool
     }
 
     private static let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -175,7 +176,8 @@ public enum WorldReader {
                 wid: wid,
                 app: owner,
                 title: w[kCGWindowName as String] as? String ?? "",
-                pid: pid
+                pid: pid,
+                onScreen: w[kCGWindowIsOnscreen as String] as? Bool ?? false
             ))
         }
 
@@ -197,7 +199,8 @@ public enum WorldReader {
                 pid: c.pid,
                 spaces: spaceIDs,
                 frame: Frame(x: frame.minX, y: frame.minY, width: frame.width, height: frame.height),
-                bound: boundWids.contains(c.wid)
+                bound: boundWids.contains(c.wid),
+                onScreen: c.onScreen
             ))
         }
         return out.sorted { $0.id < $1.id }
@@ -246,6 +249,20 @@ public enum WorldReader {
     static func windowBounds(cid: SLConnectionID, wid: WindowID) -> CGRect? {
         var rect = CGRect.zero
         return SLSGetWindowBounds(cid, wid, &rect) == 0 ? rect : nil
+    }
+
+    /// Every window the WindowServer has ordered in, on any display. One
+    /// call, no app IPC — cheap enough to run on every focus change, which is
+    /// the one event a window that is closed-but-kept reliably produces.
+    public static func onScreenWindowIDs() -> Set<WindowID> {
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+        var out = Set<WindowID>()
+        for w in info {
+            if let n = w[kCGWindowNumber as String] as? Int, n != 0 { out.insert(WindowID(n)) }
+        }
+        return out
     }
 
     /// Single-window SLS frame read for echo-suppression checks (µs, no app IPC).

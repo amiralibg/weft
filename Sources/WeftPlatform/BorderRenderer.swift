@@ -41,19 +41,25 @@ public final class BorderRenderer: @unchecked Sendable {
         public var inactiveColor: UInt32
         /// Draw anything at all around unfocused windows.
         public var showInactive: Bool
+        /// Follow each window's own corner radius (`WindowCorners`), using
+        /// `radius` only where the WindowServer does not say. Off means one
+        /// fixed radius for every window — what an explicit `radius` asks for.
+        public var autoRadius: Bool
 
         public init(
             width: Double = 4,
             radius: Double = 10,
             activeColor: UInt32 = 0xff7a_a2f7,
             inactiveColor: UInt32 = 0x4041_4868,
-            showInactive: Bool = true
+            showInactive: Bool = true,
+            autoRadius: Bool = false
         ) {
             self.width = width
             self.radius = radius
             self.activeColor = activeColor
             self.inactiveColor = inactiveColor
             self.showInactive = showInactive
+            self.autoRadius = autoRadius
         }
     }
 
@@ -69,6 +75,9 @@ public final class BorderRenderer: @unchecked Sendable {
         var context: CGContext?
         /// Set on the front member of a stack: what the pips say.
         var stack: StackPosition?
+        /// The corner radius this border follows — the window's own, when
+        /// `Style.autoRadius` is on and the WindowServer answered.
+        var cornerRadius: Double
     }
 
     private let cid: SLConnectionID
@@ -254,6 +263,9 @@ public final class BorderRenderer: @unchecked Sendable {
             // A resized window gets a new backing store, so the old context
             // draws into nothing.
             overlay.context = nil
+            // And may have changed kind — a toolbar shown or hidden changes
+            // how macOS rounds it. One WindowServer read, on resize only.
+            overlay.cornerRadius = resolveRadius(wid, style: style)
         } else if !samePlace {
             var origin = frame.origin
             SLSMoveWindow(cid, overlay.wid, &origin)
@@ -278,6 +290,7 @@ public final class BorderRenderer: @unchecked Sendable {
 
     private func create(_ wid: WindowID, target: Frame, color: UInt32, style: Style, scale: Double) {
         let frame = Self.overlayFrame(for: target, style: style)
+        let corner = resolveRadius(wid, style: style)
         var overlayWID: SLWindowID = 0
         guard weft_border_window_create(cid, frame, &overlayWID) == 0, overlayWID != 0 else {
             return
@@ -310,7 +323,8 @@ public final class BorderRenderer: @unchecked Sendable {
             overlays[wid] = Overlay(
                 wid: overlayWID, target: target, color: color,
                 scale: scale, style: style, context: nil,
-                stack: stackPositions[wid]
+                stack: stackPositions[wid],
+                cornerRadius: corner
             )
         }
         draw(wid)
@@ -397,7 +411,7 @@ public final class BorderRenderer: @unchecked Sendable {
         // the edge to `width` points beyond it and covers nothing.
         let inset = style.width / 2
         let rect = bounds.insetBy(dx: inset, dy: inset)
-        let radius = max(0, style.radius + inset)
+        let radius = max(0, overlay.cornerRadius + inset)
         let path = CGPath(
             roundedRect: rect,
             cornerWidth: min(radius, rect.width / 2),
@@ -442,6 +456,12 @@ public final class BorderRenderer: @unchecked Sendable {
             context.fillEllipse(in: CGRect(x: x, y: cy - diameter / 2, width: diameter, height: diameter))
             x += diameter + gap
         }
+    }
+
+    /// The radius to draw for this window: its own, or the configured one.
+    private func resolveRadius(_ wid: WindowID, style: Style) -> Double {
+        guard style.autoRadius, let own = WindowCorners.radius(of: wid) else { return style.radius }
+        return own
     }
 
     // MARK: - Geometry

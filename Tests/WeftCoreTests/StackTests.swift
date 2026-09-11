@@ -290,3 +290,60 @@ private let peekConfig = TilingConfig(
     let lone = Tree().inserting(1).focusing(1).togglingStack()
     #expect(stackPositions(in: lone).isEmpty)
 }
+
+// MARK: - Unstack puts things back
+
+@Test func unstackRestoresATopBottomSplitAndItsProportions() {
+    // 1 on top, 2 below, 70/30 — the case that used to come back side by side.
+    var t = Tree(
+        root: .container(Container(layout: .splitH, children: [.window(1), .window(2)], ratios: [0.7, 0.3])),
+        focus: 1
+    )
+    let before = layout(t, in: stackScreen, config: .none)
+    t = t.togglingStack()
+    let stacked = layout(t, in: stackScreen, config: .none)
+    #expect(stacked[1] == stacked[2])
+    let back = t.togglingStack()
+    #expect(layout(back, in: stackScreen, config: .none) == before)
+    #expect(back.focus == 1)
+}
+
+@Test func unstackAfterStackSplitPutsTheNeighbourBackInItsOwnSlot() {
+    let base = tree(1, 2, 3).focusing(1)
+    let before = layout(base, in: stackScreen, config: .none)
+    let stacked = base.stackSplitting(towards: .east, frames: before)
+    #expect(stacked != base)
+    let back = stacked.unstacking()
+    #expect(layout(back, in: stackScreen, config: .none) == before)
+}
+
+@Test func unstackAfterStackMovePutsTheWindowBack() {
+    let base = tree(1, 2).focusing(1)
+    let before = layout(base, in: stackScreen, config: .none)
+    let moved = base.movingIntoStack(towards: .east, frames: before)
+    #expect(layout(moved.unstacking(), in: stackScreen, config: .none) == before)
+}
+
+@Test func stackAllTogglesBackToTheWholeOriginalLayout() {
+    let base = tree(1, 2, 3, 4).focusing(3)
+    let before = layout(base, in: stackScreen, config: .none)
+    let back = base.stackingAll().stackingAll()
+    #expect(layout(back, in: stackScreen, config: .none) == before)
+    #expect(back.focus == 3)
+}
+
+@Test func unstackAfterTheMembersChangedKeepsTheOldShape() {
+    var t = Tree(
+        root: .container(Container(layout: .splitH, children: [.window(1), .window(2)])),
+        focus: 1
+    )
+    t = t.togglingStack()
+    t = t.inserting(3)  // joins the focused stack: the record no longer matches
+    let back = t.unstacking()
+    guard case .container(let c)? = back.root else {
+        Issue.record("expected a container root")
+        return
+    }
+    #expect(c.layout == .splitH)
+    #expect(back.windows.sorted() == [1, 2, 3])
+}

@@ -79,10 +79,14 @@ public struct WindowInfo: Codable, Sendable, Equatable {
     /// been captured yet (space never visited since launch). Layout can be
     /// *computed* but not *applied* until first space_changed.
     public var bound: Bool
+    /// Whether the WindowServer has it ordered in. Nil = not read (treated as
+    /// on screen). Only meaningful for a window on a desktop that is showing:
+    /// everything on the other desktops is "off screen" too.
+    public var onScreen: Bool?
 
     public init(
         id: WindowID, app: String, title: String, pid: Int32,
-        spaces: [SpaceID], frame: Frame, bound: Bool
+        spaces: [SpaceID], frame: Frame, bound: Bool, onScreen: Bool? = nil
     ) {
         self.id = id
         self.app = app
@@ -91,6 +95,21 @@ public struct WindowInfo: Codable, Sendable, Equatable {
         self.spaces = spaces
         self.frame = frame
         self.bound = bound
+        self.onScreen = onScreen
+    }
+
+    /// Whether weft may give this window a slot.
+    ///
+    /// Closing a window does not always destroy it. Ghostty, and any app
+    /// that keeps running with no windows, orders the window out and keeps
+    /// it — so the WindowServer still lists it on the current desktop, no
+    /// "destroyed" notification ever arrives, and weft went on tiling a
+    /// window nobody could see: a hole where the survivors should have grown.
+    /// A window on a showing desktop that is not on screen is not a tile. On
+    /// a desktop nobody is looking at, "not on screen" says nothing, so those
+    /// keep their slots.
+    public func isTileable(visibleSpaces: Set<SpaceID>) -> Bool {
+        (onScreen ?? true) || Set(spaces).isDisjoint(with: visibleSpaces)
     }
 }
 

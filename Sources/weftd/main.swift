@@ -899,6 +899,7 @@ final class Daemon: @unchecked Sendable {
         let liveSids = Set(world.spaces.map { $0.id })
         let allSids = world.displays.flatMap { $0.spaces.filter(liveSids.contains) }
         let worldWids = Set(world.windows.map { $0.id })
+        let screenLocked = SystemChecks.screenLocked()
         let worldPids = Set(world.windows.map { $0.pid })
         // Bundle ids come from NSRunningApplication; resolve them before
         // taking the core queue so a slow lookup is not everyone's problem.
@@ -1026,10 +1027,15 @@ final class Daemon: @unchecked Sendable {
             self.spaceMoveAttempts = self.spaceMoveAttempts.intersection(worldWids)
             var bySpace: [SpaceID: [WindowID]] = [:]
             var unmanagedNow: Set<WindowID> = []
+            let showing = Set(sp.currentByDisplay.values)
             for w in world.windows {
                 self.pids[w.id] = w.pid
                 self.appNames[w.id] = w.app
                 self.windowTitles[w.id] = w.title
+                // Closed but kept: on a showing desktop, not on screen. Not
+                // a tile (`isTileable`), and not unmanaged either — if the
+                // app shows it again, the next sweep gives it a slot.
+                if !screenLocked, !w.isTileable(visibleSpaces: showing) { continue }
                 // Not a standard window (a menu-bar extra's panel, a
                 // system popover): never tile it, never let it take a slot.
                 // Unclassified windows fall through and are managed — a cold
@@ -1357,6 +1363,34 @@ final class Daemon: @unchecked Sendable {
         Double(DispatchTime.now().uptimeNanoseconds &- t0.uptimeNanoseconds) / 1_000_000
     }
 
+    /// Give back the slots of windows that were closed without being
+    /// destroyed.
+    ///
+    /// An app that keeps running after its window closes — Ghostty, most
+    /// Electron apps — orders the window out and keeps it, so no destroyed
+    /// notification arrives and the survivors never grew into the gap until
+    /// some later sweep happened by. One on-screen list per focus change,
+    /// compared with what the visible layouts hold, catches it the moment
+    /// focus moves: the same instant refill a real destroy gets.
+    private func evictOrderedOut() {
+        guard !SystemChecks.screenLocked() else { return }
+        let sp = readSpaces()
+        let visible = sp.visibleSpaces
+        let held = visible.flatMap { sp.layouts[$0]?.windows ?? [] }
+        guard !held.isEmpty else { return }
+        let t = Trace.start("focus.visibility")
+        let onScreen = WorldReader.onScreenWindowIDs()
+        let gone = held.filter { !onScreen.contains($0) }
+        t.end(detail: "\(held.count) window(s)")
+        guard !gone.isEmpty else { return }
+        for wid in gone { forgetWindow(wid) }
+        let focusedSID = readSpaces().currentSpace
+        for sid in visible {
+            applySpaceLayout(sid, raiseFocus: sid == focusedSID)
+        }
+        bus.emit(stateChangedEvent())
+    }
+
     private func handleObserverEvent(_ event: ObserverEvent) {
         switch event {
         case .windowCreated(let pid, let wid):
@@ -1389,6 +1423,10 @@ final class Daemon: @unchecked Sendable {
             }
             scheduleDragSettleApply()
         case .windowFocused(let wid):
+            // Before anything else, and even when focus went to nothing:
+            // closing a window moves focus, and for an app that keeps its
+            // closed windows this is the only event there is.
+            evictOrderedOut()
             guard let wid else { return }
             // Focus may have crossed to the other display; resolve that
             // before asking whether the window is in "the current" layout.

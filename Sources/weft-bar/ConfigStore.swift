@@ -95,6 +95,11 @@ final class ConfigStore: ObservableObject {
     @Published var bordersBackend = "native"
     @Published var bordersWidth = 4.0
     @Published var bordersRadius = 10.0
+    /// Follow each window's own corners. Stored as the *absence* of
+    /// `radius`: a number in the file is an override, and writing one on
+    /// every save would quietly switch matching off for anyone who ever
+    /// pressed Save.
+    @Published var bordersAutoRadius = true
     @Published var bordersInactiveColor = ""
     @Published var bordersShowInactive = true
     @Published var bordersSupervise = true
@@ -186,6 +191,7 @@ final class ConfigStore: ObservableObject {
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 4
+        bordersAutoRadius = b?.double("radius") == nil
         bordersRadius = b?.double("radius") ?? 10
         bordersInactiveColor = b?.string("inactive-color")
             ?? Self.argValue(b?.rawValue("args"), "inactive_color")
@@ -366,7 +372,11 @@ final class ConfigStore: ObservableObject {
             s.set("supervise", bool: bordersSupervise)
             if bordersBackend == "native" {
                 s.set("width", double: bordersWidth)
-                s.set("radius", double: bordersRadius)
+                if bordersAutoRadius {
+                    s.remove("radius")
+                } else {
+                    s.set("radius", double: bordersRadius)
+                }
                 s.set("show-inactive", bool: bordersShowInactive)
                 if bordersInactiveColor.isEmpty {
                     s.remove("inactive-color")
