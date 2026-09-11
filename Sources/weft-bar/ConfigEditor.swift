@@ -1,60 +1,67 @@
 import AppKit
-import Foundation
-import WeftPlatform
-import WeftBarConfig
 import SwiftUI
+import WeftBarConfig
 import WeftConfig
+import WeftPlatform
 
-// Settings: a full weft.toml editor that never requires hand-editing TOML.
+// The Settings window.
 //
-// The previous version was hand-laid-out AppKit — absolute frames, a segmented
-// control, and four raw text areas. It worked, and it looked like a debug
-// panel: nothing lined up under resize, gaps were four unlabelled number
-// fields with no idea what they did to the screen, and "Window Rules" was a
-// blob of TOML you had to already understand to change.
+// Built to feel like a page of System Settings, not an editor for a file:
+// native grouped forms, switches and sliders, plain words — and changes that
+// apply as they are made, because weftd reloads the file within 100 ms and a
+// Save button was one more thing to forget. The file stays the source of
+// truth, and everything the form does not understand is carried through
+// untouched (TomlDocument).
 //
-// This is the same job in SwiftUI: a sidebar, grouped forms, real controls per
-// concept, a live picture of what the gap numbers do, and a keybinding table
-// that records a chord instead of asking you to spell one. The raw text is
-// still one click away in Advanced, because the file is the source of truth
-// and hiding it would be a lie.
+// On macOS 26 it is Liquid Glass: the sidebar and toolbar come from
+// NavigationSplitView, and the desktop preview's windows are real glass over a
+// wallpaper. On macOS 15 the same views fall back to materials.
+//
+// None of it costs anything while the window is closed. The whole view tree
+// is torn down on close (ConfigEditorWindowController), so WeftBar — which is
+// always running — does not carry a settings window around in memory, and
+// nothing here animates unless a value is changing.
 
 // MARK: - Sections
 
-enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, spaces, rules, keys, integrations, advanced
+enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
+    case general, appearance, shortcuts, apps, desktops, advanced
+
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "General"
-        case .spaces: return "Spaces"
-        case .rules: return "Window Rules"
-        case .keys: return "Keybindings"
-        case .integrations: return "Integrations"
+        case .appearance: return "Appearance"
+        case .shortcuts: return "Shortcuts"
+        case .apps: return "Apps"
+        case .desktops: return "Desktops"
         case .advanced: return "Advanced"
         }
     }
 
     var symbol: String {
         switch self {
-        case .general: return "slider.horizontal.3"
-        case .spaces: return "square.grid.2x2"
-        case .rules: return "line.3.horizontal.decrease.circle"
-        case .keys: return "keyboard"
-        case .integrations: return "puzzlepiece.extension"
-        case .advanced: return "curlybraces"
+        case .general: return "gearshape"
+        case .appearance: return "paintbrush"
+        case .shortcuts: return "command"
+        case .apps: return "square.on.square"
+        case .desktops: return "menubar.dock.rectangle"
+        case .advanced: return "slider.horizontal.3"
         }
     }
 
-    var blurb: String {
-        switch self {
-        case .general: return "Gaps, default layout and how the mouse behaves."
-        case .spaces: return "Name your spaces and pick a layout for each."
-        case .rules: return "Send apps to a space, or leave them alone entirely."
-        case .keys: return "Every chord weft listens for, and what it runs."
-        case .integrations: return "Window borders and Sketchybar."
-        case .advanced: return "The file itself, exactly as it will be written."
+    /// `--tab <name>` on the command line. The old tab names keep working, so
+    /// a support answer written last month still opens the right page.
+    init?(launchName: String) {
+        switch launchName {
+        case "keys", "keybindings": self = .shortcuts
+        case "rules": self = .apps
+        case "spaces": self = .desktops
+        case "integrations": self = .advanced
+        default:
+            guard let section = SettingsSection(rawValue: launchName) else { return nil }
+            self = section
         }
     }
 }
@@ -64,703 +71,117 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
-    @State private var tab: SettingsTab
+    @State private var section: SettingsSection?
 
-    init(store: ConfigStore, health: EngineHealth, tab: SettingsTab = .general) {
+    init(store: ConfigStore, health: EngineHealth, section: SettingsSection = .general) {
         self.store = store
         self.health = health
-        _tab = State(initialValue: tab)
+        _section = State(initialValue: section)
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            Sidebar(tab: $tab, health: health)
-                .frame(width: Metrics.sidebar)
-                // The sidebar is navigation: it is the last thing that should
-                // give way when a detail pane wants more room than exists.
-                .layoutPriority(1)
-
-            Divider()
-
-            VStack(spacing: 0) {
-                DetailHeader(tab: tab, store: store)
-                Divider().opacity(0.6)
-
-                // Vertical only. The old version scrolled both ways as a
-                // backstop against panes that overflowed — which turned a
-                // layout bug into a horizontal scrollbar instead of fixing
-                // it, and cost a full re-measure of every card on every
-                // keystroke. Nothing in here is allowed to be wider than the
-                // content column now, so there is nothing to scroll sideways.
-                ScrollView(.vertical) {
-                    Group {
-                        switch tab {
-                        case .general: GeneralTab(store: store, health: health)
-                        case .spaces: SpacesTab(store: store, health: health)
-                        case .rules: RulesTab(store: store, health: health)
-                        case .keys: KeysTab(store: store)
-                        case .integrations: IntegrationsTab(store: store, health: health)
-                        case .advanced: AdvancedTab(store: store)
-                        }
-                    }
-                    .frame(maxWidth: Metrics.content, alignment: .leading)
-                    .padding(.horizontal, Metrics.gutter)
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+        NavigationSplitView {
+            List(selection: $section) {
+                ForEach(SettingsSection.allCases) { item in
+                    Label(item.title, systemImage: item.symbol).tag(item)
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
-
-                Divider().opacity(0.6)
-                ActionBar(store: store, health: health)
             }
-            .frame(minWidth: Metrics.content + Metrics.gutter * 2, maxWidth: .infinity)
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
+            .safeAreaInset(edge: .bottom) {
+                EngineCard(health: health).padding(12)
+            }
+        } detail: {
+            detail(section ?? .general)
+                .navigationTitle((section ?? .general).title)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) { SaveStateBadge(store: store) }
+                }
         }
-        .frame(
-            minWidth: Metrics.sidebar + Metrics.content + Metrics.gutter * 2 + 1,
-            minHeight: 620
-        )
-        .tint(.weft)
+        .frame(minWidth: 840, minHeight: 600)
         .onAppear { health.start() }
         .onDisappear { health.stop() }
     }
-}
 
-/// The three numbers the whole window is laid out against.
-///
-/// They exist as constants because the window's minimum width has to be
-/// derived from them rather than guessed. It used to be guessed — 880, with a
-/// 218pt sidebar and a content column that could ask for 830 — and the
-/// overflow came out of the sidebar, which slid off the left edge of the
-/// window the moment the outer-gap fields unlinked into four.
-enum Metrics {
-    static let sidebar: CGFloat = 208
-    static let content: CGFloat = 660
-    static let gutter: CGFloat = 24
-    /// Label column in a form row. Everything lines up on this.
-    static let label: CGFloat = 132
-}
-
-// MARK: - Sidebar
-
-private struct Sidebar: View {
-    @Binding var tab: SettingsTab
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                AppIcon()
-                    .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Weft").font(.system(size: 14, weight: .semibold))
-                    Text("Settings").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 24)
-            .padding(.bottom, 16)
-
-            VStack(spacing: 2) {
-                ForEach(Array(SettingsTab.allCases.enumerated()), id: \.element) { i, item in
-                    SidebarRow(item: item, selected: tab == item, index: i + 1) { tab = item }
-                }
-            }
-            .padding(.horizontal, 9)
-
-            Spacer()
-
-            EngineCard(health: health)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
+    @ViewBuilder
+    private func detail(_ section: SettingsSection) -> some View {
+        switch section {
+        case .general: GeneralPane(store: store, health: health)
+        case .appearance: AppearancePane(store: store)
+        case .shortcuts: ShortcutsPane(store: store)
+        case .apps: AppsPane(store: store)
+        case .desktops: DesktopsPane(store: store, health: health)
+        case .advanced: AdvancedPane(store: store, health: health)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(SidebarMaterial())
-    }
-}
-
-private struct SidebarRow: View {
-    let item: SettingsTab
-    let selected: Bool
-    let index: Int
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: item.symbol)
-                    .font(.system(size: 12.5))
-                    .frame(width: 18)
-                Text(item.title)
-                    .font(.system(size: 13))
-                Spacer(minLength: 0)
-                // ⌘1…⌘6, shown where a keyboard-first user looks for them.
-                Text("⌘\(index)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(selected ? Color.white.opacity(0.65) : Color.secondary)
-                    .opacity(selected || hovering ? 1 : 0)
-            }
-            .foregroundStyle(selected ? Color.white : Color.primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(
-                        selected
-                            ? AnyShapeStyle(LinearGradient(
-                                colors: [.weft, .weftDeep],
-                                startPoint: .topLeading, endPoint: .bottomTrailing))
-                            : AnyShapeStyle(Color.primary.opacity(hovering ? 0.07 : 0))
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
-    }
-}
-
-/// The real sidebar vibrancy. SwiftUI's `.ultraThinMaterial` sits on top of the
-/// window background rather than behind it, so a settings sidebar built with it
-/// reads grey next to every other macOS sidebar on screen.
-private struct SidebarMaterial: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .sidebar
-        view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
-}
-
-private struct EngineCard: View {
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(health.tint)
-                    .frame(width: 7, height: 7)
-                    .overlay(
-                        Circle().stroke(health.tint.opacity(0.25), lineWidth: 3)
-                    )
-                Text(health.headline)
-                    .font(.system(size: 11.5, weight: .medium))
-                Spacer(minLength: 0)
-            }
-            Text(health.detail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if health.needsRestart {
-                Button {
-                    health.restart()
-                } label: {
-                    Text(health.isRestarting ? "Restarting…" : "Restart engine")
-                }
-                .controlSize(.small)
-                .disabled(health.isRestarting)
-            } else if health.needsPermissions {
-                Button("Open Setup…") {
-                    OnboardingWindowController.shared.show()
-                }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
-            }
-        }
-        .padding(11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.primary.opacity(0.06))
-        )
-    }
-}
-
-private struct DetailHeader: View {
-    let tab: SettingsTab
-    @ObservedObject var store: ConfigStore
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(tab.title).font(.system(size: 17, weight: .semibold))
-                Text(tab.blurb)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            if store.isDirty {
-                Text("UNSAVED")
-                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .tracking(0.6)
-                    .foregroundStyle(Color.weft)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(
-                        Capsule().fill(Color.weft.opacity(0.14))
-                    )
-                    .overlay(Capsule().strokeBorder(Color.weft.opacity(0.3)))
-                    .transition(.opacity)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Metrics.gutter)
-        .padding(.top, 20)
-        .padding(.bottom, 14)
-        .animation(.easeOut(duration: 0.15), value: store.isDirty)
-    }
-}
-
-// MARK: - Action bar
-
-private struct ActionBar: View {
-    @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        HStack(spacing: 10) {
-            StatusPill(status: store.status, dirty: store.isDirty)
-            Spacer(minLength: 12)
-
-            Button("Revert") { store.load() }
-                .disabled(!store.isDirty)
-
-            Button {
-                health.restart()
-            } label: {
-                HStack(spacing: 6) {
-                    if health.isRestarting { ProgressView().controlSize(.small) }
-                    Text("Restart engine")
-                }
-            }
-            .disabled(health.isRestarting)
-            .help("Config reloads on its own — this is only for a wedged daemon")
-
-            Button("Save") { store.save() }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut("s", modifiers: .command)
-                .disabled(!store.isDirty)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
-        .background(.bar)
-    }
-}
-
-private struct StatusPill: View {
-    let status: ConfigStore.Status
-    let dirty: Bool
-
-    private var symbol: String {
-        if dirty { return "pencil.circle.fill" }
-        switch status {
-        case .ok: return "checkmark.circle.fill"
-        case .problem: return "exclamationmark.triangle.fill"
-        case .idle: return "info.circle"
-        }
-    }
-
-    private var tint: Color {
-        if dirty { return .weft }
-        switch status {
-        case .ok: return .green
-        case .problem: return .orange
-        case .idle: return .secondary
-        }
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol).font(.system(size: 11))
-            Text(dirty ? "Unsaved changes" : status.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .font(.system(size: 11.5))
-        .foregroundStyle(tint)
-    }
-}
-
-// MARK: - Shared building blocks
-
-private struct Card<Content: View, Accessory: View>: View {
-    let title: String
-    var subtitle: String?
-    @ViewBuilder var content: Content
-    @ViewBuilder var accessory: Accessory
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    // Small caps for the card title: it is a section marker,
-                    // not prose, and setting it apart from the body text is
-                    // what stops six stacked cards reading as one grey wall.
-                    Text(title.uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .tracking(0.7)
-                        .foregroundStyle(.secondary)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer(minLength: 0)
-                accessory
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 11)
-            .padding(.bottom, 10)
-
-            Divider().opacity(0.45)
-
-            VStack(alignment: .leading, spacing: 13) {
-                content
-            }
-            .padding(14)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.09))
-        )
-    }
-}
-
-extension Card where Accessory == EmptyView {
-    init(title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) {
-        self.init(title: title, subtitle: subtitle, content: content, accessory: { EmptyView() })
-    }
-}
-
-/// Label on the left at a fixed width, control on the right — the one thing the
-/// old absolute-frame layout got right, kept.
-private struct Row<Content: View>: View {
-    let label: String
-    var help: String?
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.primary)
-                .frame(width: Metrics.label, alignment: .trailing)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                content
-                if let help {
-                    Text(help)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// A number with a unit, in monospaced digits so a column of them lines up
-/// and a value does not jitter sideways as you hold the stepper.
-private struct NumberField: View {
-    @Binding var value: Int
-    var range: ClosedRange<Int> = 0...400
-    var unit: String = "px"
-    var width: CGFloat = 54
-    let onChange: () -> Void
-
-    var body: some View {
-        HStack(spacing: 5) {
-            HStack(spacing: 0) {
-                TextField("", value: $value, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(width: width)
-                    .multilineTextAlignment(.trailing)
-                Stepper("", value: $value, in: range).labelsHidden()
-            }
-            if !unit.isEmpty {
-                Text(unit)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .onChange(of: value) { _, _ in onChange() }
-    }
-}
-
-/// The same, for a measurement that is allowed a half. Border thickness is
-/// the one setting where 1.5 and 2 look meaningfully different.
-private struct DecimalField: View {
-    @Binding var value: Double
-    var range: ClosedRange<Double> = 0...100
-    var unit: String = "px"
-    let onChange: () -> Void
-
-    var body: some View {
-        HStack(spacing: 5) {
-            HStack(spacing: 0) {
-                TextField("", value: $value, format: .number.precision(.fractionLength(0...2)))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(width: 54)
-                    .multilineTextAlignment(.trailing)
-                Stepper("", value: $value, in: range, step: 0.5).labelsHidden()
-            }
-            if !unit.isEmpty {
-                Text(unit)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .onChange(of: value) { _, _ in onChange() }
-    }
-}
-
-/// Four edge values laid out as a cross — top above, left and right either
-/// side, bottom below.
-///
-/// The version this replaces was four labelled fields in a row. Four fields
-/// need about 350 points, the row label spends another 150, and the gap
-/// preview sat beside all of that: unlinking the outer gap asked for more
-/// width than the window had, the HStack overflowed, and what got pushed out
-/// was the sidebar. The cross says the same thing in 190 points, and says it
-/// better — the position of each field is which edge it is.
-private struct EdgeCross: View {
-    @Binding var top: Int
-    @Binding var bottom: Int
-    @Binding var left: Int
-    @Binding var right: Int
-    var range: ClosedRange<Int> = 0...400
-    let onChange: () -> Void
-
-    /// One column. Three of them plus two gaps is the whole control, which is
-    /// what makes the top and bottom fields land dead centre over the screen
-    /// rectangle: every cell is the same width, so "centred in the control"
-    /// and "centred over the middle column" are the same place. The version
-    /// this replaces sized each cell to a field *plus a stepper*, and the
-    /// stepper is only on one side — so the middle column was off-centre by
-    /// half a stepper and the diagram visibly leaned right.
-    private static let cell: CGFloat = 58
-    private static let spacing: CGFloat = 8
-
-    var body: some View {
-        VStack(spacing: Self.spacing) {
-            field($top, "Top")
-            HStack(spacing: Self.spacing) {
-                field($left, "Left")
-                // The screen. No arrows anywhere in this control: a field
-                // above the rectangle is the top edge and a field to its left
-                // is the left edge, and saying so again with an arrow was
-                // four more glyphs competing with the four numbers that are
-                // the actual content.
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .strokeBorder(
-                        Color.primary.opacity(0.22),
-                        style: StrokeStyle(lineWidth: 1, dash: [3, 3])
-                    )
-                    .frame(width: Self.cell, height: 32)
-                field($right, "Right")
-            }
-            field($bottom, "Bottom")
-        }
-        .frame(width: Self.cell * 3 + Self.spacing * 2)
-    }
-
-    /// Steppers are gone too. Four of them, each hard against one side of its
-    /// field, put eight chevrons around a control whose entire content is
-    /// four numbers — and these are numbers you type, not ones you nudge one
-    /// point at a time. Losing them means the range has to be enforced here
-    /// rather than by the control.
-    private func field(_ binding: Binding<Int>, _ name: String) -> some View {
-        TextField("", value: binding, format: .number)
-            .textFieldStyle(.roundedBorder)
-            .font(.system(size: 12, design: .monospaced))
-            .multilineTextAlignment(.center)
-            .frame(width: Self.cell)
-            .onChange(of: binding.wrappedValue) { _, value in
-                let clamped = min(max(value, range.lowerBound), range.upperBound)
-                if clamped != value { binding.wrappedValue = clamped }
-                onChange()
-            }
-            .help("\(name) — px")
-            .accessibilityLabel(name)
     }
 }
 
 // MARK: - General
 
-private struct GeneralTab: View {
+private struct GeneralPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
 
     var body: some View {
-        VStack(spacing: 14) {
+        Form {
             if health.needsRestart {
-                RestartNotice(health: health)
+                Section { RestartNotice(health: health) }
             }
-
-            Card(
-                title: "Layout",
-                subtitle: "How weft arranges a space that has not named a layout of its own."
-            ) {
-                Row(label: "Default") {
-                    LayoutChooser(selection: $store.defaultLayout) { store.markDirty() }
-                }
-                Row(label: "Inner gap", help: "Between neighbouring windows.") {
-                    NumberField(value: $store.innerGap, range: 0...200) { store.markDirty() }
-                }
-                Row(
-                    label: "Stack offset",
-                    help: "How far each window in a stack peeks out from the front of the pile. 0 for a flat stack."
-                ) {
-                    NumberField(value: $store.stackOffset, range: 0...120) { store.markDirty() }
+            if case .problem(let message) = store.status, store.validationError == nil {
+                Section {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
                 }
             }
 
-            Card(
-                title: "Screen edges",
-                subtitle: "Outer gap is breathing room. Reserve is space weft refuses to use — for a bar or a dock that is always on screen."
-            ) {
-                // Editor and preview side by side, and *both* fixed-size, so
-                // the row can never ask for more than the content column has.
-                HStack(alignment: .top, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 7) {
-                            FieldCaption("Outer gap")
-                            Toggle("Same on all sides", isOn: $store.linkOuterGaps)
-                                .toggleStyle(.checkbox)
-                                .font(.system(size: 11.5))
-                                .onChange(of: store.linkOuterGaps) { _, linked in
-                                    if linked { spreadOuter(store.outerTop) }
-                                    store.markDirty()
-                                }
-                            if store.linkOuterGaps {
-                                NumberField(
-                                    value: Binding(
-                                        get: { store.outerTop },
-                                        set: { spreadOuter($0) }
-                                    ),
-                                    range: 0...400
-                                ) { store.markDirty() }
-                            } else {
-                                EdgeCross(
-                                    top: $store.outerTop, bottom: $store.outerBottom,
-                                    left: $store.outerLeft, right: $store.outerRight,
-                                    onChange: { store.markDirty() }
-                                )
-                            }
-                        }
-
-                        VStack(alignment: .leading, spacing: 7) {
-                            FieldCaption("Reserve")
-                            EdgeCross(
-                                top: $store.reserveTop, bottom: $store.reserveBottom,
-                                left: $store.reserveLeft, right: $store.reserveRight,
-                                onChange: { store.markDirty() }
-                            )
-                        }
+            Section {
+                SliderRow(title: "Space between windows", value: store.bind(\.innerGap), range: 0...48)
+                SliderRow(
+                    title: "Space around the edges",
+                    value: Binding(get: { store.outerTop }, set: { spreadOuter($0) }),
+                    range: 0...64
+                )
+                Toggle("Set each edge separately", isOn: Binding(
+                    get: { !store.linkOuterGaps },
+                    set: { separate in
+                        store.linkOuterGaps = !separate
+                        if !separate { spreadOuter(store.outerTop) } else { store.markDirty() }
                     }
-                    .frame(width: 210, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        LayoutPreview(
-                            inner: store.innerGap,
-                            outer: (store.outerTop, store.outerBottom, store.outerLeft, store.outerRight),
-                            reserve: (store.reserveTop, store.reserveBottom, store.reserveLeft, store.reserveRight),
-                            layout: store.defaultLayout
+                ))
+                if !store.linkOuterGaps {
+                    LabeledContent("Each edge") {
+                        EdgeCross(
+                            top: $store.outerTop, bottom: $store.outerBottom,
+                            left: $store.outerLeft, right: $store.outerRight,
+                            onChange: store.markDirty
                         )
-                        .frame(width: 320, height: 200)
-                        Text(anyReserve
-                             ? "Live preview — the orange bands are reserved."
-                             : "Live preview, drawn at roughly half a screen's width.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            } header: {
+                DesktopHero(store: store)
             }
 
-            Card(title: "Mouse") {
-                Row(
-                    label: "Border drag",
-                    help: "Weft claims a plain click only when it lands on a border. Every other click reaches the app untouched."
-                ) {
-                    Toggle("Drag the border between two tiled windows to resize them",
-                           isOn: $store.mouseBorderResize)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 12))
-                        .onChange(of: store.mouseBorderResize) { _, _ in store.markDirty() }
-                }
-                Row(label: "Modifier", help: "Hold this and drag a window's body to move it, or right-drag to resize.") {
-                    Picker("", selection: $store.mouseModifier) {
-                        Text("⌥ Option").tag("alt")
-                        Text("⌘ Command").tag("cmd")
-                        Text("⌃ Control").tag("ctrl")
-                        Text("⇧ Shift").tag("shift")
-                    }
-                    .labelsHidden()
-                    .frame(width: 150)
-                    .onChange(of: store.mouseModifier) { _, _ in store.markDirty() }
-                }
-                Row(label: "Cursor") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Warp the cursor to a window when it takes focus",
-                               isOn: $store.mouseFollowsFocus)
-                            .onChange(of: store.mouseFollowsFocus) { _, _ in store.markDirty() }
-                        Toggle("Focus whatever window the cursor is over",
-                               isOn: $store.focusFollowsMouse)
-                            .onChange(of: store.focusFollowsMouse) { _, _ in store.markDirty() }
-                    }
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12))
-                }
+            Section("Stacks") {
+                SliderRow(
+                    title: "Windows behind peek out by",
+                    caption: "Shows there is more in a stack. 0 hides them completely.",
+                    value: store.bind(\.stackOffset), range: 0...24
+                )
             }
 
-            Card(title: "Behaviour") {
-                Row(
-                    label: "Menu-bar apps",
-                    help: "Their windows are usually dropdown panels: tiling one gives it a slot and swallows the click that would dismiss it."
-                ) {
-                    Toggle("Tile windows belonging to apps with no Dock icon",
-                           isOn: $store.manageMenubarApps)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 12))
-                        .onChange(of: store.manageMenubarApps) { _, _ in store.markDirty() }
-                }
-                Row(
-                    label: "Updates",
-                    help: "Asks GitHub once a day. Downloads nothing — it shows the version and the command to run."
-                ) {
-                    Toggle("Tell me when a newer weft is released", isOn: $store.checkForUpdates)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 12))
-                        .onChange(of: store.checkForUpdates) { _, _ in store.markDirty() }
+            Section("Mouse") {
+                Toggle("Drag the line between two windows to resize them", isOn: store.bind(\.mouseBorderResize))
+                Toggle("Focus follows the pointer", isOn: store.bind(\.focusFollowsMouse))
+                Toggle("Move the pointer to the window you focus", isOn: store.bind(\.mouseFollowsFocus))
+                Picker("Hold to move or resize a window", selection: store.bind(\.mouseModifier)) {
+                    Text("Option ⌥").tag("alt")
+                    Text("Command ⌘").tag("cmd")
+                    Text("Control ⌃").tag("ctrl")
+                    Text("Shift ⇧").tag("shift")
                 }
             }
         }
-    }
-
-    private var anyReserve: Bool {
-        store.reserveTop > 0 || store.reserveBottom > 0
-            || store.reserveLeft > 0 || store.reserveRight > 0
+        .formStyle(.grouped)
     }
 
     private func spreadOuter(_ value: Int) {
@@ -768,976 +189,622 @@ private struct GeneralTab: View {
         store.outerBottom = value
         store.outerLeft = value
         store.outerRight = value
-    }
-}
-
-/// A small all-caps label above a control group. Same role as `Row`'s label,
-/// for the places where the control is too tall to sit beside one.
-private struct FieldCaption: View {
-    let text: String
-    init(_ text: String) { self.text = text }
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.secondary)
-    }
-}
-
-/// Both layouts as pictures rather than a dropdown of words.
-///
-/// "Float — no tiling" in a popup tells you nothing you did not already know
-/// from the word; the shape does. Buttons also mean the choice is visible
-/// without opening anything, which is what makes it feel like a control panel
-/// rather than a form.
-private struct LayoutChooser: View {
-    @Binding var selection: String
-    let onChange: () -> Void
-
-    private struct Option {
-        let id: String
-        let title: String
-        let detail: String
-        let symbol: String
-    }
-
-    private static let options = [
-        Option(id: "bsp", title: "BSP", detail: "New windows halve the focused one",
-               symbol: "rectangle.split.2x2"),
-        Option(id: "float", title: "Float", detail: "No tiling at all",
-               symbol: "macwindow.on.rectangle"),
-    ]
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ForEach(Self.options, id: \.id) { option in
-                let on = selection == option.id
-                Button {
-                    guard !on else { return }
-                    selection = option.id
-                    onChange()
-                } label: {
-                    VStack(spacing: 5) {
-                        Image(systemName: option.symbol)
-                            .font(.system(size: 15, weight: .regular))
-                        Text(option.title)
-                            .font(.system(size: 11, weight: on ? .semibold : .regular))
-                    }
-                    .foregroundStyle(on ? Color.white : Color.primary)
-                    .frame(width: 74, height: 52)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(
-                                on
-                                    ? AnyShapeStyle(LinearGradient(
-                                        colors: [.weft, .weftDeep],
-                                        startPoint: .topLeading, endPoint: .bottomTrailing))
-                                    : AnyShapeStyle(Color.primary.opacity(0.06))
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(on ? 0 : 0.08))
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(option.detail)
-            }
-        }
-    }
-}
-
-/// The Settings-window twin of Setup's restart banner. Someone who granted a
-/// permission and then came straight here should not have to find their way
-/// back to Setup to be told the one thing that is wrong.
-private struct RestartNotice: View {
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: "arrow.clockwise.circle.fill")
-                .font(.system(size: 16))
-                .foregroundStyle(Color.weft)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("The engine needs one restart")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Accessibility was granted after weftd started, and macOS only hands out that access at launch. Nothing weft does will work until it starts again.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button {
-                    health.restart()
-                } label: {
-                    HStack(spacing: 6) {
-                        if health.isRestarting { ProgressView().controlSize(.small) }
-                        Text(health.isRestarting ? "Restarting…" : "Restart the engine")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(health.isRestarting)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.weft.opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.weft.opacity(0.3))
-        )
-    }
-}
-
-/// What the gap numbers actually do, at a glance.
-///
-/// Gaps are the one setting nobody can predict from a number: "outer-gap 8,
-/// reserve top 32" is two abstractions away from the thing it changes. Drawing
-/// it costs a hundred lines and removes an entire save-look-adjust loop.
-private struct LayoutPreview: View {
-    let inner: Int
-    let outer: (top: Int, bottom: Int, left: Int, right: Int)
-    let reserve: (top: Int, bottom: Int, left: Int, right: Int)
-    let layout: String
-
-    var body: some View {
-        GeometryReader { geo in
-            // Scaled against a nominal 520-point-wide screen. Real numbers at
-            // real scale are unreadable — an 8px gap on a 1440-wide display is
-            // under two points here — and the drawing exists to answer "is
-            // that bigger or smaller than I wanted", not to be a ruler. At
-            // this scale the default 8px outer gap is a visible margin, which
-            // is the whole reason the picture is here.
-            let scale = geo.size.width / 520
-            let r = (
-                top: CGFloat(reserve.top) * scale,
-                bottom: CGFloat(reserve.bottom) * scale,
-                left: CGFloat(reserve.left) * scale,
-                right: CGFloat(reserve.right) * scale
-            )
-            let top = CGFloat(outer.top) * scale + r.top
-            let bottom = CGFloat(outer.bottom) * scale + r.bottom
-            let left = CGFloat(outer.left) * scale + r.left
-            let right = CGFloat(outer.right) * scale + r.right
-            let gap = max(0.5, CGFloat(inner) * scale)
-            let usable = CGRect(
-                x: left, y: top,
-                width: max(6, geo.size.width - left - right),
-                height: max(6, geo.size.height - top - bottom)
-            )
-
-            ZStack(alignment: .topLeading) {
-                // The screen.
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.14))
-
-                // Reserved strips, on whichever edges have one. Drawn under
-                // the windows so an over-large reserve is obvious: the
-                // windows visibly stop short of it.
-                band(w: geo.size.width, h: r.top, x: 0, y: 0)
-                band(w: geo.size.width, h: r.bottom, x: 0, y: geo.size.height - r.bottom)
-                band(w: r.left, h: geo.size.height, x: 0, y: 0)
-                band(w: r.right, h: geo.size.height, x: geo.size.width - r.right, y: 0)
-
-                ForEach(Array(tiles(in: usable, gap: gap).enumerated()), id: \.offset) { i, rect in
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(i == 0 ? Color.weft.opacity(0.8) : Color.weft.opacity(0.34))
-                        .frame(width: rect.width, height: rect.height)
-                        .offset(x: rect.minX, y: rect.minY)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func band(w: CGFloat, h: CGFloat, x: CGFloat, y: CGFloat) -> some View {
-        if w > 0.5 && h > 0.5 {
-            Rectangle()
-                .fill(Color.orange.opacity(0.24))
-                .frame(width: w, height: h)
-                .offset(x: x, y: y)
-        }
-    }
-
-    /// Three windows, arranged the way the chosen layout would arrange them.
-    private func tiles(in area: CGRect, gap: CGFloat) -> [CGRect] {
-        switch layout {
-        case "float":
-            return [
-                CGRect(x: area.minX + area.width * 0.06, y: area.minY + area.height * 0.10,
-                       width: area.width * 0.54, height: area.height * 0.60),
-                CGRect(x: area.minX + area.width * 0.34, y: area.minY + area.height * 0.34,
-                       width: area.width * 0.56, height: area.height * 0.56),
-            ]
-        default:
-            let halfW = (area.width - gap) / 2
-            let halfH = (area.height - gap) / 2
-            return [
-                CGRect(x: area.minX, y: area.minY, width: halfW, height: area.height),
-                CGRect(x: area.minX + halfW + gap, y: area.minY, width: halfW, height: halfH),
-                CGRect(x: area.minX + halfW + gap, y: area.minY + halfH + gap,
-                       width: halfW, height: halfH),
-            ]
-        }
-    }
-}
-
-// MARK: - Spaces
-
-private struct SpacesTab: View {
-    @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-
-    /// Rows past this index have no desktop to be assigned to. Labels go out
-    /// in Mission Control order, so it is purely a count question.
-    private var landing: Int { health.running ? health.liveSpaces.count : store.spaces.count }
-
-    var body: some View {
-        VStack(spacing: 16) {
-            if health.running && store.spaces.count > health.liveSpaces.count {
-                Notice(
-                    tone: .warning,
-                    title: "\(store.spaces.count) spaces declared, \(health.liveSpaces.count) desktop(s) on this Mac",
-                    detail: "Labels are handed out in Mission Control order, so the greyed rows below have nowhere to land. Keybinds and rules naming them do nothing at all — silently. Add desktops in Mission Control, or remove the extra rows."
-                )
-            }
-
-            Card(
-                title: "Spaces",
-                subtitle: "Listed in order. Keybinds refer to a space by its label, so renaming one means renaming it in Keybindings too."
-            ) {
-                if store.spaces.isEmpty {
-                    EmptyHint(
-                        symbol: "square.grid.2x2",
-                        text: "No spaces configured. Weft tiles every desktop with the default layout until you add some."
-                    )
-                } else {
-                    VStack(spacing: 7) {
-                        ForEach(Array($store.spaces.enumerated()), id: \.element.id) { index, $space in
-                            SpaceEditorRow(space: $space, store: store, hasDesktop: index < landing)
-                        }
-                    }
-                }
-
-                Button {
-                    store.addSpace()
-                } label: {
-                    Label("Add space", systemImage: "plus")
-                }
-                .controlSize(.small)
-            }
-        }
-    }
-}
-
-private struct SpaceEditorRow: View {
-    @Binding var space: SpaceRow
-    @ObservedObject var store: ConfigStore
-    var hasDesktop = true
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: LayoutGlyph.symbol(space.layout))
-                .font(.system(size: 12))
-                .foregroundStyle(hasDesktop ? Color.weft : Color.secondary)
-                .frame(width: 22, height: 22)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(hasDesktop ? Color.weft.opacity(0.13) : Color.primary.opacity(0.06)))
-
-            TextField("label", text: $space.label)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 160)
-                .onChange(of: space.label) { _, _ in store.markDirty() }
-
-            Picker("", selection: $space.layout) {
-                Text("BSP").tag("bsp")
-                Text("Float").tag("float")
-            }
-            .labelsHidden()
-            .frame(width: 110)
-            .onChange(of: space.layout) { _, _ in store.markDirty() }
-
-            if !hasDesktop {
-                Label("no desktop", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.orange)
-                    .help("No desktop for this row. Add one in Mission Control, or remove the row.")
-            }
-
-            Spacer(minLength: 0)
-
-            OrderButtons(
-                onUp: { move(-1) }, onDown: { move(1) },
-                canUp: index > 0, canDown: index < store.spaces.count - 1
-            )
-
-            DeleteButton { 
-                store.spaces.removeAll { $0.id == space.id }
-                store.markDirty()
-            }
-        }
-    }
-
-    private var index: Int { store.spaces.firstIndex { $0.id == space.id } ?? 0 }
-
-    private func move(_ delta: Int) {
-        let from = index
-        let to = from + delta
-        guard store.spaces.indices.contains(to) else { return }
-        store.spaces.swapAt(from, to)
         store.markDirty()
     }
 }
 
-enum LayoutGlyph {
-    static func symbol(_ layout: String) -> String {
-        switch layout {
-        case "float": return "macwindow.on.rectangle"
-        default: return "rectangle.split.2x2"
-        }
-    }
-}
-
-private struct OrderButtons: View {
-    let onUp: () -> Void
-    let onDown: () -> Void
-    let canUp: Bool
-    let canDown: Bool
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Button(action: onUp) { Image(systemName: "chevron.up") }
-                .disabled(!canUp)
-            Button(action: onDown) { Image(systemName: "chevron.down") }
-                .disabled(!canDown)
-        }
-        .buttonStyle(.borderless)
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(.secondary)
-    }
-}
-
-private struct DeleteButton: View {
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "minus.circle.fill")
-                .font(.system(size: 12))
-        }
-        .buttonStyle(.borderless)
-        // Explicit, not `.secondary`: the window is tinted weft blue, and a
-        // borderless button inherits the tint — so every delete button in the
-        // table rendered as the brightest, most inviting thing on it.
-        .foregroundStyle(hovering ? Color.red : Color.secondary)
-        .onHover { hovering = $0 }
-        .help("Remove")
-    }
-}
-
-/// A banner for the case where the config is valid TOML and still will not do
-/// what it says. Those are the ones worth a whole box.
-private struct Notice: View {
-    enum Tone { case warning, info }
-
-    let tone: Tone
-    let title: String
-    let detail: String
-
-    private var color: Color { tone == .warning ? .orange : .weft }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: tone == .warning ? "exclamationmark.triangle.fill" : "info.circle.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(color)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 12, weight: .semibold))
-                Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(color.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(color.opacity(0.28))
-        )
-    }
-}
-
-private struct EmptyHint: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(.tertiary)
-            Text(text).font(.system(size: 11.5)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 10)
-    }
-}
-
-// MARK: - Rules
-
-private struct RulesTab: View {
+/// The picture at the top of General: your desktop, in miniature, and the
+/// layout that arranges it.
+private struct DesktopHero: View {
     @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-    @State private var filter = ""
 
     var body: some View {
-        VStack(spacing: 14) {
-            Card(
-                title: "Window rules",
-                subtitle: "Checked top to bottom; the first rule that matches wins. App and Title are regular expressions — “Brave|Zen” matches either.",
-                content: {
-                    if store.rules.isEmpty {
-                        EmptyHint(
-                            symbol: "line.3.horizontal.decrease.circle",
-                            text: "No rules. Every window is tiled on whatever space it opens on."
-                        )
-                    } else {
-                        if store.rules.count > 6 {
-                            SearchField(text: $filter, prompt: "Filter by app, title or space")
-                                .padding(.bottom, 2)
-                        }
-                        VStack(spacing: 6) {
-                            ForEach($store.rules) { $rule in
-                                if matches(rule) {
-                                    RuleRowView(rule: $rule, store: store, live: liveLabels)
-                                }
-                            }
-                        }
-                    }
+        VStack(spacing: 18) {
+            DesktopPreview(
+                layout: store.defaultLayout,
+                inner: store.innerGap,
+                outer: store.outerTop,
+                bordersOn: store.bordersEnabled,
+                border: store.bordersWidth,
+                corner: store.bordersAutoRadius ? nil : store.bordersRadius,
+                accent: Color(hex: store.bordersActiveColor) ?? .weft,
+                inactive: store.bordersShowInactive
+                    ? (Color(hex: store.bordersInactiveColor) ?? Color.white.opacity(0.18)) : nil
+            )
+            .frame(height: 270)
 
-                    Button { store.addRule() } label: { Label("Add rule", systemImage: "plus") }
-                        .controlSize(.small)
-                },
-                accessory: {
-                    Text("\(store.rules.count)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+            LayoutPicker(selection: store.bind(\.defaultLayout))
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 14)
+        .textCase(nil)
+        .foregroundStyle(.primary)
+    }
+}
+
+/// Tiling or floating, as two glass capsules under the preview.
+private struct LayoutPicker: View {
+    @Binding var selection: String
+
+    private struct Option: Identifiable {
+        let id: String
+        let title: String
+        let symbol: String
+        let help: String
+    }
+
+    private let options = [
+        Option(id: "bsp", title: "Tiling", symbol: "rectangle.split.2x2",
+               help: "Every new window takes half of the one you are in."),
+        Option(id: "float", title: "Floating", symbol: "macwindow.on.rectangle",
+               help: "Windows stay wherever you put them."),
+    ]
+
+    var body: some View {
+        GlassGroup(spacing: 10) {
+            HStack(spacing: 10) {
+                ForEach(options) { option in
+                    let on = selection == option.id
+                    Button {
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+                            selection = option.id
+                        }
+                    } label: {
+                        Label(option.title, systemImage: option.symbol)
+                            .font(.system(size: 13, weight: on ? .semibold : .regular))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 9)
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(on ? Color.white : Color.primary)
+                    .weftGlass(Capsule(), tint: on ? Color.accentColor.opacity(0.75) : nil, interactive: true)
+                    .help(option.help)
+                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
+            }
+        }
+    }
+}
+
+// MARK: - The desktop preview
+
+/// A miniature of the desktop the settings produce: the wallpaper, the menu
+/// bar, three windows laid out the way weft would lay them out, with the gaps,
+/// the border and the corners they would really get.
+///
+/// Gaps are the one setting nobody can predict from a number, and a border
+/// colour means nothing until it is around a window. The windows are Liquid
+/// Glass on macOS 26, so the wallpaper shows through them the way a real
+/// desktop does. It animates only when a value changes — a spring, then
+/// nothing — so it costs no GPU sitting still.
+private struct DesktopPreview: View {
+    let layout: String
+    let inner: Int
+    let outer: Int
+    let bordersOn: Bool
+    let border: Double
+    /// Nil means "match the window", which on macOS 26 is about 16 points.
+    let corner: Double?
+    let accent: Color
+    let inactive: Color?
+
+    var body: some View {
+        GeometryReader { geo in
+            // Drawn against a nominal 480-point screen, so an 8-point gap is
+            // visible at this size — the drawing answers "bigger or smaller
+            // than I wanted", it is not a ruler.
+            let scale = geo.size.width / 480
+            let menuBar: CGFloat = 12
+            let pad = CGFloat(outer) * scale
+            let area = CGRect(
+                x: pad, y: menuBar + pad,
+                width: max(24, geo.size.width - pad * 2),
+                height: max(24, geo.size.height - menuBar - pad * 2)
+            )
+            let rects = frames(in: area, gap: CGFloat(inner) * scale)
+            let radius = CGFloat(corner ?? 16) * scale * 0.85
+            let stroke = bordersOn ? max(1, CGFloat(border) * scale * 0.8) : 0
+
+            ZStack(alignment: .topLeading) {
+                Wallpaper()
+                Rectangle()
+                    .fill(Color.black.opacity(0.22))
+                    .frame(height: menuBar)
+                // Back to front, so the focused window — index 0 — is on top.
+                ForEach(rects.indices.reversed(), id: \.self) { i in
+                    MiniWindow(
+                        focused: i == 0, radius: radius, border: stroke,
+                        accent: accent, inactive: inactive
+                    )
+                    .frame(width: rects[i].width, height: rects[i].height)
+                    .offset(x: rects[i].minX, y: rects[i].minY)
+                }
+            }
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: layout)
+            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: inner)
+            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: outer)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Preview of your desktop with the current layout, spacing and borders")
+    }
+
+    /// Three windows: a main one and two beside it for tiling; a loose,
+    /// overlapping cascade for floating. Three either way, so switching
+    /// layouts moves each window to its new place rather than swapping sets.
+    private func frames(in area: CGRect, gap: CGFloat) -> [CGRect] {
+        if layout == "float" {
+            return [
+                CGRect(x: area.minX + area.width * 0.08, y: area.minY + area.height * 0.10,
+                       width: area.width * 0.50, height: area.height * 0.62),
+                CGRect(x: area.minX + area.width * 0.42, y: area.minY + area.height * 0.22,
+                       width: area.width * 0.50, height: area.height * 0.58),
+                CGRect(x: area.minX + area.width * 0.24, y: area.minY + area.height * 0.44,
+                       width: area.width * 0.42, height: area.height * 0.50),
+            ]
+        }
+        let half = (area.width - gap) / 2
+        let halfHeight = (area.height - gap) / 2
+        return [
+            CGRect(x: area.minX, y: area.minY, width: half, height: area.height),
+            CGRect(x: area.minX + half + gap, y: area.minY, width: half, height: halfHeight),
+            CGRect(x: area.minX + half + gap, y: area.minY + halfHeight + gap,
+                   width: half, height: halfHeight),
+        ]
+    }
+}
+
+/// Decorative colour only — the one place in the window with more than the
+/// accent in it, and it never becomes a control.
+private struct Wallpaper: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.17, green: 0.21, blue: 0.43), Color(red: 0.05, green: 0.06, blue: 0.13)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            RadialGradient(
+                colors: [Color.weft.opacity(0.75), .clear],
+                center: UnitPoint(x: 0.18, y: 0.22), startRadius: 0, endRadius: 280
+            )
+            RadialGradient(
+                colors: [Color(red: 0.64, green: 0.46, blue: 0.97).opacity(0.5), .clear],
+                center: UnitPoint(x: 0.86, y: 0.88), startRadius: 0, endRadius: 250
             )
         }
     }
+}
 
-    private func matches(_ rule: RuleRow) -> Bool {
-        let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return true }
-        return rule.app.lowercased().contains(needle)
-            || rule.title.lowercased().contains(needle)
-            || rule.bundleID.lowercased().contains(needle)
-            || rule.space.lowercased().contains(needle)
-    }
+private struct MiniWindow: View {
+    let focused: Bool
+    let radius: CGFloat
+    let border: CGFloat
+    let accent: Color
+    let inactive: Color?
 
-    /// Nil when the daemon is not up: with nothing to check against, marking
-    /// every target "missing" would be a lie, not a warning.
-    private var liveLabels: Set<String>? {
-        health.running ? Set(health.liveSpaces) : nil
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Circle().fill(Color(red: 1, green: 0.37, blue: 0.34)).frame(width: 6, height: 6)
+                Circle().fill(Color(red: 1, green: 0.74, blue: 0.18)).frame(width: 6, height: 6)
+                Circle().fill(Color(red: 0.16, green: 0.79, blue: 0.26)).frame(width: 6, height: 6)
+            }
+            Capsule().fill(Color.white.opacity(0.24)).frame(maxWidth: 88).frame(height: 5)
+            Capsule().fill(Color.white.opacity(0.14)).frame(maxWidth: 58).frame(height: 5)
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .weftGlass(shape)
+        .overlay {
+            if border > 0, let color = focused ? accent : inactive {
+                shape.inset(by: -border / 2).stroke(color, lineWidth: border)
+            }
+        }
     }
 }
 
-private struct RuleRowView: View {
-    @Binding var rule: RuleRow
+// MARK: - Appearance
+
+private struct AppearancePane: View {
     @ObservedObject var store: ConfigStore
-    /// Labels that exist on this machine right now, or nil if unknown.
-    var live: Set<String>?
-
-    /// A target that is spelled correctly, declared in the config, and still
-    /// has no desktop behind it. weftd logs one line and moves the window
-    /// nowhere, which is the hardest kind of "broken" to notice.
-    private var targetIsUnreachable: Bool {
-        guard !rule.space.isEmpty, let live else { return false }
-        return !live.contains(rule.space)
-    }
-
-    private var managed: Bool { rule.manage ?? true }
 
     var body: some View {
-        // Two lines, not one. Four fields on a line plus their labels came to
-        // more than the content column, and the row it lived in had nothing
-        // that could shrink — so it overflowed instead. Matching above,
-        // outcome below, with the outcome stated in words.
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                Image(systemName: managed ? "square.grid.2x2" : "macwindow.on.rectangle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(managed ? Color.weft : .secondary)
-                    .frame(width: 20, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(managed ? Color.weft.opacity(0.13) : Color.primary.opacity(0.06))
+        Form {
+            Section {
+                Toggle("Show a border around windows", isOn: store.bind(\.bordersEnabled))
+                Group {
+                    ColorPicker(
+                        "Focused window",
+                        selection: Binding(
+                            get: { Color(hex: store.bordersActiveColor) ?? .weft },
+                            set: { store.setActiveColor($0.argbHex) }
+                        ),
+                        supportsOpacity: false
                     )
-
-                LabeledField(label: "App matches", text: $rule.app, width: 168,
-                             placeholder: "Ghostty|kitty") { store.markDirty() }
-                LabeledField(label: "Title matches", text: $rule.title, width: 150,
-                             placeholder: "any") { store.markDirty() }
-                LabeledField(label: "Bundle id", text: $rule.bundleID, width: 172,
-                             placeholder: "optional") { store.markDirty() }
-
-                Spacer(minLength: 0)
-
-                DeleteButton {
-                    store.rules.removeAll { $0.id == rule.id }
-                    store.markDirty()
-                }
-            }
-
-            HStack(spacing: 8) {
-                Spacer().frame(width: 20)
-
-                Picker("", selection: Binding(
-                    get: { managed },
-                    set: { rule.manage = $0 ? nil : false; store.markDirty() }
-                )) {
-                    Text("Tile it").tag(true)
-                    Text("Leave it alone").tag(false)
-                }
-                .labelsHidden()
-                .frame(width: 130)
-
-                Text("on")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                Picker("", selection: Binding(
-                    get: { rule.space },
-                    set: { rule.space = $0; store.markDirty() }
-                )) {
-                    Text("whichever space it opens on").tag("")
-                    ForEach(store.spaceLabels, id: \.self) { Text($0).tag($0) }
-                    if !rule.space.isEmpty && !store.spaceLabels.contains(rule.space) {
-                        Text("\(rule.space) — not in Spaces").tag(rule.space)
+                    DoubleSliderRow(title: "Thickness", value: store.bind(\.bordersWidth), range: 1...12)
+                    Toggle("Match each window's corners", isOn: store.bind(\.bordersAutoRadius))
+                    if !store.bordersAutoRadius {
+                        DoubleSliderRow(title: "Corner radius", value: store.bind(\.bordersRadius), range: 0...32, step: 1)
+                    }
+                    Toggle("Outline the other windows too", isOn: store.bind(\.bordersShowInactive))
+                    if store.bordersShowInactive {
+                        ColorPicker(
+                            "Other windows",
+                            selection: Binding(
+                                get: { Color(hex: store.bordersInactiveColor) ?? Color(argb: 0x4041_4868) },
+                                set: { store.bordersInactiveColor = $0.argbHex; store.markDirty() }
+                            ),
+                            supportsOpacity: true
+                        )
                     }
                 }
-                .labelsHidden()
-                .frame(width: 186)
-
-                if targetIsUnreachable {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.orange)
-                        .help("No desktop is labelled “\(rule.space)”, so this rule moves nothing.")
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            if !rule.isValid {
-                Label(
-                    "Give this rule an app, a title or a bundle id to match — weftd rejects a rule that matches nothing.",
-                    systemImage: "exclamationmark.triangle.fill"
+                .disabled(!store.bordersEnabled)
+            } header: {
+                DesktopPreview(
+                    layout: "bsp",
+                    inner: store.innerGap,
+                    outer: store.outerTop,
+                    bordersOn: store.bordersEnabled,
+                    border: store.bordersWidth,
+                    corner: store.bordersAutoRadius ? nil : store.bordersRadius,
+                    accent: Color(hex: store.bordersActiveColor) ?? .weft,
+                    inactive: store.bordersShowInactive
+                        ? (Color(hex: store.bordersInactiveColor) ?? Color.white.opacity(0.18)) : nil
                 )
-                .font(.system(size: 10.5))
-                .foregroundStyle(.orange)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 210)
+                .padding(.top, 4)
+                .padding(.bottom, 14)
+                .textCase(nil)
+            } footer: {
+                if store.bordersEnabled, store.bordersBackend != "native" {
+                    Text("Borders are drawn by JankyBorders right now. Switch to weft's own in Advanced to use these settings.")
+                }
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(
-                    rule.isValid && !targetIsUnreachable
-                        ? Color.primary.opacity(0.03)
-                        : Color.orange.opacity(0.07)
-                )
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: - Shortcuts
+
+private struct ShortcutsPane: View {
+    @ObservedObject var store: ConfigStore
+    @State private var query = ""
+
+    private struct Group: Identifiable {
+        let name: String
+        let rows: [KeyRow]
+        var id: String { name }
+    }
+
+    /// The order a person thinks about these in, not the order the file has.
+    private static let order = [
+        "New", "Focus", "Move", "Spaces", "Layout", "Stacks", "Resize", "Displays", "Apps", "Modes", "Other",
+    ]
+
+    var body: some View {
+        Form {
+            ForEach(store.modes) { mode in
+                let duplicates = Self.duplicates(in: mode)
+                if mode.isDefault {
+                    Section {
+                        Button {
+                            store.addKey(to: mode.id)
+                        } label: {
+                            Label("Add Shortcut", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    ForEach(groups(for: mode)) { group in
+                        Section(group.name) {
+                            ForEach(group.rows) { row in
+                                shortcutRow(row, mode: mode, duplicate: duplicates.contains(row.chord.lowercased()))
+                            }
+                        }
+                    }
+                } else {
+                    Section {
+                        ForEach(mode.rows.filter(matches)) { row in
+                            shortcutRow(row, mode: mode, duplicate: duplicates.contains(row.chord.lowercased()))
+                        }
+                        Button {
+                            store.addKey(to: mode.id)
+                        } label: {
+                            Label("Add Shortcut", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                    } header: {
+                        Text("In “\(mode.name)” mode")
+                    } footer: {
+                        Text("These only work after you enter the mode. Esc usually takes you back out.")
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .searchable(text: $query, placement: .toolbar, prompt: "Search shortcuts")
+    }
+
+    private func shortcutRow(_ row: KeyRow, mode: KeyMode, duplicate: Bool) -> some View {
+        ShortcutRowView(
+            row: binding(mode: mode.id, row: row.id),
+            duplicate: duplicate,
+            onDelete: {
+                guard let m = store.modes.firstIndex(where: { $0.id == mode.id }) else { return }
+                store.modes[m].rows.removeAll { $0.id == row.id }
+                store.markDirty()
+            }
         )
     }
-}
 
-private struct LabeledField: View {
-    let label: String
-    @Binding var text: String
-    var width: CGFloat = 140
-    var placeholder: String = ""
-    let onChange: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(.tertiary)
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11.5, design: .monospaced))
-                .frame(width: width)
-                .onChange(of: text) { _, _ in onChange() }
+    private func groups(for mode: KeyMode) -> [Group] {
+        var buckets: [String: [KeyRow]] = [:]
+        for row in mode.rows where matches(row) {
+            buckets[Self.category(of: row), default: []].append(row)
         }
+        let known = Self.order.compactMap { name in
+            buckets[name].map { Group(name: name == "Spaces" ? "Desktops" : name, rows: $0) }
+        }
+        let rest = buckets.keys.filter { !Self.order.contains($0) }.sorted().compactMap { name in
+            buckets[name].map { Group(name: name, rows: $0) }
+        }
+        return known + rest
     }
-}
 
-// MARK: - Keybindings
-
-private struct KeysTab: View {
-    @ObservedObject var store: ConfigStore
-    @State private var newMode = ""
-    @State private var filter = ""
-
-    var body: some View {
-        VStack(spacing: 14) {
-            // Sixty binds is a normal weft.toml, and finding the one you meant
-            // to change by scrolling is the reason people give up and open the
-            // file instead.
-            SearchField(text: $filter, prompt: "Filter by chord or command")
-
-            ForEach($store.modes) { $mode in
-                // Matches and duplicates computed once per mode, not once per
-                // row. Both used to run inside the row loop, which made
-                // rendering a mode quadratic in its own bindings — on every
-                // keystroke in the filter field.
-                let view = ModeView(mode: mode, filter: filter)
-                if view.isVisible {
-                    Card(
-                        title: mode.isDefault ? "Default bindings" : "Mode · \(mode.name)",
-                        subtitle: mode.isDefault
-                            ? "Always live. Bind “mode <name>” to enter one of the layers below."
-                            : "Only live after entering this mode. Bind “mode default” to get back out.",
-                        content: {
-                            if mode.rows.isEmpty {
-                                EmptyHint(symbol: "keyboard", text: "No bindings in this mode yet.")
-                            } else if view.shown.isEmpty {
-                                EmptyHint(
-                                    symbol: "magnifyingglass",
-                                    text: "Nothing in this mode matches “\(filter)”."
-                                )
-                            }
-                            VStack(spacing: 4) {
-                                ForEach($mode.rows) { $row in
-                                    if view.shown.contains(row.id) {
-                                        KeyRowView(
-                                            row: $row, store: store, mode: $mode,
-                                            duplicate: view.duplicates.contains(row.chord.lowercased())
-                                        )
-                                    }
-                                }
-                            }
-                            HStack(spacing: 10) {
-                                Button { store.addKey(to: mode.id) } label: {
-                                    Label("Add binding", systemImage: "plus")
-                                }
-                                if !mode.isDefault {
-                                    Button(role: .destructive) { store.removeMode(mode.id) } label: {
-                                        Label("Delete mode", systemImage: "trash")
-                                    }
-                                }
-                                Spacer()
-                            }
-                            .controlSize(.small)
-                        },
-                        accessory: {
-                            Text("\(mode.rows.count)")
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.primary.opacity(0.07)))
-                        }
-                    )
-                }
-            }
-
-            Card(title: "New mode", subtitle: "A modal layer — like vim's, but for window management.") {
-                HStack(spacing: 10) {
-                    TextField("resize", text: $newMode)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 150)
-                    Button("Add mode") {
-                        store.addMode(named: newMode)
-                        newMode = ""
-                    }
-                    .disabled(newMode.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Spacer()
-                }
-                .controlSize(.small)
-            }
-        }
+    private static func category(of row: KeyRow) -> String {
+        row.command.isEmpty ? "New" : CheatsheetModel.describe(row.command).0
     }
-}
 
-/// Everything one mode's card needs to know about the current filter, worked
-/// out once.
-private struct ModeView {
-    let shown: Set<KeyRow.ID>
-    /// Two rows on the same chord is a silent bug: the file is a TOML table,
-    /// so the second one wins and the first simply never fires.
-    let duplicates: Set<String>
-    let isVisible: Bool
+    private func matches(_ row: KeyRow) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return true }
+        return ShortcutRowView.summary(for: row.command).lowercased().contains(needle)
+            || row.command.lowercased().contains(needle)
+            || row.chord.lowercased().contains(needle)
+            || ChordNaming.caps(for: row.chord).joined().lowercased().contains(needle)
+    }
 
-    init(mode: KeyMode, filter: String) {
-        let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
-        if needle.isEmpty {
-            shown = Set(mode.rows.map(\.id))
-            isVisible = true
-        } else {
-            let hits = mode.rows.filter {
-                $0.chord.lowercased().contains(needle) || $0.command.lowercased().contains(needle)
-            }
-            shown = Set(hits.map(\.id))
-            isVisible = !hits.isEmpty
-        }
-        var seen: Set<String> = []
-        var dupes: Set<String> = []
+    private static func duplicates(in mode: KeyMode) -> Set<String> {
+        var seen = Set<String>()
+        var twice = Set<String>()
         for row in mode.rows where !row.chord.isEmpty {
             let key = row.chord.lowercased()
-            if !seen.insert(key).inserted { dupes.insert(key) }
+            if !seen.insert(key).inserted { twice.insert(key) }
         }
-        duplicates = dupes
+        return twice
     }
-}
 
-private struct SearchField: View {
-    @Binding var text: String
-    let prompt: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            TextField(prompt, text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-            if !text.isEmpty {
-                Button { text = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.tertiary)
+    /// A row, found by id on every read and write. An index captured when the
+    /// view was built goes stale — or out of range — the moment a row above
+    /// it is deleted.
+    private func binding(mode: KeyMode.ID, row: KeyRow.ID) -> Binding<KeyRow> {
+        Binding(
+            get: {
+                store.modes.first { $0.id == mode }?.rows.first { $0.id == row } ?? KeyRow()
+            },
+            set: { value in
+                guard let m = store.modes.firstIndex(where: { $0.id == mode }),
+                      let r = store.modes[m].rows.firstIndex(where: { $0.id == row })
+                else { return }
+                store.modes[m].rows[r] = value
+                store.markDirty()
             }
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.primary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08))
         )
     }
 }
 
-private struct KeyRowView: View {
+private struct ShortcutRowView: View {
     @Binding var row: KeyRow
-    @ObservedObject var store: ConfigStore
-    @Binding var mode: KeyMode
-    var duplicate = false
+    let duplicate: Bool
+    let onDelete: () -> Void
+    @State private var picking = false
     @State private var hovering = false
 
+    /// What the shortcut does, in words — "space" said the way the rest of
+    /// this window says it.
+    static func summary(for command: String) -> String {
+        guard !command.isEmpty else { return "" }
+        return CheatsheetModel.describe(command).1
+            .replacingOccurrences(of: "space", with: "desktop")
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            ChordField(chord: $row.chord, showsRecorder: hovering) { store.markDirty() }
+        let summary = Self.summary(for: row.command)
+        let isCustom = !row.command.isEmpty && CheatsheetModel.describe(row.command).1 == row.command
+        HStack(spacing: 12) {
+            Button {
+                picking = true
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    if row.command.isEmpty {
+                        Text("Choose what this does…").foregroundStyle(.secondary)
+                    } else if isCustom {
+                        Text(row.command).font(.system(.body, design: .monospaced))
+                    } else {
+                        Text(summary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Change what this shortcut does")
+            .popover(isPresented: $picking, arrowEdge: .bottom) {
+                ActionPicker(current: row.command) { command in
+                    row.command = command
+                    picking = false
+                }
+            }
 
             if duplicate {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10))
                     .foregroundStyle(.orange)
-                    .help("Another binding in this mode uses the same chord — only the last one fires.")
+                    .help("Another shortcut here uses the same keys — only one of them works.")
             }
 
-            Image(systemName: "arrow.right")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.quaternary)
+            ChordField(chord: $row.chord)
 
-            TextField("focus west", text: $row.command)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11.5, design: .monospaced))
-                .onChange(of: row.command) { _, _ in store.markDirty() }
-
-            CommandPicker { command in
-                row.command = command
-                store.markDirty()
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "minus.circle.fill")
             }
-
-            // Revealed on hover. Sixty rows each ending in a delete button is
-            // sixty invitations to lose a binding by mis-clicking, and the
-            // column of them was the loudest thing in the table.
-            DeleteButton {
-                mode.rows.removeAll { $0.id == row.id }
-                store.markDirty()
-            }
-            .opacity(hovering ? 1 : 0.18)
+            .buttonStyle(.borderless)
+            .foregroundStyle(hovering ? Color.red : Color.secondary)
+            .opacity(hovering ? 1 : 0.3)
+            .help("Remove this shortcut")
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(hovering ? 0.05 : 0))
-        )
         .onHover { hovering = $0 }
     }
 }
 
-/// The command catalogue, as a searchable popover.
-///
-/// This used to be a `Menu` per row holding eight submenus and every command
-/// in each. SwiftUI builds a menu's content as part of the row's body, so a
-/// sixty-bind config was building roughly three thousand throwaway views —
-/// and rebuilding all of them on every keystroke, because the rows are bound
-/// into one array and a change to any of them invalidates the lot. That is
-/// the settings lag. A popover's content is built when it opens and at no
-/// other time, so a closed picker costs one button.
-private struct CommandPicker: View {
+/// Every action weft knows, in words, searchable — plus a way out for a
+/// command the list does not have. A popover, so it is built when it opens
+/// and costs nothing sitting in sixty rows.
+private struct ActionPicker: View {
+    let current: String
     let onPick: (String) -> Void
-    @State private var showing = false
     @State private var query = ""
+    @State private var custom = ""
 
     var body: some View {
-        Button { showing = true } label: {
-            Image(systemName: "list.bullet")
-                .font(.system(size: 11))
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.secondary)
-        .help("Pick from the commands weftd understands")
-        .popover(isPresented: $showing, arrowEdge: .bottom) {
-            VStack(spacing: 0) {
-                SearchField(text: $query, prompt: "Search commands")
-                    .padding(10)
-                Divider()
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(CommandCatalog.groups, id: \.name) { group in
-                            let hits = group.commands.filter(matches)
-                            if !hits.isEmpty {
-                                Text(group.name.uppercased())
-                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                                    .tracking(0.6)
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.top, 10)
-                                    .padding(.bottom, 3)
-                                ForEach(hits, id: \.self) { command in
-                                    CommandRow(command: command) {
-                                        onPick(command)
-                                        showing = false
-                                        query = ""
-                                    }
-                                }
+        VStack(spacing: 0) {
+            TextField("Search actions", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(12)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(CommandCatalog.groups, id: \.name) { group in
+                        let hits = group.commands.filter(matches)
+                        if !hits.isEmpty {
+                            Text(group.name == "Spaces" ? "Desktops" : group.name)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 14)
+                                .padding(.top, 12)
+                                .padding(.bottom, 4)
+                            ForEach(hits, id: \.self) { command in
+                                ActionRow(command: command, selected: command == current) { onPick(command) }
                             }
                         }
                     }
-                    .padding(.bottom, 8)
                 }
+                .padding(.bottom, 8)
             }
-            .frame(width: 320, height: 380)
+            Divider()
+            HStack(spacing: 8) {
+                TextField("Custom command", text: $custom)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit(useCustom)
+                Button("Use", action: useCustom)
+                    .disabled(custom.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(12)
         }
+        .frame(width: 360, height: 440)
+        .onAppear {
+            if !current.isEmpty, !CommandCatalog.contains(current) { custom = current }
+        }
+    }
+
+    private func useCustom() {
+        let command = custom.trimmingCharacters(in: .whitespaces)
+        guard !command.isEmpty else { return }
+        onPick(command)
     }
 
     private func matches(_ command: String) -> Bool {
         let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return needle.isEmpty || command.lowercased().contains(needle)
+        return needle.isEmpty
+            || command.lowercased().contains(needle)
+            || ShortcutRowView.summary(for: command).lowercased().contains(needle)
     }
 }
 
-private struct CommandRow: View {
+private struct ActionRow: View {
     let command: String
+    let selected: Bool
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Text(command)
-                .font(.system(size: 11.5, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.weft.opacity(hovering ? 0.16 : 0))
-                        .padding(.horizontal, 6)
-                )
-                .contentShape(Rectangle())
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(ShortcutRowView.summary(for: command))
+                    Text(command)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+                if selected {
+                    Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.accentColor.opacity(hovering ? 0.16 : 0))
+                    .padding(.horizontal, 6)
+            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
     }
 }
 
-/// Type a chord, or press one. The recorder is the point: weft's chord syntax
-/// is hardware keycodes spelled out in words (`alt-bracketleft`), which nobody
-/// guesses correctly for a bracket, a backslash or an arrow key.
+/// The keys, drawn as keys. Click to record a new combination: weft's names
+/// for keys (`alt-bracketleft`) are hardware positions nobody guesses right,
+/// so pressing the chord is the only sane way to enter one.
 private struct ChordField: View {
     @Binding var chord: String
-    /// The record button is only worth its space while the pointer is on the
-    /// row it belongs to; the rest of the time it is a column of identical
-    /// targets running down a table nobody is aiming at.
-    var showsRecorder = true
-    let onChange: () -> Void
-
     @State private var recording = false
-    @State private var editing = false
     @State private var monitor: Any?
 
     var body: some View {
-        HStack(spacing: 4) {
-            // Two faces for one value: key caps when you are reading, a text
-            // field when you are editing. `alt-bracketright` is the spelling
-            // the file needs and ⌥] is the thing on your keyboard, and the
-            // table is much easier to scan in the second.
-            if editing {
-                TextField("alt-h", text: $chord)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .frame(width: 132)
-                    .onChange(of: chord) { _, _ in onChange() }
-                    .onSubmit { editing = false }
-            } else {
-                Button { editing = true } label: {
+        Button {
+            recording ? stop() : start()
+        } label: {
+            Group {
+                if recording {
+                    Text("Press keys…")
+                        .font(.callout)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                } else {
                     KeyCaps(chord: chord)
-                        .frame(width: 132, alignment: .leading)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .help("Click to type the chord, or use the record button")
             }
-
-            Button {
-                recording ? stop() : start()
-            } label: {
-                Image(systemName: recording ? "record.circle.fill" : "record.circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(recording ? Color.red : Color.secondary)
-            }
-            .buttonStyle(.borderless)
-            .opacity(recording || showsRecorder ? 1 : 0)
-            .help(recording ? "Press a chord, or click again to cancel" : "Record a chord")
+            .frame(minWidth: 96, alignment: .trailing)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(recording ? "Press the new combination, or click to cancel" : "Click, then press a new combination")
         .onDisappear(perform: stop)
     }
 
     private func start() {
         recording = true
-        editing = false
         // A local monitor, not a tap: this only has to see keys while the
-        // Settings window is key, and a tap would need the very permission the
-        // user may be here to work around.
+        // window is key, and a tap needs the very permission someone may be
+        // here to sort out.
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                stop()  // a bare Esc cancels
+                return nil
+            }
             guard let name = ChordNaming.name(forKeyCode: Int(event.keyCode)) else { return nil }
             chord = ChordNaming.modifierPrefix(event.modifierFlags) + name
-            onChange()
             stop()
             return nil  // swallowed, so recording ⌘W does not close the window
         }
@@ -1755,31 +822,889 @@ private struct KeyCaps: View {
     let chord: String
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 4) {
             if chord.isEmpty {
-                Text("unbound")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                Text("Record keys")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(ChordNaming.caps(for: chord).enumerated()), id: \.offset) { _, cap in
                     Text(cap)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .frame(minWidth: 18)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .frame(minWidth: 20)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
                         .background(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(Color.primary.opacity(0.08))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.12))
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                         )
                 }
             }
         }
     }
 }
+
+// MARK: - Apps
+
+private struct AppsPane: View {
+    @ObservedObject var store: ConfigStore
+    @State private var running: [RunningApp] = []
+
+    var body: some View {
+        Form {
+            Section {
+                if store.rules.isEmpty {
+                    EmptyState(
+                        symbol: "square.on.square",
+                        title: "Every app is tiled",
+                        text: "Add an app to keep it floating, or to open it on the same desktop every time."
+                    )
+                }
+                ForEach($store.rules) { $rule in
+                    AppRuleRow(
+                        rule: store.dirty($rule),
+                        labels: store.spaceLabels,
+                        onDelete: {
+                            store.rules.removeAll { $0.id == rule.id }
+                            store.markDirty()
+                        }
+                    )
+                }
+            } footer: {
+                if store.rules.count > 1 {
+                    Text("When an app matches more than one rule, the first one wins.")
+                }
+            }
+
+            Section {
+                Menu {
+                    ForEach(running) { app in
+                        Button {
+                            add(app)
+                        } label: {
+                            Label {
+                                Text(app.name)
+                            } icon: {
+                                Image(nsImage: AppIcons.icon(bundleID: app.id, size: 16))
+                            }
+                        }
+                    }
+                    if !running.isEmpty { Divider() }
+                    Button("Match by name or window title…") {
+                        store.addRule()
+                    }
+                } label: {
+                    Label("Add App", systemImage: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { running = RunningApp.current() }
+    }
+
+    private func add(_ app: RunningApp) {
+        store.rules.append(RuleRow(
+            app: "^" + NSRegularExpression.escapedPattern(for: app.name) + "$",
+            bundleID: app.id,
+            manage: false
+        ))
+        store.markDirty()
+    }
+}
+
+private struct AppRuleRow: View {
+    @Binding var rule: RuleRow
+    let labels: [String]
+    let onDelete: () -> Void
+    @State private var expanded = false
+
+    private var managed: Bool { rule.manage ?? true }
+
+    private var name: String {
+        if let named = AppIcons.name(bundleID: rule.bundleID) { return named }
+        let plain = rule.app
+            .replacingOccurrences(of: "^", with: "")
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: "\\", with: "")
+        if !plain.isEmpty { return plain }
+        return rule.title.isEmpty ? "New rule" : "Windows titled “\(rule.title)”"
+    }
+
+    private var summary: String {
+        switch (managed, rule.space.isEmpty) {
+        case (true, true): return "Tiled like any other app"
+        case (true, false): return "Tiled, on “\(rule.space)”"
+        case (false, true): return "Floats wherever you put it"
+        case (false, false): return "Floats, on “\(rule.space)”"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(nsImage: AppIcons.icon(bundleID: rule.bundleID, size: 32))
+                    .resizable()
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).fontWeight(.medium)
+                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Picker("", selection: Binding(
+                    get: { managed },
+                    set: { rule.manage = $0 ? nil : false }
+                )) {
+                    Text("Tile").tag(true)
+                    Text("Float").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Picker("", selection: $rule.space) {
+                    Text("Any desktop").tag("")
+                    ForEach(labels, id: \.self) { Text($0).tag($0) }
+                    if !rule.space.isEmpty, !labels.contains(rule.space) {
+                        Text(rule.space).tag(rule.space)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                Button {
+                    withAnimation(.snappy) { expanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
+                }
+                .buttonStyle(.borderless)
+                .help("Match by window title or bundle ID")
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "minus.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Remove")
+            }
+            if expanded {
+                LabeledContent("App name matches") {
+                    TextField("Ghostty|kitty", text: $rule.app)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                LabeledContent("Window title matches") {
+                    TextField("any title", text: $rule.title)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                LabeledContent("Bundle ID") {
+                    TextField("com.example.app", text: $rule.bundleID)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                Text("Names and titles are regular expressions: “Brave|Zen” matches either.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !rule.isValid {
+                Label("Choose an app, or give this rule a name or title to match.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct RunningApp: Identifiable, Hashable {
+    let id: String
+    let name: String
+
+    @MainActor
+    static func current() -> [RunningApp] {
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app -> RunningApp? in
+                guard let id = app.bundleIdentifier, let name = app.localizedName,
+                      id != Bundle.main.bundleIdentifier, seen.insert(id).inserted
+                else { return nil }
+                return RunningApp(id: id, name: name)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
+/// App icons and names by bundle id, looked up once each. Only the Apps page
+/// asks, and only while it is open.
+@MainActor
+private enum AppIcons {
+    private static var icons: [String: NSImage] = [:]
+    private static var names: [String: String] = [:]
+
+    static func icon(bundleID: String, size: CGFloat) -> NSImage {
+        let key = "\(bundleID)@\(Int(size))"
+        if let hit = icons[key] { return hit }
+        let base: NSImage
+        if !bundleID.isEmpty, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            base = NSWorkspace.shared.icon(forFile: url.path)
+        } else {
+            base = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil) ?? NSImage()
+        }
+        let image = (base.copy() as? NSImage) ?? base
+        image.size = NSSize(width: size, height: size)
+        icons[key] = image
+        return image
+    }
+
+    static func name(bundleID: String) -> String? {
+        guard !bundleID.isEmpty else { return nil }
+        if let hit = names[bundleID] { return hit }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+        let name = FileManager.default.displayName(atPath: url.path)
+            .replacingOccurrences(of: ".app", with: "")
+        names[bundleID] = name
+        return name
+    }
+}
+
+// MARK: - Desktops
+
+private struct DesktopsPane: View {
+    @ObservedObject var store: ConfigStore
+    @ObservedObject var health: EngineHealth
+
+    /// Rows past this have no desktop to land on: names go out in Mission
+    /// Control order, so it is purely a count.
+    private var landing: Int { health.running ? health.liveSpaces.count : store.spaces.count }
+
+    var body: some View {
+        Form {
+            if health.running, store.spaces.count > health.liveSpaces.count {
+                Section {
+                    Label(
+                        "You have \(health.liveSpaces.count) desktop(s), but \(store.spaces.count) names. Add desktops in Mission Control, or remove the extra names.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                }
+            }
+
+            Section {
+                if store.spaces.isEmpty {
+                    EmptyState(
+                        symbol: "menubar.dock.rectangle",
+                        title: "No named desktops",
+                        text: "Every desktop uses the default layout. Name one to give it a layout of its own, or to send apps to it."
+                    )
+                }
+                ForEach(Array(store.spaces.enumerated()), id: \.element.id) { index, space in
+                    DesktopRow(
+                        number: index + 1,
+                        space: binding(space.id),
+                        hasDesktop: index < landing,
+                        canMoveUp: index > 0,
+                        canMoveDown: index < store.spaces.count - 1,
+                        onMove: { move(space.id, by: $0) },
+                        onDelete: {
+                            store.spaces.removeAll { $0.id == space.id }
+                            store.markDirty()
+                        }
+                    )
+                }
+                Button {
+                    store.addSpace()
+                } label: {
+                    Label("Add Desktop", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            } footer: {
+                Text("Names follow Mission Control order — the first name is your first desktop. Shortcuts and apps can refer to a desktop by its name.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func binding(_ id: SpaceRow.ID) -> Binding<SpaceRow> {
+        Binding(
+            get: { store.spaces.first { $0.id == id } ?? SpaceRow() },
+            set: { value in
+                guard let i = store.spaces.firstIndex(where: { $0.id == id }) else { return }
+                store.spaces[i] = value
+                store.markDirty()
+            }
+        )
+    }
+
+    private func move(_ id: SpaceRow.ID, by delta: Int) {
+        guard let from = store.spaces.firstIndex(where: { $0.id == id }),
+              store.spaces.indices.contains(from + delta)
+        else { return }
+        store.spaces.swapAt(from, from + delta)
+        store.markDirty()
+    }
+}
+
+private struct DesktopRow: View {
+    let number: Int
+    @Binding var space: SpaceRow
+    let hasDesktop: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMove: (Int) -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("\(number)")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 28, height: 28)
+                .foregroundStyle(hasDesktop ? Color.white : Color.secondary)
+                .weftGlass(Circle(), tint: hasDesktop ? Color.accentColor.opacity(0.8) : nil)
+            TextField("Name", text: $space.label)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 220)
+            if !hasDesktop {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("There is no desktop for this name yet.")
+            }
+            Spacer(minLength: 8)
+            Picker("", selection: $space.layout) {
+                Text("Tiling").tag("bsp")
+                Text("Floating").tag("float")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            HStack(spacing: 2) {
+                Button { onMove(-1) } label: { Image(systemName: "chevron.up") }
+                    .disabled(!canMoveUp)
+                Button { onMove(1) } label: { Image(systemName: "chevron.down") }
+                    .disabled(!canMoveDown)
+            }
+            .buttonStyle(.borderless)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "minus.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Remove")
+        }
+    }
+}
+
+// MARK: - Advanced
+
+private struct AdvancedPane: View {
+    @ObservedObject var store: ConfigStore
+    @ObservedObject var health: EngineHealth
+    @State private var newMode = ""
+    @State private var preview = ""
+    @State private var showsFile = false
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent {
+                    EdgeCross(
+                        top: $store.reserveTop, bottom: $store.reserveBottom,
+                        left: $store.reserveLeft, right: $store.reserveRight,
+                        onChange: store.markDirty
+                    )
+                } label: {
+                    Text("Keep free")
+                    Text("Space weft never tiles into — for a bar or a Dock that is always showing.")
+                }
+            } header: {
+                Text("Screen")
+            }
+
+            Section("Behavior") {
+                Toggle(isOn: store.bind(\.manageMenubarApps)) {
+                    Text("Tile windows of menu-bar apps")
+                    Text("Usually their dropdown panels, which should not take a slot.")
+                }
+                Toggle("Check for new versions of weft", isOn: store.bind(\.checkForUpdates))
+            }
+
+            Section {
+                let modes = store.modes.filter { !$0.isDefault }
+                ForEach(modes) { mode in
+                    HStack {
+                        Text(mode.name)
+                        Text("\(mode.rows.count) shortcut\(mode.rows.count == 1 ? "" : "s")")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button(role: .destructive) {
+                            store.removeMode(mode.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Delete this mode and its shortcuts")
+                    }
+                }
+                HStack {
+                    TextField("New mode name", text: $newMode)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addMode)
+                    Button("Add", action: addMode)
+                        .disabled(newMode.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            } header: {
+                Text("Shortcut modes")
+            } footer: {
+                Text("A mode is a second layer of shortcuts — like resize mode — that only works after you enter it. Give a shortcut “Enter mode” in Shortcuts to reach it.")
+            }
+
+            Section("Border drawing") {
+                Picker("Drawn by", selection: store.bind(\.bordersBackend)) {
+                    Text("Weft").tag("native")
+                    Text("JankyBorders").tag("janky")
+                }
+                .pickerStyle(.segmented)
+                if store.bordersBackend == "janky" {
+                    LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
+                    Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
+                    LabeledContent("Arguments") {
+                        TextField("width=5.0 style=round", text: store.bind(\.bordersArgs))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(store.bordersArgsLocked)
+                    }
+                }
+            }
+
+            Section("Sketchybar") {
+                Toggle("Send layout and focus events to Sketchybar", isOn: store.bind(\.sketchybarEnabled))
+                if store.sketchybarEnabled {
+                    LabeledContent("Sketchybar") { InstallState(path: health.sketchybarPath) }
+                    LabeledContent("Bar program") {
+                        TextField("sketchybar", text: store.bind(\.sketchybarBarName))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                    }
+                    SliderRow(title: "Group events closer than", value: store.bind(\.sketchybarCoalesceMs),
+                              range: 0...100, unit: "ms")
+                }
+            }
+
+            Section {
+                HStack {
+                    Button("Open in Editor") { store.openExternally() }
+                    Button("Show in Finder") { store.revealInFinder() }
+                    Button("Reload") { store.load() }
+                }
+                DisclosureGroup("The file, as weft will read it", isExpanded: $showsFile) {
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(preview.isEmpty ? "—" : preview)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(height: 260)
+                }
+            } header: {
+                Text("Configuration file")
+            } footer: {
+                Text(ConfigStore.configPath)
+            }
+
+            Section {
+                LabeledContent("weftctl") {
+                    Text(Self.cliInstalled ? "~/.local/bin/weftctl" : "Not installed")
+                        .foregroundStyle(.secondary)
+                }
+                if Self.cliInstalled {
+                    LabeledContent("Add to your shell") {
+                        HStack {
+                            Text(Self.pathLine)
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(Self.pathLine, forType: .string)
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Command line")
+            } footer: {
+                Text("Optional. Everything the command line can do has a place in this window.")
+            }
+
+            Section("Engine") {
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        Circle().fill(health.tint).frame(width: 8, height: 8)
+                        Text(health.headline)
+                    }
+                }
+                Button(health.isRestarting ? "Restarting…" : "Restart Engine") { health.restart() }
+                    .disabled(health.isRestarting)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { preview = store.previewText() }
+        .onChange(of: showsFile) { _, open in if open { preview = store.previewText() } }
+        .onChange(of: store.lastSavedAt) { _, _ in if showsFile { preview = store.previewText() } }
+    }
+
+    private static let pathLine = #"export PATH="$HOME/.local/bin:$PATH""#
+
+    private static var cliInstalled: Bool {
+        FileManager.default.isExecutableFile(
+            atPath: ("~/.local/bin/weftctl" as NSString).expandingTildeInPath
+        )
+    }
+
+    private func addMode() {
+        store.addMode(named: newMode)
+        newMode = ""
+    }
+}
+
+private struct InstallState: View {
+    let path: String?
+
+    var body: some View {
+        Label(path == nil ? "Not installed" : "Installed", systemImage: path == nil ? "xmark.circle" : "checkmark.circle.fill")
+            .foregroundStyle(path == nil ? Color.orange : Color.green)
+            .help(path ?? "Searched the usual install locations and your PATH.")
+    }
+}
+
+// MARK: - Shared pieces
+
+private struct SliderRow: View {
+    let title: String
+    var caption: String?
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var unit = "pt"
+
+    var body: some View {
+        LabeledContent {
+            HStack(spacing: 10) {
+                Slider(
+                    value: Binding(get: { Double(value) }, set: { value = Int($0.rounded()) }),
+                    in: Double(range.lowerBound)...Double(range.upperBound)
+                )
+                .frame(minWidth: 160, maxWidth: 260)
+                Text("\(value) \(unit)")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 52, alignment: .trailing)
+            }
+        } label: {
+            Text(title)
+            if let caption { Text(caption) }
+        }
+    }
+}
+
+private struct DoubleSliderRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var step: Double = 0.5
+    var unit = "pt"
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 10) {
+                // Rounded here rather than with `step:`, which on macOS draws a
+                // tick for every step — twenty-two of them for a thickness.
+                Slider(
+                    value: Binding(get: { value }, set: { value = ($0 / step).rounded() * step }),
+                    in: range
+                )
+                .frame(minWidth: 160, maxWidth: 260)
+                Text(value.formatted(.number.precision(.fractionLength(0...1))) + " " + unit)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 52, alignment: .trailing)
+            }
+        }
+    }
+}
+
+private struct EmptyState: View {
+    let symbol: String
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(title).font(.headline)
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+    }
+}
+
+/// The one thing that needs doing after a late permission grant, said once.
+private struct RestartNotice: View {
+    @ObservedObject var health: EngineHealth
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.clockwise.circle.fill")
+                .font(.title2)
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Weft needs to restart once").fontWeight(.semibold)
+                Text("A permission arrived after it started, and macOS only hands it over at launch.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button(health.isRestarting ? "Restarting…" : "Restart") { health.restart() }
+                .weftProminentButton()
+                .disabled(health.isRestarting)
+        }
+    }
+}
+
+/// The engine's state, at the foot of the sidebar — and the one button that
+/// fixes it, never a command to go and type.
+private struct EngineCard: View {
+    @ObservedObject var health: EngineHealth
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle().fill(health.tint).frame(width: 8, height: 8)
+                Text(health.headline).font(.callout.weight(.medium))
+                Spacer(minLength: 0)
+            }
+            Text(health.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !health.running {
+                Button(health.isRestarting ? "Starting…" : "Start Weft") { health.startEngine() }
+                    .weftProminentButton()
+                    .controlSize(.small)
+                    .disabled(health.isRestarting)
+            } else if health.needsRestart {
+                Button(health.isRestarting ? "Restarting…" : "Restart") { health.restart() }
+                    .weftProminentButton()
+                    .controlSize(.small)
+                    .disabled(health.isRestarting)
+            } else if health.needsPermissions {
+                Button("Open Setup…") { OnboardingWindowController.shared.show() }
+                    .weftGlassButton()
+                    .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .weftGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+/// "Saved", briefly, after each change lands — or why it could not be.
+private struct SaveStateBadge: View {
+    @ObservedObject var store: ConfigStore
+    @State private var showsSaved = false
+    @State private var showsError = false
+
+    var body: some View {
+        Group {
+            if let error = store.validationError {
+                Button {
+                    showsError = true
+                } label: {
+                    Label("Not saved", systemImage: "exclamationmark.triangle.fill")
+                }
+                .foregroundStyle(.orange)
+                .popover(isPresented: $showsError) {
+                    Text(error)
+                        .padding(14)
+                        .frame(width: 300, alignment: .leading)
+                }
+                .help("A change cannot be saved yet — click for why")
+            } else if showsSaved {
+                Label("Saved", systemImage: "checkmark.circle.fill")
+                    .labelStyle(.titleAndIcon)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
+        }
+        .task(id: store.lastSavedAt) {
+            guard store.lastSavedAt != nil else { return }
+            withAnimation(.easeOut(duration: 0.15)) { showsSaved = true }
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            withAnimation(.easeOut(duration: 0.3)) { showsSaved = false }
+        }
+    }
+}
+
+/// Four edge values laid out as a cross — top above, left and right either
+/// side, bottom below — so where a field sits says which edge it is.
+private struct EdgeCross: View {
+    @Binding var top: Int
+    @Binding var bottom: Int
+    @Binding var left: Int
+    @Binding var right: Int
+    var range: ClosedRange<Int> = 0...400
+    let onChange: () -> Void
+
+    private static let cell: CGFloat = 58
+    private static let spacing: CGFloat = 8
+
+    var body: some View {
+        VStack(spacing: Self.spacing) {
+            field($top, "Top")
+            HStack(spacing: Self.spacing) {
+                field($left, "Left")
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.primary.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .frame(width: Self.cell, height: 32)
+                field($right, "Right")
+            }
+            field($bottom, "Bottom")
+        }
+        .frame(width: Self.cell * 3 + Self.spacing * 2)
+    }
+
+    private func field(_ binding: Binding<Int>, _ name: String) -> some View {
+        TextField("", value: binding, format: .number)
+            .textFieldStyle(.roundedBorder)
+            .monospacedDigit()
+            .multilineTextAlignment(.center)
+            .frame(width: Self.cell)
+            .onChange(of: binding.wrappedValue) { _, value in
+                let clamped = min(max(value, range.lowerBound), range.upperBound)
+                if clamped != value { binding.wrappedValue = clamped }
+                onChange()
+            }
+            .help("\(name), in points")
+            .accessibilityLabel(name)
+    }
+}
+
+// MARK: - Liquid Glass, with a fallback
+
+/// Liquid Glass where the system has it (macOS 26), a material where it does
+/// not. Glass is drawn by the WindowServer's compositor and costs nothing
+/// while nothing moves; it is only ever on screen while this window is.
+extension View {
+    @ViewBuilder
+    func weftGlass<S: Shape>(_ shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
+        } else {
+            self
+                .background(shape.fill(tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.regularMaterial)))
+                .overlay(shape.stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        }
+    }
+
+    @ViewBuilder
+    func weftProminentButton() -> some View {
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glassProminent)
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+    }
+
+    @ViewBuilder
+    func weftGlassButton() -> some View {
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+    }
+}
+
+/// Glass shapes that sit close together blend as one on macOS 26; a plain
+/// group elsewhere.
+private struct GlassGroup<Content: View>: View {
+    var spacing: CGFloat?
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) { content }
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - Colour
+
+extension Color {
+    /// From 0xAARRGGBB — the notation weft.toml and JankyBorders use.
+    init(argb: UInt32) {
+        self.init(
+            .sRGB,
+            red: Double((argb >> 16) & 0xff) / 255,
+            green: Double((argb >> 8) & 0xff) / 255,
+            blue: Double(argb & 0xff) / 255,
+            opacity: Double((argb >> 24) & 0xff) / 255
+        )
+    }
+
+    init?(hex: String) {
+        guard !hex.isEmpty, let value = BorderRenderer.parseColor(hex) else { return nil }
+        self.init(argb: value)
+    }
+
+    /// Back to 0xAARRGGBB for the file.
+    var argbHex: String {
+        guard let c = NSColor(self).usingColorSpace(.sRGB) else { return "0xff7aa2f7" }
+        func byte(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(
+            format: "0x%02x%02x%02x%02x",
+            byte(c.alphaComponent), byte(c.redComponent), byte(c.greenComponent), byte(c.blueComponent)
+        )
+    }
+}
+
+// MARK: - Bindings that save
+
+extension ConfigStore {
+    /// A binding to one of the store's settings that marks it changed —
+    /// which, since changes apply as they are made, schedules the save.
+    func bind<Value>(_ keyPath: ReferenceWritableKeyPath<ConfigStore, Value>) -> Binding<Value> {
+        Binding(
+            get: { self[keyPath: keyPath] },
+            set: { self[keyPath: keyPath] = $0; self.markDirty() }
+        )
+    }
+
+    /// The same, for a binding a view already has: a row in a list.
+    func dirty<Value>(_ binding: Binding<Value>) -> Binding<Value> {
+        Binding(
+            get: { binding.wrappedValue },
+            set: { binding.wrappedValue = $0; self.markDirty() }
+        )
+    }
+}
+
+// MARK: - Key names
 
 /// Keycode → the token `parseChord` expects. Deliberately the inverse of
 /// WeftInput's table rather than a character lookup: the config is
@@ -1801,9 +1726,6 @@ enum ChordNaming {
 
     static func name(forKeyCode code: Int) -> String? { letters[code] }
 
-    /// The glyph shown on the physical key, per chord token. Modifiers get
-    /// their symbols; named keys get the character or the short word that is
-    /// actually printed on the cap.
     private static let glyphs: [String: String] = [
         "ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘",
         "space": "␣", "tab": "⇥", "return": "↩", "delete": "⌫", "escape": "⎋",
@@ -1850,382 +1772,49 @@ enum CommandCatalog {
         ]),
         Group(name: "Window", commands: [
             "window toggle zoom-fullscreen", "window toggle split",
-            "float toggle", "float on", "float off",
-            "sticky toggle", "balance",
+            "float toggle", "balance",
             "split vertical", "split horizontal",
-            "insertion bsp", "insertion manual",
         ]),
-        Group(name: "Stack", commands: [
+        Group(name: "Stacks", commands: [
             "stack toggle", "stack next", "stack prev", "stack unstack", "stack all",
             "stack split west", "stack split east",
-            "stack split north", "stack split south",
             "stack move west", "stack move east",
-            "stack move north", "stack move south",
         ]),
         Group(name: "Spaces", commands: [
-            "space focus 1", "space focus 2", "space focus 3",
+            "space focus 1", "space focus 2", "space focus 3", "space focus 4", "space focus 5",
             "space focus recent",
             "space move-window 1", "space move-window 2", "space move-window 3",
             "space layout bsp", "space layout float", "space layout toggle",
-            "move space display west", "move space display east",
         ]),
         Group(name: "Resize", commands: [
             "resize left 40", "resize right 40", "resize up 40", "resize down 40",
             "resize left 120", "resize right 120", "resize up 120", "resize down 120",
         ]),
-        Group(name: "Apps", commands: [
-            "app toggle com.apple.finder",
-            "app toggle com.mitchellh.ghostty",
-        ]),
         Group(name: "Modes", commands: ["mode default", "mode resize"]),
     ]
-}
 
-// MARK: - Integrations
-
-private struct IntegrationsTab: View {
-    @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Card(title: "Window borders", subtitle: "Draws the highlight around the focused window.") {
-                HStack(spacing: 10) {
-                    Toggle("Enable borders", isOn: $store.bordersEnabled)
-                        .toggleStyle(.switch)
-                        .onChange(of: store.bordersEnabled) { _, _ in store.markDirty() }
-                    Spacer()
-                    if store.bordersBackend == "janky" {
-                        InstallState(path: health.bordersPath, binary: "borders")
-                    }
-                }
-
-                if store.bordersEnabled {
-                    Row(
-                        label: "Drawn by",
-                        help: store.bordersBackend == "native"
-                            ? "Weft's own renderer. Borders only around windows weft is managing, so menu-bar popovers and system panels never get one."
-                            : "The external borders binary. It outlines anything that looks like a window, including menu-bar popovers."
-                    ) {
-                        Picker("", selection: $store.bordersBackend) {
-                            Text("Built into weft").tag("native")
-                            Text("JankyBorders").tag("janky")
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 260)
-                        .onChange(of: store.bordersBackend) { _, _ in store.markDirty() }
-                    }
-                }
-
-                if store.bordersEnabled, store.bordersBackend == "native" {
-                    Row(label: "Thickness") {
-                        DecimalField(value: $store.bordersWidth, range: 0...20, unit: "px") {
-                            store.markDirty()
-                        }
-                    }
-                    Row(label: "Corners", help: "macOS rounds windows differently by kind. Matching reads each window's own corners.") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Match each window's own corners", isOn: $store.bordersAutoRadius)
-                                .onChange(of: store.bordersAutoRadius) { _, _ in store.markDirty() }
-                            if !store.bordersAutoRadius {
-                                DecimalField(value: $store.bordersRadius, range: 0...40, unit: "px") {
-                                    store.markDirty()
-                                }
-                            }
-                        }
-                    }
-                    Row(label: "Unfocused windows", help: "Outline every window in the layout, not just the focused one.") {
-                        Toggle("Outline them too", isOn: $store.bordersShowInactive)
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 12))
-                            .onChange(of: store.bordersShowInactive) { _, _ in store.markDirty() }
-                    }
-                    if store.bordersShowInactive {
-                        Row(label: "Unfocused colour", help: "0xaarrggbb. Blank uses a dim grey-blue.") {
-                            TextField("0x40414868", text: $store.bordersInactiveColor)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .frame(maxWidth: 160)
-                                .onChange(of: store.bordersInactiveColor) { _, _ in store.markDirty() }
-                        }
-                    }
-                    Label(
-                        "The focused colour comes from active-color, per layout, in Advanced — the same table JankyBorders used.",
-                        systemImage: "paintpalette"
-                    )
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                }
-
-                // Switching this on without the binary is a no-op that logs one
-                // line to a file nobody reads. Say so here instead.
-                if store.bordersEnabled, store.bordersBackend == "janky", health.bordersPath == nil {
-                    MissingBinary(
-                        name: "borders",
-                        install: "brew install FelixKratz/formulae/borders",
-                        setting: "borders"
-                    )
-                }
-
-                if store.bordersEnabled, store.bordersBackend == "janky", health.bordersPath != nil {
-                    Row(label: "Supervise", help: "weftd starts borders and restarts it if it dies.") {
-                        Toggle("Keep borders running", isOn: $store.bordersSupervise)
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 12))
-                            .onChange(of: store.bordersSupervise) { _, _ in store.markDirty() }
-                    }
-                    Row(
-                        label: "Arguments",
-                        help: store.bordersArgsLocked
-                            ? "This list is wrapped across several lines in weft.toml. Edit it there — this window leaves it alone."
-                            : "Passed straight to the borders binary, space separated."
-                    ) {
-                        TextField("width=5.0 style=round", text: $store.bordersArgs)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .frame(maxWidth: 420)
-                            .disabled(store.bordersArgsLocked)
-                            .onChange(of: store.bordersArgs) { _, _ in store.markDirty() }
-                    }
-                    Label(
-                        "Colour tables — active-color and mode-color — stay in Advanced; this window leaves them untouched.",
-                        systemImage: "paintpalette"
-                    )
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                }
-            }
-
-            Card(title: "Sketchybar", subtitle: "Fires a weft_event trigger whenever the layout or focus changes.") {
-                HStack(spacing: 10) {
-                    Toggle("Enable sketchybar events", isOn: $store.sketchybarEnabled)
-                        .toggleStyle(.switch)
-                        .onChange(of: store.sketchybarEnabled) { _, _ in store.markDirty() }
-                    Spacer()
-                    InstallState(path: health.sketchybarPath, binary: "sketchybar")
-                }
-
-                if store.sketchybarEnabled, health.sketchybarPath == nil {
-                    MissingBinary(
-                        name: "sketchybar",
-                        install: "brew install FelixKratz/formulae/sketchybar",
-                        setting: "sketchybar"
-                    )
-                }
-
-                if store.sketchybarEnabled, health.sketchybarPath != nil {
-                    Row(label: "Bar binary") {
-                        TextField("sketchybar", text: $store.sketchybarBarName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
-                            .onChange(of: store.sketchybarBarName) { _, _ in store.markDirty() }
-                    }
-                    Row(label: "Coalesce", help: "Events closer together than this are collapsed into one.") {
-                        HStack(spacing: 6) {
-                            TextField("", value: $store.sketchybarCoalesceMs, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 62)
-                                .multilineTextAlignment(.trailing)
-                                .onChange(of: store.sketchybarCoalesceMs) { _, _ in store.markDirty() }
-                            Text("ms").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Where the binary is, or that it is not there. Shown whether or not the
-/// integration is switched on: "installed but disabled" is useful too.
-private struct InstallState: View {
-    let path: String?
-    let binary: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: path == nil ? "xmark.circle" : "checkmark.circle.fill")
-                .font(.system(size: 10))
-            Text(path.map { "found at \($0)" } ?? "\(binary) not installed")
-                .lineLimit(1)
-                .truncationMode(.head)
-        }
-        .font(.system(size: 10.5))
-        .foregroundStyle(path == nil ? Color.orange : Color.green)
-        .help(path ?? "Searched the usual prefixes and PATH.")
-    }
-}
-
-private struct MissingBinary: View {
-    let name: String
-    let install: String
-    let setting: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("This is on, but \(name) is not installed — weft will do nothing for it.")
-                .font(.system(size: 11.5, weight: .medium))
-            HStack(spacing: 8) {
-                Text(install)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
-                    )
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(install, forType: .string)
-                }
-                .controlSize(.small)
-                Spacer()
-            }
-            Text("Or switch it off above — nothing else in weft depends on it.")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-        }
-        .padding(11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.orange.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.orange.opacity(0.28))
-        )
-    }
-}
-
-// MARK: - Advanced
-
-/// Where `weftctl` lives, for anyone who wants it — and said to be optional,
-/// because it is: WeftBar installs the engine, and everything the terminal
-/// can do here has a button somewhere in this window.
-private struct CommandLineCard: View {
-    private static let binDir = ("~/.local/bin" as NSString).expandingTildeInPath
-    private static let pathLine = #"export PATH="$HOME/.local/bin:$PATH""#
-    @State private var copied = false
-
-    private var installed: Bool {
-        FileManager.default.isExecutableFile(atPath: Self.binDir + "/weftctl")
-    }
-
-    var body: some View {
-        Card(title: "Command line", subtitle: "Optional — nothing in weft needs it.") {
-            if installed {
-                Text("`weftctl` is installed in `~/.local/bin`. To run it from a terminal, add that folder to your shell's PATH:")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Text(Self.pathLine)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                    Spacer()
-                    Button(copied ? "Copied" : "Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(Self.pathLine, forType: .string)
-                        copied = true
-                    }
-                    .controlSize(.small)
-                }
-            } else {
-                Text("The engine is not installed yet. Open **Permissions…** from the menu bar and weft will install it.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-private struct AdvancedTab: View {
-    @ObservedObject var store: ConfigStore
-    @State private var preview = ""
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Card(title: "The file", subtitle: ConfigStore.configPath) {
-                HStack(spacing: 10) {
-                    Button("Open in your editor") { store.openExternally() }
-                    Button("Reveal in Finder") { store.revealInFinder() }
-                    Button("Reload from disk") { store.load(); preview = store.previewText() }
-                    Spacer()
-                }
-                .controlSize(.small)
-
-                Text("Weft watches this file and reloads it within 100 ms of a write — an external edit lands without restarting anything. Reload here to pull those changes into this window.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            CommandLineCard()
-
-            if let error = store.validationError {
-                Card(title: "Validation") {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Card(
-                title: "Preview",
-                subtitle: "Exactly what Save would write. Comments and any key this window does not know about are carried through untouched."
-            ) {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(preview.isEmpty ? "—" : preview)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .frame(height: 330)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.09))
-                )
-            }
-        }
-        .onAppear { preview = store.previewText() }
-        .onChange(of: store.isDirty) { _, _ in preview = store.previewText() }
+    static func contains(_ command: String) -> Bool {
+        groups.contains { $0.commands.contains(command) }
     }
 }
 
 // MARK: - Engine health
 
-/// The daemon's state, for the sidebar card. Polled slowly: this is context,
-/// not a control, and a settings window has no business hammering the socket.
+/// The daemon's state, for the sidebar card. Polled slowly — every five
+/// seconds, only while the window is open.
 @MainActor
 final class EngineHealth: ObservableObject {
     @Published var running = false
     @Published var accessibility = false
-    /// The event tap, not the Input Monitoring switch. This card is about
-    /// whether weft works, and Accessibility alone is enough for macOS to let
-    /// weftd open the tap — flagging "missing permissions" at someone whose
-    /// keybinds all fire is just wrong.
+    /// The event tap, not the Input Monitoring switch: Accessibility alone is
+    /// enough for macOS to let weftd open it.
     @Published var keybindsLive = false
     @Published var isRestarting = false
-    /// weftd is running with grants it cannot use, because it was started
-    /// before they were made. One restart is the whole fix.
+    /// Running with grants it cannot use, because they came after it started.
     @Published var needsRestart = false
-    /// Labels of the desktops that actually exist right now. `[[space]]` names
-    /// are handed out in Mission Control order, so a config with more entries
-    /// than the machine has desktops leaves the extras with nowhere to land —
-    /// and every keybind and rule naming one of them fails silently.
+    /// Labels of the desktops that exist right now.
     @Published var liveSpaces: [String] = []
 
-    /// Resolved once: a helper does not get installed while the window is open,
-    /// and `which` on every poll is a process spawn for nothing.
     let bordersPath = ExternalBinary.find("borders")
     let sketchybarPath = ExternalBinary.find("sketchybar")
 
@@ -2235,35 +1824,31 @@ final class EngineHealth: ObservableObject {
 
     var tint: Color {
         if !running { return .orange }
-        if needsRestart { return .weft }
+        if needsRestart { return .accentColor }
         return needsPermissions ? .yellow : .green
     }
 
     var headline: String {
-        if !running { return "Engine not running" }
-        if needsRestart { return "Restart pending" }
-        return needsPermissions ? "Missing permissions" : "Engine running"
+        if !running { return "Weft isn't running" }
+        if needsRestart { return "Restart needed" }
+        return needsPermissions ? "Needs permission" : "Weft is running"
     }
 
     var detail: String {
-        if !running { return "Start it with weftctl service start." }
-        if needsRestart { return "Granted after weftd started — it needs to start once more." }
+        if !running { return "Windows aren't being tiled." }
+        if needsRestart { return "A permission arrived after it started." }
         if needsPermissions {
             var missing: [String] = []
             if !accessibility { missing.append("Accessibility") }
             if !keybindsLive { missing.append("Input Monitoring") }
-            return missing.joined(separator: " and ") + " is not granted to weftd."
+            return missing.joined(separator: " and ") + " is off."
         }
-        return "Config changes apply within 100 ms."
+        return "Changes apply as you make them."
     }
 
     func start() {
         refresh()
         timer?.invalidate()
-        // Five seconds, not three. This card is context, and the window it
-        // sits in is one the user is typing into: every poll is two socket
-        // round trips, and a settings window has no business talking to the
-        // daemon more often than it has to.
         timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -2304,9 +1889,27 @@ final class EngineHealth: ObservableObject {
         isRestarting = true
         Task.detached(priority: .userInitiated) {
             ConfigEditorWindowController.restartWeftCtl()
-            // Wait for the socket rather than a fixed sleep: `launchctl
-            // kickstart -k` returns as soon as it has signalled, and asking
-            // into that gap reads back as "engine not running".
+            _ = await OnboardingWindowController.awaitDaemon()
+            await MainActor.run {
+                self.isRestarting = false
+                self.refresh()
+            }
+        }
+    }
+
+    /// Not running: install it if this app carries an engine that is not in
+    /// place yet, otherwise register and start the service.
+    func startEngine() {
+        let installed = FileManager.default.isExecutableFile(
+            atPath: EngineInstaller.binDir.appendingPathComponent("weftctl").path
+        )
+        if !installed, EngineInstaller.bundledWeftctl != nil {
+            OnboardingWindowController.shared.showInstall()
+            return
+        }
+        isRestarting = true
+        Task.detached(priority: .userInitiated) {
+            ConfigEditorWindowController.runWeftctl(["service", "install"])
             _ = await OnboardingWindowController.awaitDaemon()
             await MainActor.run {
                 self.isRestarting = false
@@ -2319,51 +1922,81 @@ final class EngineHealth: ObservableObject {
 // MARK: - Window
 
 @MainActor
-final class ConfigEditorWindowController: NSWindowController {
+final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
     static let shared = ConfigEditorWindowController()
 
-    private let store = ConfigStore()
-    private let health = EngineHealth()
+    /// Built when the window opens and released when it closes: WeftBar runs
+    /// all day, and a settings window it is not showing should cost nothing.
+    private var store: ConfigStore?
+    private var health: EngineHealth?
+    private var lastFrame: NSRect?
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 940, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
             styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
-            defer: false
+            defer: true
         )
         window.title = "Weft Settings"
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.center()
+        window.toolbarStyle = .unified
         window.isReleasedWhenClosed = false
+        window.center()
         window.setFrameAutosaveName("WeftSettings")
         super.init(window: window)
-
-        let tab = SettingsTab(rawValue: Self.launchTab) ?? .general
-        window.contentView = NSHostingView(
-            rootView: SettingsView(store: store, health: health, tab: tab)
-        )
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     static func configPath() -> String { ConfigStore.configPath }
 
-    /// `--tab spaces` on the command line, for `open -a WeftBar --args
-    /// --settings --tab keys`.
-    private static var launchTab: String {
+    /// `--tab shortcuts` on the command line, for `open -a WeftBar --args
+    /// --settings --tab shortcuts`.
+    private static var launchSection: SettingsSection {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--tab"), i + 1 < args.count else { return "general" }
-        return args[i + 1]
+        guard let i = args.firstIndex(of: "--tab"), i + 1 < args.count else { return .general }
+        return SettingsSection(launchName: args[i + 1]) ?? .general
     }
 
     func show() {
-        store.load()
-        health.refresh()
-        window?.makeKeyAndOrderFront(nil)
+        guard let window else { return }
+        if window.contentViewController == nil {
+            // Load before the views exist. Loading into views already on
+            // screen changes values under controls that react to changes —
+            // the edge fields do — which marked the file changed and saved it
+            // just because Settings was opened.
+            let store = ConfigStore()
+            store.load()
+            let health = EngineHealth()
+            self.store = store
+            self.health = health
+            let host = NSHostingController(
+                rootView: SettingsView(store: store, health: health, section: Self.launchSection)
+            )
+            host.sceneBridgingOptions = [.toolbars, .title]
+            let frame = lastFrame ?? window.frame
+            window.contentViewController = host
+            window.setFrame(frame, display: false)
+        }
+        health?.refresh()
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak window] in window?.makeFirstResponder(nil) }
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated { teardown() }
+    }
+
+    private func teardown() {
+        store?.flush()
+        health?.stop()
+        lastFrame = window?.frame
+        window?.contentViewController = nil
+        store = nil
+        health = nil
     }
 
     /// Resolve weftctl without a hardcoded home directory.
@@ -2388,12 +2021,16 @@ final class ConfigEditorWindowController: NSWindowController {
         return found.isEmpty ? nil : URL(fileURLWithPath: found)
     }
 
-    nonisolated static func restartWeftCtl() {
+    nonisolated static func runWeftctl(_ arguments: [String]) {
         guard let url = weftctlURL() else { return }
         let proc = Process()
         proc.executableURL = url
-        proc.arguments = ["service", "restart"]
+        proc.arguments = arguments
         try? proc.run()
         proc.waitUntilExit()
+    }
+
+    nonisolated static func restartWeftCtl() {
+        runWeftctl(["service", "restart"])
     }
 }

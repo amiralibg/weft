@@ -100,6 +100,12 @@ final class ConfigStore: ObservableObject {
     /// every save would quietly switch matching off for anyone who ever
     /// pressed Save.
     @Published var bordersAutoRadius = true
+    /// The focused border's colour, read from `active-color`. Written back
+    /// only when changed here: the file may hold a per-layout table the one
+    /// colour picker cannot represent, and opening Settings must not
+    /// flatten it.
+    @Published var bordersActiveColor = "0xff7aa2f7"
+    private var activeColorEdited = false
     @Published var bordersInactiveColor = ""
     @Published var bordersShowInactive = true
     @Published var bordersSupervise = true
@@ -118,6 +124,10 @@ final class ConfigStore: ObservableObject {
 
     @Published var status: Status = .idle("")
     @Published var isDirty = false
+    /// When the last save landed — what the window's "Saved" tick follows.
+    @Published var lastSavedAt: Date?
+    /// Changes apply as they are made; this is the pending write.
+    private var autosave: Task<Void, Never>?
     /// Line-numbered validation failure from the last save attempt.
     @Published var validationError: String?
 
@@ -192,6 +202,8 @@ final class ConfigStore: ObservableObject {
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 4
         bordersAutoRadius = b?.double("radius") == nil
+        bordersActiveColor = Self.firstColor(in: b?.rawValue("active-color")) ?? "0xff7aa2f7"
+        activeColorEdited = false
         bordersRadius = b?.double("radius") ?? 10
         bordersInactiveColor = b?.string("inactive-color")
             ?? Self.argValue(b?.rawValue("args"), "inactive_color")
@@ -292,7 +304,7 @@ final class ConfigStore: ObservableObject {
     /// daemon parses this file on a watcher, and half a second of broken
     /// config is half a second of a window manager that stopped managing.
     @discardableResult
-    func save() -> Bool {
+    func save(reload: Bool = true) -> Bool {
         writeGeneral()
         writeIntegrations()
         writeSpaces()
@@ -326,11 +338,18 @@ final class ConfigStore: ObservableObject {
 
         validationError = nil
         isDirty = false
-        // Re-read so every row is anchored to the section it now occupies.
-        document = TomlDocument(text)
-        loading = true
-        readAll()
-        loading = false
+        lastSavedAt = Date()
+        // Re-read so every row is anchored to the section it now occupies —
+        // except for a save made while the user is still editing. Re-reading
+        // rebuilds every row with a new identity, which pulls the cursor out
+        // of whatever field they are typing in. Skipping it is safe: the
+        // document already holds exactly what was written.
+        if reload {
+            document = TomlDocument(text)
+            loading = true
+            readAll()
+            loading = false
+        }
         status = validated.warnings.isEmpty
             ? .ok("Saved — weftd reloads within 100 ms.")
             : Self.loadedStatus(validated, verb: "Saved")
@@ -376,6 +395,12 @@ final class ConfigStore: ObservableObject {
                     s.remove("radius")
                 } else {
                     s.set("radius", double: bordersRadius)
+                }
+                if activeColorEdited {
+                    s.setRaw(
+                        "active-color",
+                        #"{ bsp = "\#(bordersActiveColor)", float = "\#(bordersActiveColor)" }"#
+                    )
                 }
                 s.set("show-inactive", bool: bordersShowInactive)
                 if bordersInactiveColor.isEmpty {
@@ -479,10 +504,50 @@ final class ConfigStore: ObservableObject {
 
     // MARK: Edits
 
+    /// Something changed. Save it shortly — changes apply as they are made.
+    ///
+    /// Debounced, because a slider reports every step of a drag and weftd
+    /// reloads on every write. Nothing is written that `loadConfig` rejects:
+    /// a half-typed shortcut simply waits, with the reason on screen.
     func markDirty() {
         guard !loading else { return }
         isDirty = true
-        if case .ok = status { status = .idle("Unsaved changes") }
+        autosave?.cancel()
+        autosave = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard let self, !Task.isCancelled, self.isDirty else { return }
+            self.save(reload: false)
+        }
+    }
+
+    /// Write whatever is still waiting on the debounce, now. The window calls
+    /// this as it closes, so the last change is never lost.
+    func flush() {
+        autosave?.cancel()
+        autosave = nil
+        if isDirty { save(reload: false) }
+    }
+
+    /// The colour picker's setter: the only path that rewrites `active-color`.
+    func setActiveColor(_ hex: String) {
+        guard hex != bordersActiveColor else { return }
+        bordersActiveColor = hex
+        activeColorEdited = true
+        markDirty()
+    }
+
+    /// The first colour in an `active-color` value: the bsp entry of a table,
+    /// else any 0x-colour in it.
+    private static func firstColor(in raw: String?) -> String? {
+        guard let raw else { return nil }
+        for pattern in [#"bsp\s*=\s*"([^"]+)""#, #""(0x[0-9A-Fa-f]{6,8})""#] {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+                  let range = Range(match.range(at: 1), in: raw)
+            else { continue }
+            return String(raw[range])
+        }
+        return nil
     }
 
     func addSpace() {

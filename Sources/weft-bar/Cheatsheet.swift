@@ -118,7 +118,7 @@ final class CheatsheetModel: ObservableObject {
     /// Plain English for a command, and the bucket it belongs in. Falls back to
     /// the command verbatim rather than inventing a description — a wrong
     /// summary is worse than none for a shortcut you are about to press.
-    private static func describe(_ command: String) -> (String, String) {
+    static func describe(_ command: String) -> (String, String) {
         let words = command.split(separator: " ").map(String.init)
         func rest(_ n: Int) -> String { words.dropFirst(n).joined(separator: " ") }
         let direction: [String: String] = [
