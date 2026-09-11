@@ -76,6 +76,14 @@ focus-follows-mouse = false
 # your bar's height if you run one — e.g. { top = 32 } for sketchybar.
 reserve = 0
 
+# Chromium and Electron apps (Chrome, VS Code, Slack, Discord…) switch on a
+# hidden accessibility mode as soon as anything inspects their windows, and
+# with it on every resize is slow and animated. weft turns it off for the
+# instant of each resize and straight back on after. If a screen reader or
+# other assistive tool misbehaves in one of those apps, list it here by bundle
+# id and weft will leave it alone.
+# enhanced-ui-exempt = ["com.example.app"]
+
 # ------------------------------------------------------------------------------
 # Keybindings
 # ------------------------------------------------------------------------------

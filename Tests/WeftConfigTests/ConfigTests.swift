@@ -367,3 +367,13 @@ private func exampleText() throws -> String {
         try loadConfig("[keys]\n\"alt-n\" = \"scrol focus next-column\"\n")
     }
 }
+
+@Test func enhancedUIExemptionsParse() throws {
+    let cfg = try loadConfig("[general]\nenhanced-ui-exempt = [\"com.example.reader\"]\n")
+    #expect(cfg.general.enhancedUIExempt == ["com.example.reader"])
+    // Absent means nobody is exempt: the toggle is on for every app.
+    #expect(try loadConfig("[general]\ninner-gap = 8\n").general.enhancedUIExempt.isEmpty)
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nenhanced-ui-exempt = \"com.example.reader\"\n")
+    }
+}

@@ -32,6 +32,22 @@ public final class AXApplier: @unchecked Sendable {
     private var epochCounter: UInt64 = 0
     /// pid → process name, for trace output only.
     private var appNameCache: [Int32: String] = [:]
+    /// pid → bundle id, for the enhanced-UI exemption only.
+    private var bundleIDCache: [Int32: String] = [:]
+    /// Bundle ids whose `AXEnhancedUserInterface` is left alone (config).
+    private var enhancedUIExempt: Set<String> = []
+    /// The newest write claimed for each window, and the frame it targets.
+    ///
+    /// A close fires an apply straight away and then two sweeps behind it,
+    /// each of which recomputes the same frames. While the first write is
+    /// still queued behind a slow app, the WindowServer does not yet show the
+    /// new size, so the entry diff cannot tell the sweeps' writes are
+    /// redundant — and every one of them was another full relayout of a
+    /// Chromium window. An identical target already in flight is dropped at
+    /// entry; a different one supersedes it, and the stale write is skipped
+    /// when its turn comes rather than performed and immediately undone.
+    private var inFlight: [WindowID: (gen: UInt64, frame: Frame)] = [:]
+    private var writeGenCounter: UInt64 = 0
     /// How long our own writes suppress observer echoes. After this the
     /// expected frame expires so a later user drag that lands near an old
     /// target is NOT mistaken for our echo (previous code never expired).
@@ -94,13 +110,7 @@ public final class AXApplier: @unchecked Sendable {
         // `.sync`. Wait for the whole set, not for each one in turn.
         let group = DispatchGroup()
         for pid in pids {
-            let appEl: AXUIElement = lock.withLock {
-                if let el = appElements[pid] { return el }
-                let el = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(el, 0.15)
-                appElements[pid] = el
-                return el
-            }
+            let appEl = appElement(for: pid)
             // Enumerate windows on a per-pid queue so a wedged app can't
             // stall binding for everyone else.
             queue(for: pid).async(group: group) {
@@ -297,6 +307,7 @@ public final class AXApplier: @unchecked Sendable {
             queues.removeValue(forKey: pid)
             appElements.removeValue(forKey: pid)
             appNameCache.removeValue(forKey: pid)
+            bundleIDCache.removeValue(forKey: pid)
         }
     }
 
@@ -414,8 +425,31 @@ public final class AXApplier: @unchecked Sendable {
         if !settled.isEmpty {
             lock.withLock { for (wid, f) in settled { lastApplied[wid] = f } }
         }
+        // Claim each write; drop the ones whose identical target is already
+        // on its way (see `inFlight`).
+        let requested = todo.count
+        var claimed: [WindowID: UInt64] = [:]
+        lock.withLock {
+            todo = todo.filter { item in
+                if let pending = inFlight[item.wid],
+                   framesEqual(pending.frame, item.frame, tolerance: 0.5)
+                {
+                    return false
+                }
+                writeGenCounter += 1
+                inFlight[item.wid] = (writeGenCounter, item.frame)
+                claimed[item.wid] = writeGenCounter
+                return true
+            }
+        }
+        let gens = claimed
+        let alreadyQueued = requested - todo.count
+        let written = todo.count
+        let detail = alreadyQueued > 0
+            ? "\(written) window(s), \(alreadyQueued) already in flight"
+            : "\(written) window(s)"
         guard !todo.isEmpty else {
-            tTotal.end(detail: "all settled")
+            tTotal.end(detail: alreadyQueued > 0 ? "\(alreadyQueued) already in flight" : "all settled")
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
@@ -426,25 +460,40 @@ public final class AXApplier: @unchecked Sendable {
         for (pid, items) in grouped {
             group.enter()
             queue(for: pid).async {
-                for item in items {
-                    // One immediate retry: transient timeouts (Gecko relayout,
-                    // JetBrains) are the common failure, not dead apps — the
-                    // 0.15s messaging timeout bounds both attempts.
-                    var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
-                    if reason != nil {
-                        reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
+                self.withEnhancedUIOff(pid: pid) {
+                    for item in items {
+                        let gen = gens[item.wid]
+                        // Superseded while it waited: a newer apply claimed
+                        // this window, and its write is behind this one on
+                        // the same serial queue. Performing this one would be
+                        // a relayout the app throws away a moment later.
+                        guard self.lock.withLock({ self.inFlight[item.wid]?.gen == gen }) else {
+                            continue
+                        }
+                        // One immediate retry: transient timeouts (Gecko
+                        // relayout, JetBrains) are the common failure, not
+                        // dead apps — the 0.15s messaging timeout bounds both.
+                        var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
+                        if reason != nil {
+                            reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
+                        }
+                        counter.add(reason: reason, wid: item.wid)
+                        self.lock.withLock {
+                            if self.inFlight[item.wid]?.gen == gen {
+                                self.inFlight.removeValue(forKey: item.wid)
+                            }
+                        }
                     }
-                    counter.add(reason: reason, wid: item.wid)
                 }
                 group.leave()
             }
         }
         group.notify(queue: .global(qos: .utility)) {
             let (a, e, failed, ok, reasons) = counter.snapshot()
-            tTotal.end(detail: "\(todo.count) window(s)")
+            tTotal.end(detail: detail)
             completion?(ApplyResult(
                 applied: a,
-                skipped: frames.count - todo.count,
+                skipped: frames.count - written,
                 errors: e,
                 failedIDs: failed.sorted(),
                 appliedIDs: ok.sorted(),
@@ -536,17 +585,19 @@ public final class AXApplier: @unchecked Sendable {
         let group = DispatchGroup()
         for (pid, items) in Dictionary(grouping: batch, by: { $0.pid }) {
             queue(for: pid).async(group: group) {
-                for item in items {
-                    guard let el = self.resolveElement(for: item.wid, pid: pid) else { continue }
-                    var size = CGSize(width: item.frame.width, height: item.frame.height)
-                    if let v = AXValueCreate(.cgSize, &size) {
-                        AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                self.withEnhancedUIOff(pid: pid) {
+                    for item in items {
+                        guard let el = self.resolveElement(for: item.wid, pid: pid) else { continue }
+                        var size = CGSize(width: item.frame.width, height: item.frame.height)
+                        if let v = AXValueCreate(.cgSize, &size) {
+                            AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                        }
+                        // An app that grows from its top-left corner ends up
+                        // in the right place already; one that does not needs
+                        // the origin restating, and that is WindowServer-local.
+                        var origin = CGPoint(x: item.frame.x, y: item.frame.y)
+                        SLSMoveWindow(self.cid, item.wid, &origin)
                     }
-                    // An app that grows from its top-left corner ends up in
-                    // the right place already; one that does not needs the
-                    // origin restating, and that is WindowServer-local.
-                    var origin = CGPoint(x: item.frame.x, y: item.frame.y)
-                    SLSMoveWindow(self.cid, item.wid, &origin)
                 }
             }
         }
@@ -712,13 +763,7 @@ public final class AXApplier: @unchecked Sendable {
         if let el = lock.withLock({ windowElements[wid] }) {
             return el
         }
-        let appEl: AXUIElement = lock.withLock {
-            if let el = appElements[pid] { return el }
-            let el = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(el, 0.15)
-            appElements[pid] = el
-            return el
-        }
+        let appEl = appElement(for: pid)
         // 1. Standard windows attribute
         var value: CFTypeRef?
         if AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &value) == .success,
@@ -758,6 +803,59 @@ public final class AXApplier: @unchecked Sendable {
         let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
         lock.withLock { appNameCache[pid] = name }
         return name
+    }
+
+    /// The app's AX element, created once per pid with the 0.15 s ceiling
+    /// every cross-process call here relies on.
+    private func appElement(for pid: Int32) -> AXUIElement {
+        lock.withLock {
+            if let el = appElements[pid] { return el }
+            let el = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(el, 0.15)
+            appElements[pid] = el
+            return el
+        }
+    }
+
+    /// Config: bundle ids whose `AXEnhancedUserInterface` is left alone.
+    public func setEnhancedUIExempt(_ ids: Set<String>) {
+        lock.withLock { enhancedUIExempt = ids }
+    }
+
+    private func isEnhancedUIExempt(pid: Int32) -> Bool {
+        let (exempt, cached) = lock.withLock { (enhancedUIExempt, bundleIDCache[pid]) }
+        guard !exempt.isEmpty else { return false }
+        if let cached { return exempt.contains(cached) }
+        let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+        lock.withLock { bundleIDCache[pid] = id }
+        return exempt.contains(id)
+    }
+
+    /// Run a batch of frame writes with the app's `AXEnhancedUserInterface`
+    /// switched off, and put it back afterwards.
+    ///
+    /// Chromium and Electron turn that attribute on the moment an
+    /// accessibility client enumerates their windows — which weft does at
+    /// bind — and with it on, a size write goes through the app's animated
+    /// relayout path. That is the single largest term in `ax.size` for those
+    /// apps, and it is why yabai does the same. The attribute is per app, so
+    /// the toggle wraps a whole per-pid batch: one read, and two writes only
+    /// when it was actually on.
+    ///
+    /// It is always restored — an assistive tool that relies on it gets it
+    /// back as soon as the batch lands — and `enhanced-ui-exempt` skips the
+    /// toggle entirely for an app that cannot tolerate even that.
+    private func withEnhancedUIOff(pid: Int32, _ body: () -> Void) {
+        guard !isEnhancedUIExempt(pid: pid) else { return body() }
+        let appEl = appElement(for: pid)
+        let attr = "AXEnhancedUserInterface" as CFString
+        var value: CFTypeRef?
+        let wasOn = AXUIElementCopyAttributeValue(appEl, attr, &value) == .success
+            && (value as? NSNumber)?.boolValue == true
+        guard wasOn else { return body() }
+        AXUIElementSetAttributeValue(appEl, attr, kCFBooleanFalse)
+        defer { AXUIElementSetAttributeValue(appEl, attr, kCFBooleanTrue) }
+        body()
     }
 
     // MARK: - Frame-set protocol (runs on a per-pid queue)
@@ -805,24 +903,44 @@ public final class AXApplier: @unchecked Sendable {
         // swallowed the 2pt steps a slow drag is made of, so a resize would
         // simply not happen until the cursor moved far enough in one event.
         var pre = CGRect.zero
-        let sizeAlreadyRight = SLSGetWindowBounds(cid, wid, &pre) == 0
+        let preReadable = SLSGetWindowBounds(cid, wid, &pre) == 0
+        let sizeAlreadyRight = preReadable
             && abs(pre.width - frame.width) <= 0.5
             && abs(pre.height - frame.height) <= 0.5
+        // Direction decides the order (`axWriteOrder`): a shrinking window
+        // resized after it moves overhangs the screen edge in between, and
+        // the app pulls it back — which is the correction write below, and on
+        // a Chromium window a second full relayout.
+        let order: AXWriteOrder = (preReadable && !sizeAlreadyRight)
+            ? axWriteOrder(
+                from: Frame(x: pre.minX, y: pre.minY, width: pre.width, height: pre.height),
+                to: frame
+            )
+            : .positionThenSize
 
         let who = appName(for: pid)
-        var p = target
-        if let v = AXValueCreate(.cgPoint, &p) {
+        func writePosition() {
+            var p = target
+            guard let v = AXValueCreate(.cgPoint, &p) else { return }
             Trace.time("ax.position", detail: who) {
                 AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
             }
         }
-        if !sizeAlreadyRight {
+        func writeSize() {
+            guard !sizeAlreadyRight else { return }
             var s = CGSize(width: frame.width, height: frame.height)
-            if let v = AXValueCreate(.cgSize, &s) {
-                Trace.time("ax.size", detail: who) {
-                    AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
-                }
+            guard let v = AXValueCreate(.cgSize, &s) else { return }
+            Trace.time("ax.size", detail: who) {
+                AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
             }
+        }
+        switch order {
+        case .positionThenSize:
+            writePosition()
+            writeSize()
+        case .sizeThenPosition:
+            writeSize()
+            writePosition()
         }
         let tVerify = Trace.start("ax.verify")
         // Verify POSITION with SLS (cheap, no app IPC). Correction fires
@@ -839,7 +957,9 @@ public final class AXApplier: @unchecked Sendable {
             if !posOK {
                 var p2 = target
                 if let v = AXValueCreate(.cgPoint, &p2) {
-                    AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+                    Trace.time("ax.correction", detail: "\(who) \(order)") {
+                        AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+                    }
                     if SLSGetWindowBounds(cid, wid, &rect) == 0 {
                         posOK = abs(rect.minX - target.x) <= verifyTolerance
                             && abs(rect.minY - target.y) <= verifyTolerance

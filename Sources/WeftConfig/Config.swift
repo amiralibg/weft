@@ -51,6 +51,14 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
+    /// Bundle ids whose `AXEnhancedUserInterface` weft must leave alone.
+    ///
+    /// Chromium and Electron apps switch that attribute on the moment any
+    /// accessibility client looks at their windows, and with it on every
+    /// resize goes through a slow, animated relayout. weft turns it off for
+    /// the instant of each frame write and back on after. An app whose
+    /// assistive tooling misbehaves with that goes here.
+    public var enhancedUIExempt: [String]
     public var reserve: ScreenReserve
 
     public init(
@@ -64,6 +72,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
+        enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
@@ -76,6 +85,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
+        self.enhancedUIExempt = enhancedUIExempt
         self.reserve = reserve
     }
 
@@ -360,6 +370,14 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     line: doc.lines[path] ?? 0,
                     message: "scroll-animation-ms was removed with the scroll layout — ignored"
                 ))
+            case "enhanced-ui-exempt":
+                guard case .array(let arr) = v else { throw err(path, "expected array of bundle ids") }
+                var ids: [String] = []
+                for item in arr {
+                    guard case .string(let id) = item else { throw err(path, "expected string in array") }
+                    ids.append(id)
+                }
+                general.enhancedUIExempt = ids
             case "reserve":
                 general.reserve = try parseReserve(v, path: path, lines: doc.lines)
             default:

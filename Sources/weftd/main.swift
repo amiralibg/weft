@@ -2261,6 +2261,7 @@ final class Daemon: @unchecked Sendable {
             fputs("weft: config warning line \(w.line): \(w.message)\n", stderr)
         }
         input.updateKeymap(next.keymap)
+        applier.setEnhancedUIExempt(Set(next.general.enhancedUIExempt))
         input.updateMouseModifier(next.general.mouseModifier)
         input.setBorderDragEnabled(next.general.mouseBorderResize)
         refreshDividerZones()

@@ -105,3 +105,30 @@ public struct World: Codable, Sendable, Equatable {
         self.windows = windows
     }
 }
+
+/// Which AX attribute to write first when moving a window to a new frame.
+public enum AXWriteOrder: Sendable, Equatable {
+    case positionThenSize
+    case sizeThenPosition
+}
+
+/// The write order that stops the app clamping a frame half-way through.
+///
+/// An app keeps its window on screen at every intermediate step of a frame
+/// write, and a fixed position-then-size order made it do so wrongly about
+/// half the time (S1: 21 of 40 writes needed a correction, alternating with
+/// grow-vs-shrink). The failing half is predictable from the direction:
+///
+/// - **Shrinking:** moving first puts the window, still at its old and larger
+///   size, where it overhangs the screen edge — so the app pulls the origin
+///   back in, and the size write that follows lands at the wrong place.
+///   Resize first, then move.
+/// - **Growing:** resizing first, at the old origin, overhangs the edge — so
+///   the app clamps the size. Move first, then resize.
+///
+/// A frame that grows on one axis and shrinks on the other can clamp either
+/// way; size goes first and the SLS read-back corrects what is left.
+public func axWriteOrder(from current: Frame, to target: Frame) -> AXWriteOrder {
+    let shrinks = target.width < current.width - 0.5 || target.height < current.height - 0.5
+    return shrinks ? .sizeThenPosition : .positionThenSize
+}
