@@ -296,7 +296,21 @@ public final class BorderRenderer: @unchecked Sendable {
             return
         }
         SLSSetWindowResolution(cid, overlayWID, scale)
-        // Sticky (bit 11). With two displays the "current" space at creation
+        // Bit 1 is the one that matters: it takes the overlay out of the
+        // WindowServer's hit testing entirely. Without it the overlay is a
+        // window the full size of the one it decorates — transparent in the
+        // middle, but a window — sitting on top of it, so every click and
+        // every scroll anywhere over that window went to weft instead of the
+        // app, and turning borders off was the only way to use the desktop.
+        //
+        // `SLSSetMouseEventEnableFlags` below was meant to do this and does
+        // not; it is left in because it is harmless and honest about intent,
+        // but the tag is what works. JankyBorders, which has never had this
+        // bug, sets bits 1 and 9 and does not call that function at all
+        // (verified against borders 1.9.0: tags 0x202, empty opaque shape).
+        // Bit 9 goes with it there, so it goes with it here.
+        //
+        // Bit 11 is sticky. With two displays the "current" space at creation
         // time is the focused display's, so a border for a window on the
         // *other* monitor would otherwise be filed under a space nobody is
         // looking at and never appear. The bit is silently ignored for other
@@ -304,7 +318,7 @@ public final class BorderRenderer: @unchecked Sendable {
         // own window, and it costs one call to ask. Stale borders cannot
         // outlive a space switch either way: `clearOnSpaceChange` drops them
         // and the sweep that follows rebuilds them in the right place.
-        var tags: UInt64 = 1 << 11
+        var tags: UInt64 = (1 << 1) | (1 << 9) | (1 << 11)
         SLSSetWindowTags(cid, overlayWID, &tags, 64)
         // Not opaque: everything outside the stroke has to stay see-through,
         // or the border is a filled rectangle covering the window.
