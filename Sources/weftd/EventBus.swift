@@ -80,8 +80,6 @@ private struct DaemonEventHash: Hashable {
     let title: String?
     let stackIndex: Int?
     let stackCount: Int?
-    let scrollCol: Int?
-    let scrollCols: Int?
 
     init(_ e: DaemonEvent) {
         kind = e.kind
@@ -95,7 +93,5 @@ private struct DaemonEventHash: Hashable {
         title = e.title
         stackIndex = e.stackIndex
         stackCount = e.stackCount
-        scrollCol = e.scrollCol
-        scrollCols = e.scrollCols
     }
 }

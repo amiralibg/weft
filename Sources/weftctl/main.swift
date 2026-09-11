@@ -15,6 +15,7 @@ func usage() -> Never {
           weftctl app toggle <bundle-id>            # launch/focus/hide
           weftctl subscribe [--all]    # live event stream (Ctrl-C to exit)
           weftctl doctor               # diagnostic health check
+          weftctl rescue               # bring back windows stranded off every display
           weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
           weftctl trace reset          # clear the daemon's phase samples
           weftctl migrate [--write]    # migrate yabai/skhd configuration

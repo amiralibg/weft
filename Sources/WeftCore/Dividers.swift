@@ -1,10 +1,9 @@
 // WeftCore/Dividers.swift — the borders between tiled windows, as grabbable
 // rectangles, and the exact resize that dragging one performs.
 //
-// Pure geometry over a computed layout, so it works identically for bsp trees
-// and scroll strips: both hand it `[WindowID: Frame]`, and adjacency in a
-// tiled layout is exactly "two frames separated by the inner gap, overlapping
-// on the other axis".
+// Pure geometry over a computed layout: it takes `[WindowID: Frame]` and
+// nothing else, because adjacency in a tiled layout is exactly "two frames
+// separated by the inner gap, overlapping on the other axis".
 //
 // This is what makes a mouse resize possible without entering a resize mode:
 // the daemon publishes these rects to the event tap, the tap swallows a click

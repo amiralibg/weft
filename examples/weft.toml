@@ -49,9 +49,8 @@ manage-menubar-apps = false
 check-for-updates = true
 
 # Layout for any space that does not name one of its own, below.
-#   bsp    — binary split; new windows halve the focused one
-#   scroll — one window per column, scrolling sideways
-#   float  — no tiling at all
+#   bsp   — binary split; new windows halve the focused one
+#   float — no tiling at all
 default-layout = "bsp"
 
 # Drag the border between two tiled windows to resize them, with no modifier
@@ -72,17 +71,6 @@ mouse-follows-focus = true
 # Focus whatever window the cursor happens to be over ("sloppy focus"). Off by
 # default: with mouse-follows-focus on as well, the two feed each other.
 focus-follows-mouse = false
-
-# How long a scroll space takes to slide from one column to the next, in
-# milliseconds. 0 (the default) is an instant jump.
-#
-# This is the only motion weft has, and it is here because the scroll strip is
-# the only layout where a frame change is movement rather than a rearrangement:
-# every window keeps its size and slides the same distance, so there is a
-# direction to read and jumping throws it away. It costs one WindowServer
-# transaction per frame — no accessibility traffic, nothing an app can be slow
-# at — which is exactly why nothing else in weft animates.
-scroll-animation-ms = 0
 
 # Space kept clear for a bar or dock that is always on screen. Set the top to
 # your bar's height if you run one — e.g. { top = 32 } for sketchybar.
@@ -136,14 +124,8 @@ reserve = 0
 "alt-bracketleft" = "stack prev"
 "alt-u" = "stack unstack"
 
-# Scroll layout only — no effect on a bsp space.
-"alt-n" = "scroll focus next-column"
-"alt-p" = "scroll focus prev-column"
-"alt-r" = "scroll width cycle"
-
 # Change this space's layout on the fly.
 "alt-shift-b" = "space layout bsp"
-"alt-shift-n" = "space layout scroll"
 "alt-shift-f" = "space layout float"
 
 # Spaces (desktops), by their Mission Control number. Bound 1-5 because that
@@ -260,8 +242,7 @@ manage = false
 #
 # [[space]]
 # label = "web"
-# layout = "scroll"
-# scroll = { preset-column-widths = [0.5, 0.667, 1.0], center-focused-column = "on-overflow" }
+# layout = "float"
 #
 # [[space]]
 # label = "term"
@@ -287,7 +268,7 @@ args = ["width=5.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "st
 
 # Recolour the border by the current layout, and by the active mode. Handy for
 # modes: the border turns red the moment you enter the resize layer.
-active-color = { bsp = "0xff7aa2f7", scroll = "0xff9ece6a", float = "0xffe0af68" }
+active-color = { bsp = "0xff7aa2f7", float = "0xffe0af68" }
 mode-color = { default = "0xff7aa2f7", resize = "0xfff7768e" }
 
 [integrations.sketchybar]

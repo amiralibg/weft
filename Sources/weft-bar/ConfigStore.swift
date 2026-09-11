@@ -17,8 +17,8 @@ struct SpaceRow: Identifiable, Equatable {
     var id = UUID()
     var label: String = ""
     var layout: String = "bsp"
-    /// The `[[space]]` section this row came from, so `scroll = { … }` and any
-    /// comment inside the block survive an edit to the label next to them.
+    /// The `[[space]]` section this row came from, so any comment inside the
+    /// block survives an edit to the label next to it.
     var origin: TomlSection?
 }
 
@@ -89,8 +89,6 @@ final class ConfigStore: ObservableObject {
     @Published var focusFollowsMouse = false
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
-    /// Scroll-space pan duration in ms; 0 (the default) turns the motion off.
-    @Published var scrollAnimationMs = 0
 
     // Integrations
     @Published var bordersEnabled = false
@@ -144,8 +142,8 @@ final class ConfigStore: ObservableObject {
         // to open is how a small typo turns into hand-editing TOML, which is
         // the thing this window exists to avoid.
         do {
-            _ = try WeftConfig.loadConfig(text)
-            status = .idle("Loaded \(Self.configPath)")
+            let validated = try WeftConfig.loadConfig(text)
+            status = Self.loadedStatus(validated, verb: "Loaded \(Self.configPath)")
         } catch let e as ConfigError {
             status = .problem("Line \(e.line): \(e.message) — weftd is running the last valid version")
         } catch {
@@ -179,7 +177,6 @@ final class ConfigStore: ObservableObject {
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
-        scrollAnimationMs = g?.int("scroll-animation-ms") ?? 0
     }
 
     private func readIntegrations() {
@@ -272,6 +269,16 @@ final class ConfigStore: ObservableObject {
         modes = out
     }
 
+    /// "Loaded" is only the whole truth when nothing in the file was ignored.
+    /// A config written for a layout weft no longer has still loads — the
+    /// daemon runs it — but saying so in green would hide that some of it
+    /// does nothing. The first warning is named; `weftctl doctor` lists all.
+    private static func loadedStatus(_ cfg: ValidatedConfig, verb: String) -> Status {
+        guard let first = cfg.warnings.first else { return .idle(verb) }
+        let more = cfg.warnings.count > 1 ? " (+\(cfg.warnings.count - 1) more)" : ""
+        return .problem("\(verb) — line \(first.line): \(first.message)\(more)")
+    }
+
     // MARK: Save
 
     /// Fold the form back into the document, validate, then write. Nothing
@@ -287,8 +294,9 @@ final class ConfigStore: ObservableObject {
         writeKeys()
 
         let text = document.render()
+        let validated: ValidatedConfig
         do {
-            _ = try WeftConfig.loadConfig(text)
+            validated = try WeftConfig.loadConfig(text)
         } catch let e as ConfigError {
             validationError = "Line \(e.line): \(e.message)"
             status = .problem("Not saved — line \(e.line): \(e.message)")
@@ -317,7 +325,9 @@ final class ConfigStore: ObservableObject {
         loading = true
         readAll()
         loading = false
-        status = .ok("Saved — weftd reloads within 100 ms.")
+        status = validated.warnings.isEmpty
+            ? .ok("Saved — weftd reloads within 100 ms.")
+            : Self.loadedStatus(validated, verb: "Saved")
         // Fire and forget: the daemon picks the file up from FSEvents on its
         // own within 100 ms, so this is a nudge, not a dependency — and Save
         // must not freeze the window while a sweep runs.
@@ -339,7 +349,6 @@ final class ConfigStore: ObservableObject {
         s.set("focus-follows-mouse", bool: focusFollowsMouse)
         s.set("manage-menubar-apps", bool: manageMenubarApps)
         s.set("check-for-updates", bool: checkForUpdates)
-        s.set("scroll-animation-ms", int: scrollAnimationMs)
         s.setRaw("reserve", TomlValue.sidesLiteral(
             top: reserveTop, bottom: reserveBottom, left: reserveLeft, right: reserveRight))
         document.sections[i] = s
@@ -410,8 +419,8 @@ final class ConfigStore: ObservableObject {
     }
 
     /// Rewrite every `[[header]]` block from `rows`, in the order the rows are
-    /// in now. A row that came from the file keeps its own section — comments,
-    /// `scroll = { … }` and all — and only the keys the form owns are touched.
+    /// in now. A row that came from the file keeps its own section — comments
+    /// and all — and only the keys the form owns are touched.
     private func syncBlocks<Row: Identifiable>(
         header: String,
         rows: [Row],

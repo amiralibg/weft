@@ -153,11 +153,6 @@ final class CheatsheetModel: ObservableObject {
             return ("Layout", "Even out every split on this space")
         case "stack":
             return ("Stacks", stackSummary(words))
-        case "scroll":
-            if command.contains("width") { return ("Scroll layout", "Cycle the focused column's width") }
-            if command.contains("next-column") { return ("Scroll layout", "Focus the next column") }
-            if command.contains("prev-column") { return ("Scroll layout", "Focus the previous column") }
-            return ("Scroll layout", command)
         case "resize" where words.count >= 3:
             return ("Resize", "Grow or shrink \(direction[words[1]] ?? words[1]) by \(words[2])px")
         case "app" where words.count >= 3:

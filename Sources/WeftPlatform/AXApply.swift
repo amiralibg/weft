@@ -372,7 +372,7 @@ public final class AXApplier: @unchecked Sendable {
     /// `force` skips the "already there" diff.
     ///
     /// Needed by anything that has been moving windows with `SLSMoveWindow`
-    /// — a border drag, a scroll pan. Those leave every window physically at
+    /// — a border drag. Those leave every window physically at
     /// its target and the app still believing the position it had before the
     /// gesture started (S2), so the diff sees nothing to do, the AX write
     /// that would resync the app never happens, and the desync the SLS fast
@@ -464,9 +464,8 @@ public final class AXApplier: @unchecked Sendable {
     /// comes up.
     ///
     /// During a drag almost nothing actually changes size. Moving a bsp
-    /// divider *translates* the windows on the far side of it, and widening a
-    /// scroll column translates every column right of it — the same size, a
-    /// different origin. So: every target position goes out in one
+    /// divider *translates* the windows on the far side of it — the same
+    /// size, a different origin. So: every target position goes out in one
     /// WindowServer transaction (atomic, no app IPC, and all the windows land
     /// on the same compositor frame instead of arriving one by one), and only
     /// the windows whose size genuinely changed pay for an AX write. No
@@ -552,31 +551,6 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         group.notify(queue: dragQueue) { [weak self] in self?.drainResizes() }
-    }
-
-    /// Position-only, WindowServer-only: one transaction, no AX, no app IPC.
-    ///
-    /// The frame loop of a scroll pan. Sizes are untouched by definition — a
-    /// pan translates — so nothing here can make an app relayout, and the
-    /// windows all land on the same compositor frame instead of arriving one
-    /// by one. The apps' own idea of their positions is left behind (S2) and
-    /// put right by the forced AX apply when the pan lands.
-    public func movePositions(_ frames: [WindowID: Frame]) {
-        guard !frames.isEmpty, let transaction = SLSTransactionCreate(cid) else { return }
-        for (wid, frame) in frames {
-            SLSTransactionMoveWindowWithGroup(transaction, wid, CGPoint(x: frame.x, y: frame.y))
-        }
-        SLSTransactionCommit(transaction, 0)
-        // Our own motion must not read back as the user dragging windows.
-        lock.withLock {
-            for (wid, frame) in frames {
-                epochCounter += 1
-                epoch[wid] = epochCounter
-                expectedFrame[wid] = frame
-                expectedAt[wid] = Date()
-                lastApplied[wid] = frame
-            }
-        }
     }
 
     /// Put every window at its target position in one WindowServer commit.
@@ -683,48 +657,27 @@ public final class AXApplier: @unchecked Sendable {
         }
     }
 
-    // MARK: - Scroll parking (M5)
+    // MARK: - Rescue
 
-    /// SLS-park a window far off-screen (S4: AX clamps at -(width-40), SLS
-    /// doesn't). WindowServer-local, no app IPC, 0.002ms. Keeps the current
-    /// Y so unpark geometry stays trivial.
+    /// Bring a window that is off every display back to a real frame.
     ///
-    /// Reports whether the window is *now off screen*, not whether the call
-    /// returned zero. A park that the WindowServer accepted and then did not
-    /// honour used to be recorded as a success, and a window recorded as
-    /// parked is never parked again: the column stayed exactly where it was,
-    /// underneath whichever column had scrolled into its place.
-    @discardableResult
-    public func park(_ wid: WindowID, toX: Double) -> Bool {
-        guard let f = WorldReader.frame(of: wid) else { return false }
-        var p = CGPoint(x: toX, y: f.y)
-        guard SLSMoveWindow(cid, wid, &p) == 0 else { return false }
-        return isParked(wid, leftOf: toX + f.width + 1)
-    }
-
-    /// Whether the WindowServer agrees the window is off past `x`.
+    /// The nudge protocol (S4). An SLS move puts the window back where the
+    /// WindowServer is concerned, but the app still believes the position it
+    /// had before it went missing — so writing that same position through AX
+    /// is a no-op, and the window stays where it is. Writing a *different*
+    /// position first, then the real target, is what makes the app move.
     ///
-    /// The park target is thousands of points beyond the display union, so
-    /// this is a wide margin, not a pixel comparison: anything still in the
-    /// same postcode as a display has not been parked.
-    public func isParked(_ wid: WindowID, leftOf x: Double) -> Bool {
-        guard let f = WorldReader.frame(of: wid) else { return false }
-        return f.x + f.width < x
-    }
-
-    /// Unpark with the nudge protocol (S4): SLS back on-screen, then AX write
-    /// a *different* position (the app still believes the old one — writing
-    /// it back would no-op and strand the window), then the real target.
-    /// Synchronous on the app's queue; false keeps the window tracked-parked.
+    /// Synchronous on the app's queue, because the only caller is `rescue`
+    /// and it reports what it managed to fix.
     @discardableResult
-    public func unpark(_ wid: WindowID, pid: Int32, to frame: Frame) -> Bool {
+    public func restore(_ wid: WindowID, pid: Int32, to frame: Frame) -> Bool {
         var p = CGPoint(x: frame.x, y: frame.y)
         guard SLSMoveWindow(cid, wid, &p) == 0 else { return false }
         // Resolve, do not merely look up — the same trap `focusWindow`
         // documents. The cache is filled as a side effect of writing a frame,
-        // and a parked window is by definition one nothing has written a
-        // frame for lately, so a cache miss here failed the unpark outright
-        // and left the column off screen with nothing to bring it back.
+        // and a window that has been off screen is by definition one nothing
+        // has written a frame for lately, so a cache miss here failed the
+        // rescue outright and left the window exactly where it was.
         guard resolveElement(for: wid, pid: pid) != nil else { return false }
         var ok = false
         queue(for: pid).sync {
@@ -842,11 +795,10 @@ public final class AXApplier: @unchecked Sendable {
 
         // Is the size already right? An AX size write is the expensive half of
         // this — it forces the app through a full relayout, and a browser or
-        // an Electron window can spend tens of milliseconds there. Resizing
-        // one column of a scroll strip only *translates* every column right of
-        // it, and moving a bsp divider only translates the windows on the far
-        // side, so most windows in a drag are the same size they already were
-        // and were being asked to relayout for nothing.
+        // an Electron window can spend tens of milliseconds there. Moving a
+        // bsp divider only translates the windows on the far side of it, so
+        // most windows in a drag are the same size they already were and were
+        // being asked to relayout for nothing.
         //
         // The tolerance is tight on purpose. `sizeSlop` is 8pt — the room a
         // cell-snapping terminal is allowed — and reusing it here would have

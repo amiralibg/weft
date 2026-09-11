@@ -11,7 +11,7 @@ import Foundation
 //
 // So: parse into sections of lines, hand the form a typed view of the few keys
 // it owns, and write back by *editing those lines in place*. Anything the
-// editor does not understand — a comment, a `scroll = {…}` table, a key added
+// editor does not understand — a comment, an inline table, a key added
 // by a future weft — is carried through untouched because it is never
 // re-serialised from a model, only copied.
 

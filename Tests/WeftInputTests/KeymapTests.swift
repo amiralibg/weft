@@ -81,16 +81,6 @@ import Testing
     #expect(try parseChord("alt-h") != parseChord("alt-shift-h"))
 }
 
-@Test func defaultKeymapScroll() throws {
-    let map = Keymap.default
-    func action(_ mode: String, _ chord: String) throws -> KeyAction? {
-        map.modes[mode]?[try parseChord(chord)]
-    }
-    #expect(try action("default", "alt-shift-bracketleft") == .send("scroll focus prev-column"))
-    #expect(try action("default", "alt-shift-bracketright") == .send("scroll focus next-column"))
-    #expect(try action("default", "alt-r") == .send("scroll width cycle"))
-}
-
 @Test func mouseGestureAndModifier() {
     let input = InputManager()
     input.updateMouseModifier("alt")

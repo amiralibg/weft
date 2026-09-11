@@ -230,7 +230,6 @@ public enum Migrate {
                     }
                     else if actionRaw.contains("bsp") { weftCmd = "space layout bsp" }
                     else if actionRaw.contains("float") { weftCmd = "space layout float" }
-                    else if actionRaw.contains("scroll") { weftCmd = "space layout scroll" }
                     else if actionRaw.contains("stack") { weftCmd = "stack toggle" }
                 }
                 else if actionRaw.contains("space --balance") { weftCmd = "balance" }
@@ -339,7 +338,7 @@ public enum Migrate {
         toml += "enabled = false\n"
         toml += "supervise = true\n"
         toml += "args = [\"width=5.0\", \"active_color=0xff7aa2f7\", \"inactive_color=0x40414868\"]\n"
-        toml += "active-color = { bsp = \"0xff7aa2f7\", scroll = \"0xff9ece6a\", float = \"0xffe0af68\" }\n\n"
+        toml += "active-color = { bsp = \"0xff7aa2f7\", float = \"0xffe0af68\" }\n\n"
 
         toml += "[integrations.sketchybar]\n"
         toml += "# Fires `sketchybar --trigger weft_event` on layout, space and focus\n"

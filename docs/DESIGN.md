@@ -2,8 +2,8 @@
 
 A tiling window manager for macOS.
 
-*Weft* is the thread a loom runs horizontally across the vertical warp — the scroll strip
-running across the tiled columns. Woven cloth is panes interlocking by construction.
+*Weft* is the thread a loom runs horizontally across the vertical warp. Woven cloth is panes
+interlocking by construction.
 
 Binaries: daemon `weftd`, CLI `weftctl`, scripting addition `weft-sa`.
 Config `~/.config/weft/weft.toml`. Socket `$TMPDIR/weft-$USER.sock`.
@@ -19,41 +19,17 @@ Four layouts, selectable **per macOS space**:
 | --- | --- |
 | `bsp` | Binary-split tiling, i3/yabai style. |
 | `stack` | A *container* layout, usable as a node inside `bsp` — so "left half tiled, right half stacked" works (AeroSpace-style). Also usable as the whole space. |
-| `scroll` | niri-style infinite horizontal strip of columns; each column may hold a vertical stack of windows. |
 | `float` | Untiled, remembered frames. |
 
 Hard constraints:
 
 - **Native macOS Spaces only.** No virtual/emulated workspaces. Space identity comes from
   SkyLight; we never fake it by parking windows off-screen to simulate a workspace.
-- **No animations, anywhere — with one carve-out.** No interpolation, no
-  `NSAnimationContext`, no easing. Frame changes are single writes.
-
-  The carve-out is the scroll strip's **viewport pan** (`scroll-animation-ms`,
-  **off by default**; set a duration in milliseconds to turn it on). The rule
-  exists because interpolating a retile means an AX write per window per frame — a cross-process round trip an
-  app can be slow at — so the layout falls behind whatever is driving it. A pan
-  costs none of that: every window keeps its size and its Y and moves the same
-  distance along X, so a frame is one `SLSTransaction` of positions, which is
-  WindowServer-local, atomic, and already what a border drag does at mouse rate.
-  The single AX write that resyncs each app's own idea of its position (S2)
-  happens once, when the pan lands. Anything that is not a pure pan — a width
-  cycle, a resize, a column inserted mid-strip, a display change — fails that
-  test and is still drawn in one write. See `Sources/weftd/ScrollPan.swift`.
-
-  It is off by default because the first version of it was not survivable, and
-  both ways it failed are worth keeping written down. It redrew the border
-  overlays every frame, and `BorderRenderer.sync` tears down the overlay of any
-  window in scope with no frame this call — so a column spending part of a pan
-  off screen had its overlay released and recreated, a WindowServer window and
-  a fresh backing store, at frame rate. The GPU pegged and the whole desktop
-  lagged, because the WindowServer is not weft's to saturate. And it defeated
-  echo suppression: that matches a notification against the exact frame last
-  written, which cannot work against a frame being rewritten every 8 ms, so
-  every frame of every pan came back as *the user* dragging a window and
-  scheduled a debounced re-apply — which is why windows were slow to move on
-  bsp spaces too, where nothing was animating. Motion needs suppression of its
-  own (`panningUntil`) and must not drive anything that allocates per frame.
+- **No animations, anywhere.** No interpolation, no `NSAnimationContext`, no easing. Frame
+  changes are single writes. Interpolating a retile means an AX write per window per frame —
+  a cross-process round trip an app can be slow at — so the layout falls behind whatever is
+  driving it. The one carve-out this used to have, the scroll strip's viewport pan, went with
+  the strip (§19).
 - **Event-driven.** Zero polling timers in steady state; idle CPU must be 0%.
 - SIP-off / scripting addition is acceptable and assumed.
 
@@ -125,7 +101,7 @@ The socket accept loop therefore runs on a background thread and `main` ends in 
 | Target | Kind | Contents |
 | --- | --- | --- |
 | `SkyLightShim` | C, modulemap | `extern` decls for private SLS/CGS symbols, `_AXUIElementGetWindow`, small inline helpers |
-| `WeftCore` | Swift, **no I/O** | geometry, layout tree, scroll engine, stack, reducer, command grammar |
+| `WeftCore` | Swift, **no I/O** | geometry, layout tree, stack, reducer, command grammar |
 | `WeftPlatform` | Swift | AX, SkyLight, spaces, displays, process tracking — behind protocols |
 | `WeftConfig` | Swift | TOML → typed config, FSEvents hot reload, validation with line numbers |
 | `WeftInput` | Swift | event tap, chord parsing, modes |
@@ -175,78 +151,36 @@ struct Container {
 - Stack decoration (which window is active, how many) is not drawn by weft. It is published
   as state for sketchybar to render — see §10. weft never puts a pixel on screen.
 
-### 4.2 Scroll engine (niri-style)
+### 4.2 Scroll engine — removed 2026-09-10
 
-Not a tree — an ordered strip:
+weft shipped a niri-style scroll strip until 0.4. It was removed, not deprecated; see §19
+for why. Two findings from building it are worth keeping, because they are facts about
+macOS rather than about the strip:
 
-```swift
-struct ScrollState {
-  var columns: [Column]      // Column = { windows: [WindowID], widthPreset: Int }
-  var viewportX: Double      // scroll offset in strip coordinates
-  var focus: (col: Int, row: Int)
-}
-```
-
-- Placement: `screenX = stripX(col) - viewportX + display.minX`. Windows that straddle the
-  display edge are placed genuinely partially off-screen; macOS clips them correctly.
-- Column widths cycle a preset ring (`[0.333, 0.5, 0.667, 1.0]`, configurable), same as niri.
-- `center-focused-column = "always" | "never" | "on-overflow"`. Declared per space in
-  `[[space]] scroll = { … }`, alongside `preset-column-widths`; both are read at conversion,
-  at first sight of a space, and on every config reload.
-- Focusing a column scrolls the *minimum* distance to bring it fully into view.
-- **The drawn viewport is derived, not stored.** `viewportX` is *intent* — where the last
-  focus change panned to — and the strip under it changes without the intent changing: a
-  column closes, a resize shortens the strip, the space is re-laid out on a narrower display.
-  `effectiveViewportX` puts the stored value back inside the range the current strip allows,
-  and `scrollLayout` draws with that, so the drag path, `query tree`, the divider zones and
-  the borders all agree without anyone writing state back. Without it, closing the column the
-  viewport had scrolled to left `viewportX` past the end of a strip that no longer reached
-  that far: the survivor was drawn a screen-width to the left, far enough off screen to be
-  parked, and the user saw one window and a hole.
-- **A strip shorter than the screen is centred**, so a lone window sits in the middle and each
-  column added after it pushes the group left. `center-focused-column = "never"` opts out and
-  keeps the group on the left edge.
-- **The pan is animated** (`scroll-animation-ms`) — the one carve-out from §1's no-animation
-  rule, and the reasoning is there.
-- **Parking — via `SLSMoveWindow`, not AX** *(S4)*. Columns entirely outside
-  `[viewportX - margin, viewportX + width + margin]` are moved **once** to
-  `globalDisplayUnion.minX - 5000` and flagged parked; scrolling then costs nothing for them
-  until they re-enter. Parking beyond the union of *all* displays (not just `-width` off the
-  left edge) is what stops a parked window landing on a neighbouring monitor.
-
-  **AX cannot do this.** macOS clamps AX-positioned windows so that **~40 px always remains on
-  screen**: requests of −2000, −5000 and −20000 all clamped to −1654 for a 1694-wide window
-  (`−(width − 40)`). `SLSMoveWindow` has no such clamp — −20000 sticks — and costs 0.002 ms.
-
-  **Unparking needs a nudge.** After an `SLSMoveWindow` park the app still believes it is at
-  its old position, so writing that same position back through AX is a **no-op** and the window
-  stays stranded off-screen. Unpark is: `SLSMoveWindow` back on-screen → AX write a *different*
-  position → AX write the real target. The asymmetry is acceptable because parking is the
-  frequent operation while scrolling and unparking happens only on re-entry.
-- **Scroll fast path — `SLSMoveWindow` is rejected for visible windows** *(S2)*. It is 79×
-  faster than AX (0.002 ms vs 0.124 ms), but it moves the surface without telling the app:
-  requesting x = 500 leaves the app's own `NSWindow` reporting x = 8. Every screen-coordinate
-  the app computes itself — popover and menu anchors, sheet placement, drag origins — would be
-  off by the delta. Visible columns move via **AX position-only**, measured at 0.12 ms p50,
-  which was never the bottleneck. `SLSMoveWindow` is reserved for parked windows, where nothing
-  can interact with the desync.
+- **AX cannot put a window off screen.** macOS clamps AX-positioned windows so that ~40 px
+  always remains visible (`−(width − 40)`); `SLSMoveWindow` has no clamp *(S4)*.
+- **An `SLSMoveWindow` desyncs the app.** It moves the surface without telling the app, so
+  the app's own `NSWindow` keeps reporting the old origin and every screen coordinate it
+  computes — menu anchors, sheets, drag origins — is off by the delta *(S2)*. Recovering
+  needs a *nudge*: SLS back into place, AX write a different position, then the real one.
+  `weftctl rescue` still uses that protocol (`AXApplier.restore`).
 
 ### 4.3 Per-space layout
 
 ```swift
 enum SpaceLayout {
   case tiling(Tree)        // bsp and/or nested stacks
-  case scroll(ScrollState)
-  case float
+  case float(FloatState)
 }
 ```
 
-Held in `[SpaceID: SpaceLayout]`. Switching a space's layout preserves window membership and
-reconstructs: tree → columns in left-to-right leaf order; columns → tree by successive right
-splits. Float remembers each window's pre-float frame.
+Held in `[SpaceID: SpaceLayout]`. Switching a space's layout preserves window membership:
+float remembers each window's real frame, and coming back out rebuilds a tree by successive
+right splits in that order.
 
-Config declares the default per space **label**, so `web` can be `scroll` while `code` is
-`bsp`, permanently, without a keybind.
+Config declares the default per space **label**, so `web` can be `float` while `code` is
+`bsp`, permanently, without a keybind. A config or a saved override that still says
+`scroll` loads as `bsp` with a line-numbered warning (`ConfigWarning`) rather than failing.
 
 ## 5. Platform layer
 
@@ -398,9 +332,8 @@ harder to debug from outside than a window weft had quietly decided not to manag
     click passes through untouched, which is the property that makes claiming bare clicks
     acceptable at all.
 - Border geometry is pure (`WeftCore/Dividers.swift`) and derived from the computed frames
-  rather than the tree, so it works identically for `bsp` and `scroll`: adjacency in a tiled
-  layout *is* "two frames separated by at most the inner gap, overlapping on the other
-  axis". Overlapping frames — stack members sharing a slot — are never adjacent, which is
+  rather than the tree: adjacency in a tiled layout *is* "two frames separated by at most
+  the inner gap, overlapping on the other axis". Overlapping frames — stack members sharing a slot — are never adjacent, which is
   correct: there is no border between two windows in the same place.
 - Dragging a border uses `Tree.resizing(divider:_:axis:deltaPoints:frames:)`, not the
   keybind resize. The keybind one walks down from the root and adjusts the first container
@@ -431,7 +364,6 @@ default-layout = "bsp"
 mouse-modifier = "alt"
 mouse-follows-focus = true
 focus-follows-mouse = false
-scroll-animation-ms = 0         # scroll-space pan duration; 0 = instant
 
 [[space]]
 label  = "code"
@@ -439,8 +371,7 @@ layout = "bsp"
 
 [[space]]
 label  = "web"
-layout = "scroll"
-scroll = { preset-column-widths = [0.333, 0.5, 0.667, 1.0], center-focused-column = "on-overflow" }
+layout = "float"
 
 [[space]]
 label = "main"
@@ -465,9 +396,8 @@ manage = false
 "alt-shift-h"  = "move west"
 "alt-s"        = "stack wrap"
 "alt-shift-s"  = "stack split right"
-"alt-bracketleft"  = "scroll focus prev-column"
-"alt-bracketright" = "scroll focus next-column"
-"alt-r"        = "scroll width cycle"
+"alt-bracketleft"  = "stack prev"
+"alt-bracketright" = "stack next"
 "alt-c"        = "space focus code"
 "alt-shift-c"  = "space move-window code"
 "alt-ctrl-t"   = "app toggle com.mitchellh.ghostty"
@@ -485,13 +415,13 @@ bar-name  = "sketchybar"
 reserve   = { top = 34 }          # replaces yabai's `external_bar all:34:0`
 coalesce-ms = 16
 events = ["space_changed", "window_focused", "space_windows",
-          "layout_changed", "stack_changed", "scroll_changed", "mode_changed"]
+          "layout_changed", "stack_changed", "mode_changed"]
 
 [integrations.borders]
 enabled = true
 args    = ["style=round", "width=5.0", "hidpi=on"]
 supervise = true                  # restart if it dies; stop it when weftd exits
-active-color = { bsp = "0xffe1e3e4", scroll = "0xff8aadf4", float = "0xfff5a97f" }
+active-color = { bsp = "0xffe1e3e4", float = "0xfff5a97f" }
 mode-color   = { resize = "0xffed8796" }
 ```
 
@@ -531,7 +461,8 @@ rendering.
 **M4 — Native spaces + multi-display.** SA integration, space focus/move, display commands,
 per-display state, label persistence.
 
-**M5 — Scroll layout.** Columns, presets, viewport, parking, scroll fast path.
+**M5 — Scroll layout.** Columns, presets, viewport, parking, scroll fast path. *Shipped, then
+removed in the tiling-first pivot (§19).*
 
 **M6 — Float + rules + config.** Float layout, rule engine, `app toggle`, scratchpads, TOML
 hot reload.
@@ -565,7 +496,6 @@ Budget (unchanged, now met with ~150x headroom on the common verbs):
 
 - Keypress → all frames applied, 4-window layout: **p50 < 5 ms, p99 < 20 ms.**
 - Stack-member switch: **< 1 ms** (z-order only).
-- Scroll step: **< 3 ms** for on-screen columns; zero cost for parked ones.
 - Idle CPU: **0.0%**. No timers. Verify with `powermetrics`.
 - Instrumentation: `os_signpost` intervals across tap → core → AX so Instruments shows the
   whole pipeline; `weftctl bench <command> -n 500` prints an AX-call histogram.
@@ -574,7 +504,7 @@ Budget (unchanged, now met with ~150x headroom on the common verbs):
 
 **Decision: weft draws nothing.** No borders, no bar, no stack indicators, no overlay windows.
 Drawing means an `NSWindow` per decoration, a compositing pass on every layout change, and a
-whole class of z-order bugs against the parked/off-screen windows the scroll engine relies on.
+whole class of z-order bugs.
 borders already does borders better, and sketchybar already does bars better. weft's job is to
 be the *authoritative, cheap, complete* source of state for both.
 
@@ -597,7 +527,6 @@ reducer down.
 | `window_created` / `window_destroyed` | window id, space, app |
 | `layout_changed` | space id, old layout, new layout |
 | `stack_changed` | container id, space id, active index, count, member titles |
-| `scroll_changed` | space id, focused column, column count, viewport x, column widths |
 | `display_changed` | display uuid, active space per display |
 | `mode_changed` | mode name |
 
@@ -630,7 +559,6 @@ emits **one** batched notification per tick, deduplicated by event type.
   WEFT_DISPLAY_UUID, WEFT_DISPLAY_INDEX
   WEFT_FOCUSED_WID, WEFT_FOCUSED_APP, WEFT_FOCUSED_BUNDLE, WEFT_FOCUSED_TITLE
   WEFT_STACK_INDEX, WEFT_STACK_COUNT          # "◧ 2/4"
-  WEFT_SCROLL_COL, WEFT_SCROLL_COLS, WEFT_SCROLL_WIDTH   # "‹ 3/7 ›"
   WEFT_MODE
   ```
 
@@ -651,16 +579,13 @@ need weft to tell it what to highlight. What weft adds:
   leaves an orphan if yabai dies and a zombie config if it is reloaded twice.
 - **State-reactive colour.** `borders active_color=…` at runtime, driven by `layout_changed`
   and `mode_changed`. A different border colour per layout is genuinely useful once a space can
-  be bsp, scroll, or float — it's the cheapest possible "which mode am I in" indicator, and it
-  costs one mach message on transitions only.
-- **Parked-window interaction.** Scroll-parked windows sit at `union.minX - 5000`. Confirm in
-  S4 that borders does not try to draw a border out there; if it does, add them to the borders
-  blacklist as they are parked.
+  be bsp or float — it's the cheapest possible "which mode am I in" indicator, and it costs one
+  mach message on transitions only.
 
 ### 10.5 What this rules out
 
-Being a pure state source means weft cannot render tab bars for stacks, cannot draw a scroll
-minimap, and cannot show a workspace overview. If any of those turn out to be must-haves, they
+Being a pure state source means weft cannot render tab bars for stacks and cannot show a
+workspace overview. If any of those turn out to be must-haves, they
 should ship as a *separate* client binary reading `weftctl subscribe` — never inside `weftd`.
 
 ## 11. Known risks
@@ -672,15 +597,15 @@ should ship as a *separate* client binary reading `weftctl subscribe` — never 
 2. **Cold-start AX gap** *(S0)*. Windows on spaces not visited since `weftd` launched have no
    AX element and cannot get one. Layout is computed but applied on first `space_changed`.
    Tracked explicitly as `bound: false` rather than treated as a missing window.
-3. **Stranded parked windows** *(S4)*. A crash between park and unpark leaves a window at
-   −5000 with the app unaware. `weftd` must persist the parked set and unpark on startup, and
-   ship `weftctl rescue` to sweep any window whose SkyLight bounds are off every display.
-   The spike stranded a live window this way on the first attempt — this is not hypothetical.
+3. **Stranded windows.** Retired as a design risk with the scroll strip (§19): it was the
+   only thing weft did that moved windows off screen on purpose. A window can still end up
+   off every display — dragged there, or left behind by an unplugged monitor — and
+   `weftctl rescue` puts any such window back at its computed frame.
 4. Electron / JetBrains windows resize slowly and sometimes ignore requested sizes → quirk table.
 5. Windows with hard AX size constraints (Simulator, System Settings) → auto-float on detection.
 6. Native-fullscreen spaces (`SLSSpaceGetType == 4`) must be skipped entirely.
 7. Feedback loops from our own AX move/resize notifications → epoch-based echo suppression.
-8. Parked scroll windows will look odd in Mission Control / App Exposé. Accepted trade-off.
+8. *(Retired with the scroll strip — nothing is parked any more.)*
 9. Stage Manager must be off — detect and warn at startup.
 10. Requires Accessibility permission (`AXIsProcessTrustedWithOptions`) and `sudo` to load the SA.
 11. yabai is MIT-licensed; where we adapt its SkyLight/SA techniques, attribute it.
@@ -689,7 +614,6 @@ should ship as a *separate* client binary reading `weftctl subscribe` — never 
 
 ## 12. Open questions
 
-- Vertical scroll layout (niri has columns only; some people want rows) — v2 or never?
 - Window swallowing / auto-float heuristics for dialogs and sheets: opt-in or default?
 - Should `weftctl subscribe` speak newline-delimited JSON only, or also a compact binary frame
   for a future high-frequency client?
@@ -1659,3 +1583,36 @@ install fell through to the API, verified the checksum and completed.
 
 Because `curl | bash` fetches this script from `main`, the fix reaches users
 without re-cutting the release.
+
+---
+
+## 19. Tiling first — 2026-09-10
+
+**Decision:** remove the scroll layout; make bsp and stacks the whole product, and make them
+fast enough that tiling reads as instant.
+
+**Why the strip went.** It was the one layout that fought macOS rather than working with it.
+Hiding a column meant moving it off screen, which AX refuses to do (§4.2), so it needed
+`SLSMoveWindow` — which desyncs the app, which needed the nudge protocol to undo, which needed
+a persisted parked set to survive a crash, which needed `rescue` to clean up when that failed.
+Each layer was a correct answer to the one below it, and together they were ~1,500 lines and
+the source of every "my window vanished" report. Pans added a frame-rate path through the
+WindowServer that once pegged the GPU (the reason `scroll-animation-ms` defaulted to off). None
+of that machinery exists for bsp: every window has a frame and every frame is on screen.
+
+**What changed for a user.**
+- `layout = "scroll"`, `default-layout = "scroll"`, `[[space]] scroll = {…}`,
+  `scroll-animation-ms` and `scroll …` keybinds all still *load*: each becomes a
+  `ConfigWarning` with a line number, reported by the daemon log, `weftctl doctor` and the
+  settings window. The parser stays strict for everything else.
+- `space layout scroll` answers with bsp and says so.
+- A `layouts.json` override saved as `scroll` is dropped on load, and the space tiles bsp.
+- `⌥N`, `⌥P`, `⌥R`, `⌥⇧N`, `⌥⇧[` and `⌥⇧]` are free.
+- `weftctl rescue` survives, repurposed from "unpark crash debris" to "bring back a window
+  that is off every display".
+
+**What comes next** is measured, not guessed: `Trace` (`Sources/WeftPlatform/Trace.swift`)
+keeps a ring of samples per phase of every apply, and `weftctl bench` prints them. The two
+stalls this pivot is aimed at — survivors slow to fill a closed window's slot, and a beat
+before a new window takes its slot — both live in the AX half of the apply path, which the
+trace splits into `ax.position`, `ax.size` and `ax.verify` per app.

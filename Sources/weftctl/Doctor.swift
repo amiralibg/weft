@@ -274,6 +274,12 @@ public enum Doctor {
                 let text = try String(contentsOf: configURL, encoding: .utf8)
                 let validated = try loadConfig(text)
                 print("[\u{2713}] Configuration: Valid (\(configURL.path))")
+                // Loaded, but naming settings this build no longer honours.
+                // Valid is still true — weft is running on this file — but
+                // "valid" alone would hide that part of it does nothing.
+                for w in validated.warnings {
+                    print("    [!] line \(w.line): \(w.message)")
+                }
                 let keyCount = validated.keymap.modes.values.map(\.count).reduce(0, +)
                 print("    - Keybindings: \(keyCount)")
                 print("    - Window rules: \(validated.rules.count)")

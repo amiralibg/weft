@@ -27,9 +27,9 @@ It talks to the WindowServer through SkyLight and moves windows through the
 Accessibility API, so it manages **native macOS spaces** rather than inventing
 its own.
 
-- **Three layouts per space** — `bsp` (binary split), `scroll` (PaperWM-style
-  columns you scroll sideways through), and `float` (no tiling at all). Switch a
-  space between them at runtime; window membership and focus survive the change.
+- **Two layouts per space** — `bsp` (binary split) and `float` (no tiling at
+  all). Switch a space between them at runtime; window membership and focus
+  survive the change.
 - **Stacks** — collapse several windows into one slot and cycle through them.
 - **Modes** — modal layers, like vim's. The shipped config puts resizing behind
   one so `h/j/k/l` can be bare keys while it is active.
@@ -193,8 +193,7 @@ QWERTY, Colemak and Dvorak.
 | `⌥\` | Flip the split under the focused window |
 | `⌥B` | Even out every split on this space |
 | `⌥W` `⌥]` `⌥[` `⌥U` | Stack: wrap / next / prev / unstack |
-| `⌥N` `⌥P` `⌥R` | Scroll layout: next column / prev column / cycle width |
-| `⌥⇧B` `⌥⇧N` `⌥⇧F` | Switch this space to bsp / scroll / float |
+| `⌥⇧B` `⌥⇧F` | Switch this space to bsp / float |
 | `⌥⌃H` `⌥⌃L` | Focus the display west / east |
 | `⌥⌃⇧H` `⌥⌃⇧L` | Send the window to that display and follow it |
 | `⌥⇧R` | Enter resize mode — then `h/j/k/l`, `⇧` for bigger steps, `=` to balance, `Esc` to leave |
@@ -220,11 +219,10 @@ placement are in it as commented-out worked examples.
 inner-gap = 8
 outer-gap = 8
 stack-offset = 8                # how far a stack's members peek out
-default-layout = "bsp"          # bsp | scroll | float
+default-layout = "bsp"          # bsp | float
 mouse-border-resize = true      # drag a window border to resize, no modifier
 mouse-modifier = "alt"          # hold to drag a window by its body
 mouse-follows-focus = true
-scroll-animation-ms = 0         # scroll pan duration in ms; 0 = instant jump
 reserve = 0                     # room for an always-on-screen bar
 
 [keys]
@@ -268,12 +266,13 @@ of these commands.
 ```bash
 weftctl focus east                  # same thing your keybind does
 weftctl space focus 3
-weftctl space layout scroll
+weftctl space layout float
 weftctl query state                 # JSON: the world as weftd sees it
 weftctl query windows
 weftctl subscribe --all             # live event stream
 weftctl doctor                      # health check: permissions, config, helpers
-weftctl bench "focus east" -n 200   # latency histogram
+weftctl bench "focus east" -n 200   # latency histogram + per-phase daemon timings
+weftctl rescue                      # bring back any window stranded off every display
 weftctl service restart
 ```
 

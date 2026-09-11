@@ -36,9 +36,6 @@ public struct StateSummary: Sendable {
     public var displayUUID: String?
     public var displayIndex: Int?
     public var focused: WindowContext?
-    public var scrollCol: Int?
-    public var scrollCols: Int?
-    public var scrollWidth: Double?
     public var mode: String
 
     public init(
@@ -49,9 +46,6 @@ public struct StateSummary: Sendable {
         displayUUID: String? = nil,
         displayIndex: Int? = nil,
         focused: WindowContext? = nil,
-        scrollCol: Int? = nil,
-        scrollCols: Int? = nil,
-        scrollWidth: Double? = nil,
         mode: String = "default"
     ) {
         self.spaceID = spaceID
@@ -61,9 +55,6 @@ public struct StateSummary: Sendable {
         self.displayUUID = displayUUID
         self.displayIndex = displayIndex
         self.focused = focused
-        self.scrollCol = scrollCol
-        self.scrollCols = scrollCols
-        self.scrollWidth = scrollWidth
         self.mode = mode
     }
 }
@@ -121,13 +112,6 @@ final class SketchybarBridge: @unchecked Sendable {
                     args.append("WEFT_STACK_INDEX=\(idx)")
                     args.append("WEFT_STACK_COUNT=\(count)")
                 }
-            }
-            if let col = state.scrollCol, let cols = state.scrollCols {
-                args.append("WEFT_SCROLL_COL=\(col)")
-                args.append("WEFT_SCROLL_COLS=\(cols)")
-            }
-            if let w = state.scrollWidth {
-                args.append("WEFT_SCROLL_WIDTH=\(w)")
             }
             args.append("WEFT_MODE=\(state.mode)")
 

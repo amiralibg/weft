@@ -104,11 +104,10 @@ public enum Reducer {
             // every layout kind, not a tree edit.
             return (state, [])
         case .space, .sticky, .focusDisplay, .moveWindowToDisplay, .moveSpaceToDisplay,
-             .scroll, .appToggle:
-            // Daemon-level verbs (multi-space topology, privileged calls) or
-            // scroll-strip commands (reduceScroll owns those). The daemon
-            // intercepts them before reduce; reaching here is a programming
-            // error, and no-op is the safe response.
+             .appToggle:
+            // Daemon-level verbs: multi-space topology and privileged calls.
+            // The daemon intercepts them before reduce; reaching here is a
+            // programming error, and no-op is the safe response.
             return (state, [])
         }
 
@@ -149,100 +148,6 @@ public enum Reducer {
         return (newState, mutations)
     }
 
-    /// Scroll spaces (M5). Geometry focus/warp reuse neighbour() on the
-    /// computed strip frames; column jumps move by index (reaching parked
-    /// columns — the viewport follows via ensureVisible, and unparking
-    /// happens at apply time). Tiling-only commands are safe no-ops.
-    public static func reduceScroll(
-        _ sc: ScrollState,
-        screen: Frame,
-        config: TilingConfig,
-        command: Command,
-        presets: [Double] = ScrollState.presets
-    ) -> (ScrollState, [Mutation]) {
-        let usable = scrollUsable(screen: screen, config: config)
-        let usableW = usable.w
-        let usableH = usable.h
-        var next = sc
-        switch command {
-        case .insert(let id):
-            next = sc.inserting(id)
-        case .remove(let id):
-            next = sc.removing(id)
-        case .setFocus(let id):
-            guard sc.windows.contains(id) else { return (sc, []) }
-            next = sc.focusing(id)
-        case .focus(let dir):
-            switch dir {
-            case .west:
-                next = sc.movingFocusByColumn(-1)
-            case .east:
-                next = sc.movingFocusByColumn(1)
-            case .north:
-                next = sc.movingFocusByRow(-1)
-            case .south:
-                next = sc.movingFocusByRow(1)
-            }
-        case .move(let dir):
-            switch dir {
-            case .west:
-                next = sc.swappingColumns(-1)
-            case .east:
-                next = sc.swappingColumns(1)
-            case .north:
-                next = sc.swappingRowsInFocusedColumn(-1)
-            case .south:
-                next = sc.swappingRowsInFocusedColumn(1)
-            }
-        case .resize(let dir, let delta):
-            // Column widths on the horizontal axis, row shares on the
-            // vertical one. Vertical used to be a no-op, which made the whole
-            // resize layer — and mouse border drags — dead on scroll spaces.
-            switch dir.axis {
-            case .horizontal:
-                next = sc.adjustingWidth(dir.signed(delta) / max(usableW, 1))
-            case .vertical:
-                next = sc.adjustingHeight(dir.signed(delta) / max(usableH, 1))
-            }
-        case .balance:
-            next = ScrollState(
-                // Widths back to the default and heights back to equal —
-                // balance means "undo every resize on this space".
-                columns: sc.columns.map { Column(windows: $0.windows) },
-                viewportX: sc.viewportX,
-                focusCol: sc.focusCol,
-                focusRow: sc.focusRow,
-                centerMode: sc.centerMode
-            )
-        case .scroll(.focusColumn(let d)):
-            next = sc.movingFocusByColumn(d)
-        case .scroll(.moveColumn(let d)):
-            next = sc.movingWindowToColumn(d)
-        case .scroll(.widthCycle):
-            next = sc.cyclingWidth(presets: presets)
-        case .toggleFullscreen:
-            next = sc.togglingFullscreen()
-            let (frames, _) = scrollLayout(next, screen: screen, config: config)
-            var mutations = frames.sorted { $0.key < $1.key }.map { Mutation.setFrame($0.key, $0.value) }
-            if let fs = next.fullscreen {
-                mutations.append(.raise(fs))
-                mutations.append(.focusWindow(fs))
-            }
-            return (next, mutations)
-        case .toggleSplit, .float, .split, .insertion, .stack, .space, .sticky,
-             .focusDisplay, .moveWindowToDisplay, .moveSpaceToDisplay, .appToggle, .query:
-            return (sc, [])
-        }
-        guard next != sc else { return (sc, []) }
-        next.ensureVisible(next.focusCol, screen: screen, config: config)
-        let (frames, _) = scrollLayout(next, screen: screen, config: config)
-        var mutations = frames.sorted { $0.key < $1.key }.map { Mutation.setFrame($0.key, $0.value) }
-        if next.focusedWindow != sc.focusedWindow, let focus = next.focusedWindow {
-            mutations.append(.focusWindow(focus))
-        }
-        return (next, mutations)
-    }
-
     /// Float spaces (M6): weft never positions these windows, so only
     /// membership/focus commands do anything. Focus changes still raise
     /// (front the focused float) via focusWindow.
@@ -271,7 +176,7 @@ public enum Reducer {
             guard let id else { return (fl, []) }
             next = fl.focusing(id)
         case .move, .resize, .split, .insertion, .balance,
-             .stack, .scroll, .space, .sticky, .focusDisplay, .moveWindowToDisplay,
+             .stack, .space, .sticky, .focusDisplay, .moveWindowToDisplay,
              .moveSpaceToDisplay, .appToggle, .query,
              .toggleFullscreen, .toggleSplit, .float:
             return (fl, [])

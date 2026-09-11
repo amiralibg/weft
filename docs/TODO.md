@@ -15,7 +15,7 @@ runs exactly once: at tag time, inside the job that publishes. A broken `main`
 is therefore discovered at the worst possible moment — mid-release — and a
 regression can sit on `main` unnoticed for as long as nobody tags.
 
-- [ ] Add `.github/workflows/ci.yml`: `swift build` + `swift test` on push and
+- [x] Add `.github/workflows/ci.yml`: `swift build` + `swift test` on push and
       pull request. Reuse the Xcode-selection step from `release.yml` verbatim,
       which already fails loudly on a toolchain older than Swift 6.2 rather
       than half-building against it.
@@ -30,7 +30,7 @@ Highest value per line of effort on this page.
 Labels persist through `saveLabels()` → `~/.config/weft/labels.json`; the
 parked set persists through `parked.json`; layouts have no equivalent.
 
-So `⌥⇧N` into scroll, then reboot — or `weftctl service restart`, or install an
+So `⌥⇧F` into float, then reboot — or `weftctl service restart`, or install an
 update — and the space is back to `bsp` with no indication why. This lands
 hardest immediately after onboarding, because Setup's **Finish** restarts the
 engine by design.
@@ -114,7 +114,9 @@ forwards any unrecognised verb, so it works today. It appears in neither
 for §11 risk 3 — a window stranded off-screen at −5000 with its app unaware —
 which means it is undiscoverable at precisely the moment someone needs it.
 
-- [ ] Add it to `usage()` and the command-line section of the README.
+- [x] Add it to `usage()` and the command-line section of the README. (With
+      the scroll strip gone it no longer unparks anything; it puts back any
+      window that is off every display — DESIGN §19.)
 - [ ] Have `doctor` notice stranded windows and name the command, rather than
       waiting for the user to find it.
 
@@ -157,15 +159,6 @@ internals by byte-pattern scan and must be re-derived on most macOS releases.
       yabai's, or say publicly that we will not. All three are defensible; the
       current state, "still open", is the one that is not, because users cannot
       plan around it.
-
-### 11. Vertical scroll layout
-
-`docs/DESIGN.md` §12, open question: niri has columns only, some people want
-rows. Nobody has asked yet.
-
-- [ ] Leave until someone does.
-
----
 
 ## Suggested order
 

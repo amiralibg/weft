@@ -209,7 +209,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let name: String
         switch layout {
         case "bsp": name = "rectangle.split.2x2"
-        case "scroll": name = "rectangle.split.3x1"
         case "float": name = "macwindow.on.rectangle"
         default: name = "questionmark.square.dashed"
         }
@@ -339,10 +338,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bspItem.target = self
         menu.addItem(bspItem)
 
-        let scrollItem = NSMenuItem(title: "Scroll Layout", action: #selector(setLayoutScroll), keyEquivalent: "")
-        scrollItem.target = self
-        menu.addItem(scrollItem)
-
         let floatItem = NSMenuItem(title: "Float Layout", action: #selector(setLayoutFloat), keyEquivalent: "")
         floatItem.target = self
         menu.addItem(floatItem)
@@ -418,7 +413,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func setLayoutBSP() { send("space layout bsp") }
-    @objc private func setLayoutScroll() { send("space layout scroll") }
     @objc private func setLayoutFloat() { send("space layout float") }
     @objc private func toggleFloatWindow() { send("float toggle") }
 

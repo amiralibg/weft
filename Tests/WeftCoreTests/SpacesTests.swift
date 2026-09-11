@@ -51,41 +51,47 @@ import Testing
     #expect(try Command.parse("query capability") == .query(.capability))
 }
 
-@Test func scrollMembershipSync() {
-    var s0 = SpaceState(layouts: [5: .scroll(ScrollState())])
+@Test func floatMembershipSync() {
+    let s0 = SpaceState(layouts: [5: .float(FloatState())])
     let (s1, fresh) = syncMembership(s0, spaces: [5: [1, 2]])
-    guard case .scroll(let sc) = s1.layouts[5] else {
-        Issue.record("expected scroll layout")
-        return
-    }
-    #expect(sc.columns.count == 2)
+    #expect(s1.layouts[5]?.kind == .float)
+    #expect(s1.layouts[5]?.windows == [1, 2])
     #expect(fresh == [1, 2])
     let (s2, _) = syncMembership(s1, spaces: [5: [2]])
-    guard case .scroll(let sc2) = s2.layouts[5] else {
-        Issue.record("expected scroll layout")
-        return
-    }
-    #expect(sc2.columns.count == 1)
-    #expect(sc2.windows == [2])
+    #expect(s2.layouts[5]?.windows == [2])
 }
 
+/// bsp → float → bsp keeps every window and the focus. Float remembers the
+/// real frames it was handed; coming back rebuilds a tree in that order.
 @Test func layoutConversionsRoundTrip() {
     var tree = Tree()
     for id in [1, 2, 3] as [WindowID] { tree = tree.inserting(id) }
     tree = tree.focusing(2)
-    let sc = scrollFromTree(tree)
-    #expect(sc.columns.count == 3)
-    #expect(sc.focusedWindow == 2)
-    #expect(sc.columns.allSatisfy { $0.windows.count == 1 })
-    let back = treeFromScroll(sc)
+    let frames: [WindowID: Frame] = [
+        1: Frame(x: 0, y: 0, width: 100, height: 100),
+        2: Frame(x: 100, y: 0, width: 100, height: 100),
+        3: Frame(x: 200, y: 0, width: 100, height: 100),
+    ]
+    let fl = floatFromWindows(tree.windows, actuals: frames, focus: tree.focus)
+    #expect(fl.focus == 2)
+    #expect(fl.remembered == frames)
+    let back = treeFromOrder(fl.order, focus: fl.focus)
     #expect(back.windows.sorted() == [1, 2, 3])
     #expect(back.focus == 2)
-    // Successive right splits: left-nested splitV chain.
-    if case .container(let c) = back.root {
-        #expect(c.layout == .splitV)
-    } else {
-        Issue.record("expected container root")
-    }
+}
+
+/// A `layouts.json` saved while a space was in scroll comes back as bsp.
+/// The layout is gone; an override naming it simply does not survive, and a
+/// space with no override tiles bsp — so there is nothing to migrate.
+@Test func aPersistedScrollOverrideLoadsAsBsp() {
+    var s = SpaceState()
+    s.assignLabels(sids: [10, 20, 30], names: [])
+    s.assignOverrides(sids: [10, 20, 30], kinds: ["", "scroll", "float"])
+    #expect(s.overrides[20] == nil)
+    #expect(s.overrides[30] == .float)
+    let (s1, _) = syncMembership(s, spaces: [20: [7]], live: [10, 20, 30])
+    #expect(s1.layouts[20]?.kind == .bsp)
+    #expect(s1.layouts[30]?.kind == .float)
 }
 
 @Test func recentSpaceResolution() {
@@ -221,7 +227,7 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(try Command.parse("focus display cycle") == .focusDisplay(.cycle))
 }
 
-/// The bug: switch a space to scroll, let it empty, open a window — bsp.
+/// The bug: switch a space to float, let it empty, open a window — bsp.
 ///
 /// `syncMembership` keyed "does this space still exist?" off the membership
 /// dictionary, which only lists spaces that hold a managed window. An empty
@@ -229,14 +235,14 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 /// window to arrive found a space with no layout at all — which the daemon
 /// seeds from config.
 @Test func anEmptySpaceKeepsItsLayoutKind() {
-    let s0 = SpaceState(layouts: [7: .scroll(ScrollState())])
+    let s0 = SpaceState(layouts: [7: .float(FloatState())])
     // Sweep with the space present but holding nothing.
     let (s1, _) = syncMembership(s0, spaces: [:], live: [7])
-    #expect(s1.layouts[7]?.kind == .scroll)
+    #expect(s1.layouts[7]?.kind == .float)
     #expect(s1.layouts[7]?.windows == [])
-    // And it is still scroll when the first window lands on it.
+    // And it is still float when the first window lands on it.
     let (s2, fresh) = syncMembership(s1, spaces: [7: [11]], live: [7])
-    #expect(s2.layouts[7]?.kind == .scroll)
+    #expect(s2.layouts[7]?.kind == .float)
     #expect(s2.layouts[7]?.windows == [11])
     #expect(fresh == [11])
 }
@@ -244,7 +250,7 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 /// A space that is genuinely gone — an unplugged display — still loses its
 /// layout, which is the behaviour the dropping was there for.
 @Test func aVanishedSpaceLosesItsLayout() {
-    let s0 = SpaceState(layouts: [7: .scroll(ScrollState()), 8: .tiling(Tree())])
+    let s0 = SpaceState(layouts: [7: .float(FloatState()), 8: .tiling(Tree())])
     let (s1, _) = syncMembership(s0, spaces: [7: [1]], live: [7])
     #expect(s1.layouts[7] != nil)
     #expect(s1.layouts[8] == nil)
@@ -253,14 +259,14 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 @Test func layoutOverridesRoundTripByOrdinal() {
     var s = SpaceState()
     s.assignLabels(sids: [10, 20, 30], names: ["main", "web", "code"])
-    s.overrides[20] = .scroll
+    s.overrides[20] = .float
     let saved = s.persistedOverrides(sids: [10, 20, 30])
-    #expect(saved == ["", "scroll", ""])
+    #expect(saved == ["", "float", ""])
     // A restart hands out different sids for the same desktops.
     var next = SpaceState()
     next.assignLabels(sids: [11, 21, 31], names: ["main", "web", "code"])
     next.assignOverrides(sids: [11, 21, 31], kinds: saved)
-    #expect(next.overrides[21] == .scroll)
+    #expect(next.overrides[21] == .float)
     #expect(next.overrides[11] == nil)
 }
 
@@ -274,24 +280,23 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(s.overrides[20] == nil)
 }
 
-@Test func spaceWithOverrideScrollKeepsScrollWhenNewWindowOpens() {
-    let tree = Tree(root: .window(1), focus: 1, insertion: .bsp)
-    var s0 = SpaceState(layouts: [1: .scroll(scrollFromTree(tree))], overrides: [1: .scroll])
-    #expect(s0.layouts[1]?.kind == .scroll)
-    #expect(s0.layouts[1]?.windows == [1])
-
+@Test func spaceWithOverrideFloatKeepsFloatWhenNewWindowOpens() {
+    let s0 = SpaceState(
+        layouts: [1: .float(FloatState(order: [1], remembered: [:], focus: 1))],
+        overrides: [1: .float]
+    )
     // A second window opens on space 1
     let (s1, fresh) = syncMembership(s0, spaces: [1: [1, 2]], live: [1])
-    #expect(s1.layouts[1]?.kind == .scroll)
+    #expect(s1.layouts[1]?.kind == .float)
     #expect(s1.layouts[1]?.windows == [1, 2])
     #expect(fresh == [2])
 }
 
-@Test func spaceEmptyWithOverrideScrollKeepsScrollWhenFirstWindowOpens() {
-    // Space 2 starts with no layout but has an override of scroll
-    var s0 = SpaceState(overrides: [2: .scroll])
+@Test func spaceEmptyWithOverrideFloatKeepsFloatWhenFirstWindowOpens() {
+    // Space 2 starts with no layout but has an override of float
+    let s0 = SpaceState(overrides: [2: .float])
     let (s1, fresh) = syncMembership(s0, spaces: [2: [100]], live: [2])
-    #expect(s1.layouts[2]?.kind == .scroll)
+    #expect(s1.layouts[2]?.kind == .float)
     #expect(s1.layouts[2]?.windows == [100])
     #expect(fresh == [100])
 }

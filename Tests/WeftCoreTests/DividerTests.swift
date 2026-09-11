@@ -104,56 +104,6 @@ private func dTree(_ ids: [WindowID]) -> Tree {
     #expect(after[2]!.width > 20)
 }
 
-// MARK: - Scroll rows
-
-@Test func scrollRowsResizeVertically() {
-    let sc = ScrollState(columns: [Column(windows: [1, 2])], focusCol: 0, focusRow: 0)
-    let (before, _) = scrollLayout(sc, screen: dScreen, config: dGapped)
-    #expect(abs(before[1]!.height - before[2]!.height) < 1)
-    let next = sc.adjustingHeight(0.1)
-    let (after, _) = scrollLayout(next, screen: dScreen, config: dGapped)
-    #expect(after[1]!.height > before[1]!.height)
-    #expect(after[2]!.height < before[2]!.height)
-    // The column still fills its height.
-    #expect(abs(
-        (after[2]!.y + after[2]!.height) - (before[2]!.y + before[2]!.height)
-    ) < 1)
-}
-
-@Test func theBottomRowResizesAgainstTheOneAboveIt() {
-    let sc = ScrollState(columns: [Column(windows: [1, 2])], focusCol: 0, focusRow: 1)
-    let (before, _) = scrollLayout(sc, screen: dScreen, config: dGapped)
-    let next = sc.adjustingHeight(0.1)
-    let (after, _) = scrollLayout(next, screen: dScreen, config: dGapped)
-    #expect(after[2]!.height > before[2]!.height)
-}
-
-@Test func aColumnAlwaysHasOneHeightPerRowSummingToOne() {
-    // Whatever it is handed — nothing, too few, too many, junk — a column
-    // ends up with exactly one positive share per window, summing to 1.
-    #expect(Column(windows: [1, 2, 3]).heights == [1.0 / 3, 1.0 / 3, 1.0 / 3])
-    #expect(Column(windows: [1, 2], heights: [3, 1]).heights == [0.75, 0.25])
-    #expect(Column(windows: [1, 2, 3], heights: [0.5, 0.5]).heights.count == 3)
-    #expect(abs(Column(windows: [1, 2, 3], heights: [0.5, 0.5]).heights.reduce(0, +) - 1) < 1e-9)
-    #expect(Column(windows: [1], heights: [0, 0]).heights == [1])
-}
-
-@Test func movingAWindowIntoItsOwnColumnIsANoOp() {
-    var sc = ScrollState(columns: [Column(windows: [1, 2])], focusCol: 0, focusRow: 0)
-    sc = sc.adjustingHeight(0.2)
-    #expect(sc.movingWindowToColumn(0) == sc)
-}
-
-@Test func removingARowRedistributesItsHeight() {
-    var sc = ScrollState(columns: [Column(windows: [1, 2, 3])], focusCol: 0, focusRow: 0)
-    sc = sc.adjustingHeight(0.15)
-    sc = sc.removing(3)
-    #expect(sc.columns[0].heights.count == 2)
-    #expect(abs(sc.columns[0].heights.reduce(0, +) - 1) < 1e-9)
-    // Row 1 is still the taller of the two.
-    #expect(sc.columns[0].heights[0] > sc.columns[0].heights[1])
-}
-
 // MARK: - Zoom fullscreen
 
 @Test func zoomFullscreenFillsTheTilingAreaNotTheDisplay() {
@@ -170,12 +120,5 @@ private func dTree(_ ids: [WindowID]) -> Tree {
 @Test func zoomFullscreenOfALoneWindowStillKeepsTheGaps() {
     let t = dTree([1]).focusing(1).togglingFullscreen()
     let frames = layout(t, in: dScreen, config: dGapped)
-    #expect(frames[1] == Frame(x: 8, y: 8, width: 984, height: 784))
-}
-
-@Test func zoomFullscreenOnAScrollSpaceKeepsTheGapsToo() {
-    var sc = ScrollState(columns: [Column(windows: [1]), Column(windows: [2])], focusCol: 0)
-    sc = sc.togglingFullscreen()
-    let (frames, _) = scrollLayout(sc, screen: dScreen, config: dGapped)
     #expect(frames[1] == Frame(x: 8, y: 8, width: 984, height: 784))
 }

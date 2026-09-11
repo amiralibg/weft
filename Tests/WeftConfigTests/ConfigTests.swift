@@ -18,7 +18,7 @@ import Testing
 
         [[space]]
         label = "web"
-        layout = "scroll"
+        layout = "float"
 
         [[rule]]
         bundle-id = "com.apple.finder"
@@ -54,7 +54,7 @@ import Testing
         [general]
         inner-gap = 4
         outer-gap = 10
-        default-layout = "scroll"
+        default-layout = "float"
 
         [[space]]
         label = "web"
@@ -68,8 +68,8 @@ import Testing
         """)
     #expect(cfg.general.innerGap == 4)
     #expect(cfg.general.outerGap == TilingConfig.OuterGap(top: 10, bottom: 10, left: 10, right: 10))
-    #expect(cfg.general.defaultLayout == .scroll)
-    #expect(cfg.spaces == [SpaceDecl(label: "web", layout: .scroll)])
+    #expect(cfg.general.defaultLayout == .float)
+    #expect(cfg.spaces == [SpaceDecl(label: "web", layout: .float)])
     #expect(cfg.rules.count == 1)
     #expect(cfg.keymap.modes["default"]?.count == 1)
 }
@@ -120,20 +120,18 @@ import Testing
     #expect(matchRules(ordered, app: "Ghostty", bundleID: nil, title: "")?.space == "first")
 }
 
-@Test func parsesScrollSpaceAndReserve() throws {
+@Test func parsesSpaceLayoutAndReserve() throws {
     let cfg = try loadConfig("""
         [general]
         reserve = { top = 34 }
 
         [[space]]
         label = "web"
-        layout = "scroll"
-        scroll = { preset-column-widths = [0.333, 0.5, 0.667, 1.0], center-focused-column = "on-overflow" }
+        layout = "float"
         """)
     #expect(cfg.general.reserve == ScreenReserve(top: 34, bottom: 0, left: 0, right: 0))
     #expect(cfg.spaces.count == 1)
-    #expect(cfg.spaces[0].scroll?.presetColumnWidths == [0.333, 0.5, 0.667, 1.0])
-    #expect(cfg.spaces[0].scroll?.centerFocusedColumn == "on-overflow")
+    #expect(cfg.spaces[0].layout == .float)
 }
 
 @Test func parsesIntegrationsConfig() throws {
@@ -149,7 +147,7 @@ import Testing
         enabled = true
         args = ["style=round", "width=5.0", "hidpi=on"]
         supervise = true
-        active-color = { bsp = "0xffe1e3e4", scroll = "0xff8aadf4", float = "0xfff5a97f" }
+        active-color = { bsp = "0xffe1e3e4", float = "0xfff5a97f" }
         mode-color = { resize = "0xffed8796" }
         """)
     #expect(cfg.integrations.sketchybar.enabled == true)
@@ -163,7 +161,7 @@ import Testing
     #expect(cfg.integrations.borders.args == ["style=round", "width=5.0", "hidpi=on"])
     #expect(cfg.integrations.borders.supervise == true)
     #expect(cfg.integrations.borders.activeColor["bsp"] == "0xffe1e3e4")
-    #expect(cfg.integrations.borders.activeColor["scroll"] == "0xff8aadf4")
+    #expect(cfg.integrations.borders.activeColor["float"] == "0xfff5a97f")
     #expect(cfg.integrations.borders.modeColor["resize"] == "0xffed8796")
 }
 
@@ -312,53 +310,60 @@ private func exampleText() throws -> String {
     )
 }
 
-@Test func scrollAnimationIsValidatedAndDefaulted() throws {
-    let on = try loadConfig("""
+/// A config written for the scroll layout still loads.
+///
+/// The parser is otherwise strict — an unknown key is an error with a line
+/// number — but refusing to start over a setting weft itself retired would
+/// take the user's desktop away to make a point. Every retired key comes back
+/// as a warning naming its line, and the space tiles bsp.
+@Test func aScrollConfigLoadsWithWarningsAndTilesBsp() throws {
+    let cfg = try loadConfig("""
         [general]
+        default-layout = "scroll"
         scroll-animation-ms = 220
-        """)
-    #expect(on.general.scrollAnimationMs == 220)
-    let off = try loadConfig("""
-        [general]
-        scroll-animation-ms = 0
-        """)
-    #expect(off.general.scrollAnimationMs == 0)
-    // Absent means OFF. A motion feature that once took the whole desktop
-    // down with it has to be opted into, not opted out of.
-    #expect(try loadConfig("[general]\ninner-gap = 8\n").general.scrollAnimationMs == 0)
-    // The line number is what makes a config error actionable.
-    #expect(throws: ConfigError.self) {
-        try loadConfig("[general]\nscroll-animation-ms = -1\n")
-    }
-    #expect(throws: ConfigError.self) {
-        try loadConfig("[general]\nscroll-animation-ms = \"fast\"\n")
-    }
-}
 
-@Test func presetColumnWidthsAreRangeChecked() throws {
-    let ok = try loadConfig("""
         [[space]]
         label = "web"
         layout = "scroll"
-        scroll = { preset-column-widths = [0.25, 0.5, 1.0] }
+        scroll = { preset-column-widths = [0.5, 1.0], center-focused-column = "on-overflow" }
         """)
-    #expect(ok.spaces[0].scroll?.presetColumnWidths == [0.25, 0.5, 1.0])
-    // A width is a fraction of the usable width and is written straight onto
-    // the column, so an out-of-range one is a column many screens wide.
+    #expect(cfg.general.defaultLayout == .bsp)
+    #expect(cfg.spaces == [SpaceDecl(label: "web", layout: .bsp)])
+    #expect(cfg.warnings.count == 4)
+    // Every warning names the line it is about, or it is not actionable.
+    #expect(cfg.warnings.allSatisfy { $0.line > 0 })
+    #expect(cfg.warnings.map(\.line) == cfg.warnings.map(\.line).sorted())
+}
+
+/// A clean config warns about nothing. The warning list is only useful if it
+/// is normally empty.
+@Test func aCurrentConfigProducesNoWarnings() throws {
+    #expect(try loadConfig(try exampleText()).warnings.isEmpty)
+}
+
+/// `space layout scroll` still parses, so a stale keybind gets an explanation
+/// from the daemon rather than a syntax error from the parser.
+@Test func spaceLayoutScrollStillParses() throws {
+    #expect(try Command.parse("space layout scroll") == .space(.layout("scroll")))
+}
+
+/// A keybind for a scroll command is dropped with a warning, not a load
+/// failure — and only that bind. Every other bind in the table still works,
+/// and a genuinely bad command is still an error.
+@Test func aStaleScrollKeybindIsUnboundWithAWarning() throws {
+    let cfg = try loadConfig("""
+        [keys]
+        "alt-h" = "focus west"
+        "alt-n" = "scroll focus next-column"
+        """)
+    #expect(cfg.warnings.count == 1)
+    #expect(cfg.warnings[0].line == 3)
+    let binds = cfg.keymap.modes["default"] ?? [:]
+    #expect(binds.count == 1)
+    #expect(binds[try parseChord("alt-h")] == .send("focus west"))
+    #expect(binds[try parseChord("alt-n")] == nil)
+
     #expect(throws: ConfigError.self) {
-        try loadConfig("""
-            [[space]]
-            label = "web"
-            layout = "scroll"
-            scroll = { preset-column-widths = [0.5, 99] }
-            """)
-    }
-    #expect(throws: ConfigError.self) {
-        try loadConfig("""
-            [[space]]
-            label = "web"
-            layout = "scroll"
-            scroll = { preset-column-widths = [] }
-            """)
+        try loadConfig("[keys]\n\"alt-n\" = \"scrol focus next-column\"\n")
     }
 }

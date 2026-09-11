@@ -1,26 +1,23 @@
-// WeftCore/Spaces.swift — per-space state (M4, layouts M5).
+// WeftCore/Spaces.swift — per-space state (M4).
 //
 // macOS owns spaces natively; weft keeps one layout per space id and a label
 // layer on top (sids are NOT stable across reboot — config persists by label,
-// assigned by ordinal at startup, DESIGN §5.3). Switching a space's layout
-// preserves window membership and converts (DESIGN §4.3): tree → columns in
-// left-to-right leaf order; columns → tree by successive right splits.
+// assigned by ordinal at startup, DESIGN §5.3). Switching a space between
+// bsp and float preserves window membership: float remembers each window's
+// real frame, and coming back out rebuilds a tree in that order.
 
 public enum LayoutKind: String, Codable, Sendable, Equatable {
     case bsp
-    case scroll
     case float
 }
 
 public enum SpaceLayout: Sendable, Equatable {
     case tiling(Tree)
-    case scroll(ScrollState)
     case float(FloatState)
 
     public var kind: LayoutKind {
         switch self {
         case .tiling: return .bsp
-        case .scroll: return .scroll
         case .float: return .float
         }
     }
@@ -28,7 +25,6 @@ public enum SpaceLayout: Sendable, Equatable {
     public var windows: [WindowID] {
         switch self {
         case .tiling(let t): return t.windows
-        case .scroll(let s): return s.windows
         case .float(let f): return f.windows
         }
     }
@@ -36,7 +32,6 @@ public enum SpaceLayout: Sendable, Equatable {
     public var focus: WindowID? {
         switch self {
         case .tiling(let t): return t.focus
-        case .scroll(let s): return s.focusedWindow
         case .float(let f): return f.focus
         }
     }
@@ -44,29 +39,9 @@ public enum SpaceLayout: Sendable, Equatable {
     public var fullscreen: WindowID? {
         switch self {
         case .tiling(let t): return t.fullscreen
-        case .scroll(let s): return s.fullscreen
         case .float: return nil
         }
     }
-}
-
-/// tree → scroll: leaves left-to-right, one window per column, default width.
-/// Viewport starts at 0; the daemon ensures visibility with the real screen
-/// width on every apply (idempotent when already visible).
-public func scrollFromTree(_ tree: Tree) -> ScrollState {
-    let cols = tree.windows.map { Column(windows: [$0]) }
-    var state = ScrollState(columns: cols)
-    if let focus = tree.focus {
-        state = state.focusing(focus)
-    }
-    return state
-}
-
-/// scroll → tree: successive right splits in column order (DESIGN §4.3).
-/// Column rows flatten into the sequence (row grouping is the documented
-/// approximation — scroll rows have no tree equivalent).
-public func treeFromScroll(_ scroll: ScrollState) -> Tree {
-    treeFromOrder(scroll.columns.flatMap({ $0.windows }), focus: scroll.focusedWindow)
 }
 
 /// Any window sequence → tree by successive right splits.
@@ -83,7 +58,7 @@ public func treeFromOrder(_ order: [WindowID], focus: WindowID? = nil) -> Tree {
     return Tree(root: node, focus: resolved, insertion: .bsp)
 }
 
-/// tiling/scroll → float: membership in order, actual frames remembered so
+/// tiling → float: membership in order, actual frames remembered so
 /// re-entering float restores the user's arrangement.
 public func floatFromWindows(_ order: [WindowID], actuals: [WindowID: Frame], focus: WindowID?) -> FloatState {
     var remembered: [WindowID: Frame] = [:]
@@ -91,16 +66,6 @@ public func floatFromWindows(_ order: [WindowID], actuals: [WindowID: Frame], fo
         if let f = actuals[wid] { remembered[wid] = f }
     }
     return FloatState(order: order, remembered: remembered, focus: order.contains(focus ?? 0) ? focus : order.first)
-}
-
-/// float → scroll: one window per column in order.
-public func scrollFromFloat(_ float: FloatState) -> ScrollState {
-    let cols = float.order.map { Column(windows: [$0]) }
-    var state = ScrollState(columns: cols)
-    if let focus = float.focus {
-        state = state.focusing(focus)
-    }
-    return state
 }
 
 public struct SpaceState: Sendable, Equatable {
@@ -224,7 +189,7 @@ public struct SpaceState: Sendable, Equatable {
         return ordered.map { labels[$0] ?? "" }
     }
 
-    /// Layout overrides by ordinal, ready to persist as `["", "scroll", ""]`.
+    /// Layout overrides by ordinal, ready to persist as `["", "float", ""]`.
     ///
     /// Persisting by ordinal rather than by space id lets the choices survive
     /// a daemon restart (macOS hands out fresh space ids on reboot) while
@@ -234,6 +199,12 @@ public struct SpaceState: Sendable, Equatable {
     }
 
     /// Re-apply a previously persisted list of layout overrides by ordinal.
+    ///
+    /// A kind this build does not recognise is dropped rather than rejected,
+    /// which is how a `layouts.json` written when `scroll` existed comes back
+    /// as bsp: no override survives, and bsp is what a space with no override
+    /// gets. Nothing to migrate, and nothing to explain to the user beyond
+    /// the space they left in scroll now tiling.
     public mutating func assignOverrides(sids: [SpaceID], kinds: [String]) {
         for (i, sid) in sids.enumerated() where i < kinds.count {
             let raw = kinds[i]
@@ -265,7 +236,6 @@ public func syncMembership(
         let initialLayout: SpaceLayout
         if let overrideKind = next.overrides[sid] {
             switch overrideKind {
-            case .scroll: initialLayout = .scroll(ScrollState())
             case .float: initialLayout = .float(FloatState())
             case .bsp: initialLayout = .tiling(Tree())
             }
@@ -288,16 +258,6 @@ public func syncMembership(
                 tree = tree.removing(id)
             }
             next.layouts[sid] = .tiling(tree)
-        case .scroll(var sc):
-            let have = Set(sc.windows)
-            for id in ids.sorted() where !have.contains(id) {
-                sc = sc.inserting(id)
-                fresh.insert(id)
-            }
-            for id in sc.windows where !ids.contains(id) {
-                sc = sc.removing(id)
-            }
-            next.layouts[sid] = .scroll(sc)
         case .float(var fl):
             let have = Set(fl.windows)
             for id in ids.sorted() where !have.contains(id) {

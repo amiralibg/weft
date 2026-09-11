@@ -51,27 +51,6 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
-    /// How long a scroll space takes to pan between columns, in milliseconds.
-    /// **0 (the default) turns it off** and keeps the single-write behaviour
-    /// `docs/DESIGN.md` §1 describes.
-    ///
-    /// Off by default because the first version of it was not survivable: it
-    /// drove the border overlays at frame rate, which made the WindowServer
-    /// create and release an overlay window every frame a column spent off
-    /// screen, and it defeated echo suppression so every frame of a pan came
-    /// back as "the user moved a window". The GPU pegged and the whole desktop
-    /// — not just weft — lagged. Both are fixed, but a motion feature that can
-    /// take the machine down with it has to be opted into, not opted out of.
-    ///
-    /// The strip is the one layout where a frame change is *motion* rather
-    /// than a rearrangement: every window keeps its size and slides the same
-    /// distance, so there is a real direction to read and jumping loses it —
-    /// which column went where is left for the eye to work out. Nothing else
-    /// weft does has that property, which is why this is a scroll setting and
-    /// not a global one. A pan costs one WindowServer transaction per frame
-    /// (no AX, no app IPC); the AX write that keeps each app's own idea of its
-    /// position honest happens once, when the pan lands.
-    public var scrollAnimationMs: Int
     public var reserve: ScreenReserve
 
     public init(
@@ -85,7 +64,6 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
-        scrollAnimationMs: Int = 0,
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
@@ -98,7 +76,6 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
-        self.scrollAnimationMs = scrollAnimationMs
         self.reserve = reserve
     }
 
@@ -107,25 +84,13 @@ public struct GeneralConfig: Sendable, Equatable {
     }
 }
 
-public struct SpaceScrollDecl: Sendable, Equatable {
-    public var presetColumnWidths: [Double]?
-    public var centerFocusedColumn: String?
-
-    public init(presetColumnWidths: [Double]? = nil, centerFocusedColumn: String? = nil) {
-        self.presetColumnWidths = presetColumnWidths
-        self.centerFocusedColumn = centerFocusedColumn
-    }
-}
-
 public struct SpaceDecl: Sendable, Equatable {
     public var label: String
     public var layout: LayoutKind
-    public var scroll: SpaceScrollDecl?
 
-    public init(label: String, layout: LayoutKind, scroll: SpaceScrollDecl? = nil) {
+    public init(label: String, layout: LayoutKind) {
         self.label = label
         self.layout = layout
-        self.scroll = scroll
     }
 }
 
@@ -245,19 +210,24 @@ public struct ValidatedConfig: Sendable, Equatable {
     public var rules: [Rule]
     public var keymap: Keymap
     public var integrations: IntegrationsConfig
+    /// Settings this build no longer honours. Loaded anyway; reported by
+    /// `weftctl doctor`, the daemon log and the settings window.
+    public var warnings: [ConfigWarning]
 
     public init(
         general: GeneralConfig,
         spaces: [SpaceDecl],
         rules: [Rule],
         keymap: Keymap,
-        integrations: IntegrationsConfig = IntegrationsConfig()
+        integrations: IntegrationsConfig = IntegrationsConfig(),
+        warnings: [ConfigWarning] = []
     ) {
         self.general = general
         self.spaces = spaces
         self.rules = rules
         self.keymap = keymap
         self.integrations = integrations
+        self.warnings = warnings
     }
 
     public static var `default`: ValidatedConfig {
@@ -287,12 +257,32 @@ public struct ConfigError: Error, Sendable, Equatable {
     public var message: String
 }
 
+/// Something the config asked for that weft no longer does, but which is not
+/// worth refusing to start over.
+///
+/// The parser is otherwise strict — an unknown key is an error with a line
+/// number, because a silently ignored typo is a setting that mysteriously
+/// does nothing. A key that *used* to work is a different case: the user did
+/// not make a mistake, weft changed under them, and failing to load their
+/// whole config over it would take their desktop away to make a point.
+public struct ConfigWarning: Sendable, Equatable, Codable {
+    public var line: Int
+    public var message: String
+
+    public init(line: Int, message: String) {
+        self.line = line
+        self.message = message
+    }
+}
+
 // MARK: - Loader (strict: typos fail loudly with line numbers)
 
 /// Load + validate weft.toml. Unknown sections/keys are errors — except
 /// [integrations.*], which parses now and activates in M6.5 (warned, kept so
 /// copy-pasted DESIGN examples don't break).
 public func loadConfig(_ input: String) throws -> ValidatedConfig {
+    // Retired settings land here rather than throwing. See `ConfigWarning`.
+    var warnings: [ConfigWarning] = []
     let doc: TomlDocument
     do {
         doc = try parseTOML(input)
@@ -340,8 +330,17 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "outer-gap":
                 general.outerGap = try parseOuterGap(v, path: path, lines: doc.lines)
             case "default-layout":
-                guard case .string(let s) = v, let kind = LayoutKind(rawValue: s) else {
-                    throw err(path, "expected bsp|scroll|float")
+                guard case .string(let s) = v else { throw err(path, "expected bsp|float") }
+                if s == "scroll" {
+                    warnings.append(ConfigWarning(
+                        line: doc.lines[path] ?? 0,
+                        message: "the scroll layout was removed — using bsp"
+                    ))
+                    general.defaultLayout = .bsp
+                    break
+                }
+                guard let kind = LayoutKind(rawValue: s) else {
+                    throw err(path, "expected bsp|float")
                 }
                 general.defaultLayout = kind
             case "mouse-modifier":
@@ -357,10 +356,10 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.focusFollowsMouse = b
             case "scroll-animation-ms":
-                guard case .int(let n) = v, n >= 0, n <= 2000 else {
-                    throw err(path, "expected int between 0 and 2000 (0 = off)")
-                }
-                general.scrollAnimationMs = n
+                warnings.append(ConfigWarning(
+                    line: doc.lines[path] ?? 0,
+                    message: "scroll-animation-ms was removed with the scroll layout — ignored"
+                ))
             case "reserve":
                 general.reserve = try parseReserve(v, path: path, lines: doc.lines)
             default:
@@ -382,68 +381,31 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
         }
         var layout = general.defaultLayout
         if let lv = elem["layout"] {
-            guard case .string(let s) = lv, let kind = LayoutKind(rawValue: s) else {
-                throw ConfigError(line: at("layout"), message: "expected bsp|scroll|float")
+            guard case .string(let s) = lv else {
+                throw ConfigError(line: at("layout"), message: "expected bsp|float")
             }
-            layout = kind
+            if s == "scroll" {
+                warnings.append(ConfigWarning(
+                    line: at("layout"),
+                    message: "space '\(label)': the scroll layout was removed — using bsp"
+                ))
+                layout = .bsp
+            } else if let kind = LayoutKind(rawValue: s) {
+                layout = kind
+            } else {
+                throw ConfigError(line: at("layout"), message: "expected bsp|float")
+            }
         }
-        var scrollDecl: SpaceScrollDecl? = nil
-        if let sv = elem["scroll"] {
-            guard case .table(let tbl) = sv else {
-                throw ConfigError(line: at("scroll"), message: "expected inline table for scroll")
-            }
-            var widths: [Double]?
-            if let wv = tbl["preset-column-widths"] {
-                guard case .array(let arr) = wv else {
-                    throw ConfigError(line: at("scroll"), message: "expected array of numbers for preset-column-widths")
-                }
-                var ws: [Double] = []
-                for item in arr {
-                    switch item {
-                    case .float(let f): ws.append(f)
-                    case .int(let n): ws.append(Double(n))
-                    default:
-                        throw ConfigError(line: at("scroll"), message: "expected number in preset-column-widths")
-                    }
-                }
-                // Range-checked, now that the key is actually read: a width is
-                // a fraction of the usable width, and `cyclingWidth` sets it
-                // straight onto the column without a clamp of its own. An
-                // unchecked 99 in this list is a column ninety-nine screens
-                // wide and every other column parked off the edge.
-                guard !ws.isEmpty else {
-                    throw ConfigError(
-                        line: at("scroll"),
-                        message: "preset-column-widths must not be empty"
-                    )
-                }
-                guard ws.allSatisfy({ $0 > 0 && $0 <= 1 }) else {
-                    throw ConfigError(
-                        line: at("scroll"),
-                        message: "preset-column-widths must be fractions in (0, 1]"
-                    )
-                }
-                widths = ws
-            }
-            var center: String?
-            if let cv = tbl["center-focused-column"] {
-                guard case .string(let s) = cv else {
-                    throw ConfigError(line: at("scroll"), message: "expected string for center-focused-column")
-                }
-                guard ["always", "never", "on-overflow"].contains(s) else {
-                    throw ConfigError(line: at("scroll"), message: "expected always|never|on-overflow")
-                }
-                center = s
-            }
-            for sk in tbl.keys where sk != "preset-column-widths" && sk != "center-focused-column" {
-                throw ConfigError(line: at("scroll"), message: "unknown scroll key '\(sk)'")
-            }
-            scrollDecl = SpaceScrollDecl(presetColumnWidths: widths, centerFocusedColumn: center)
+        if elem["scroll"] != nil {
+            warnings.append(ConfigWarning(
+                line: at("scroll"),
+                message: "space '\(label)': scroll settings were removed with the layout — ignored"
+            ))
         }
         for k in elem.keys where k != "label" && k != "layout" && k != "scroll" {
             throw ConfigError(line: at(k), message: "unknown space key '\(k)'")
         }
-        spaces.append(SpaceDecl(label: label, layout: layout, scroll: scrollDecl))
+        spaces.append(SpaceDecl(label: label, layout: layout))
     }
 
     // [[rule]]
@@ -526,6 +488,16 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 }
                 action = .mode(parts[1])
                 modeTargets.append((target: parts[1], chord: chordText, line: line))
+            } else if cmdText.split(separator: " ").first == "scroll" {
+                // A binding for the retired scroll layout. Every other
+                // unparseable command is a typo and fails the load; this one
+                // is weft changing under the user, so the bind is dropped
+                // and named, and the rest of their keymap keeps working.
+                warnings.append(ConfigWarning(
+                    line: line,
+                    message: "'\(chordText)' is bound to '\(cmdText)', which was removed with the scroll layout — unbound"
+                ))
+                continue
             } else {
                 do {
                     let cmd = try Command.parse(cmdText)
@@ -654,7 +626,10 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
         }
     }
 
-    return ValidatedConfig(general: general, spaces: spaces, rules: rules, keymap: keymap, integrations: integrations)
+    return ValidatedConfig(
+        general: general, spaces: spaces, rules: rules, keymap: keymap,
+        integrations: integrations, warnings: warnings.sorted { $0.line < $1.line }
+    )
 }
 
 private func parseOuterGap(_ v: TomlValue, path: String, lines: [String: Int]) throws -> TilingConfig.OuterGap {

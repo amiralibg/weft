@@ -633,14 +633,6 @@ private struct GeneralTab: View {
                 ) {
                     NumberField(value: $store.stackOffset, range: 0...120) { store.markDirty() }
                 }
-                Row(
-                    label: "Scroll motion",
-                    help: "How long a scroll space takes to slide between columns, in milliseconds. 0 for an instant jump."
-                ) {
-                    NumberField(value: $store.scrollAnimationMs, range: 0...2000) {
-                        store.markDirty()
-                    }
-                }
             }
 
             Card(
@@ -792,12 +784,12 @@ private struct FieldCaption: View {
     }
 }
 
-/// The three layouts as pictures rather than a dropdown of words.
+/// Both layouts as pictures rather than a dropdown of words.
 ///
-/// "Scroll — columns" in a popup tells you nothing you did not already know
-/// from the word; the shape does. Three buttons also means the choice is
-/// visible without opening anything, which is what makes it feel like a
-/// control panel rather than a form.
+/// "Float — no tiling" in a popup tells you nothing you did not already know
+/// from the word; the shape does. Buttons also mean the choice is visible
+/// without opening anything, which is what makes it feel like a control panel
+/// rather than a form.
 private struct LayoutChooser: View {
     @Binding var selection: String
     let onChange: () -> Void
@@ -812,8 +804,6 @@ private struct LayoutChooser: View {
     private static let options = [
         Option(id: "bsp", title: "BSP", detail: "New windows halve the focused one",
                symbol: "rectangle.split.2x2"),
-        Option(id: "scroll", title: "Scroll", detail: "One column each, scrolling sideways",
-               symbol: "rectangle.split.3x1"),
         Option(id: "float", title: "Float", detail: "No tiling at all",
                symbol: "macwindow.on.rectangle"),
     ]
@@ -985,13 +975,6 @@ private struct LayoutPreview: View {
                 CGRect(x: area.minX + area.width * 0.34, y: area.minY + area.height * 0.34,
                        width: area.width * 0.56, height: area.height * 0.56),
             ]
-        case "scroll":
-            let columns = 3
-            let w = (area.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-            return (0..<columns).map { i in
-                CGRect(x: area.minX + (w + gap) * CGFloat(i), y: area.minY,
-                       width: w, height: area.height)
-            }
         default:
             let halfW = (area.width - gap) / 2
             let halfH = (area.height - gap) / 2
@@ -1074,7 +1057,6 @@ private struct SpaceEditorRow: View {
 
             Picker("", selection: $space.layout) {
                 Text("BSP").tag("bsp")
-                Text("Scroll").tag("scroll")
                 Text("Float").tag("float")
             }
             .labelsHidden()
@@ -1116,7 +1098,6 @@ private struct SpaceEditorRow: View {
 enum LayoutGlyph {
     static func symbol(_ layout: String) -> String {
         switch layout {
-        case "scroll": return "rectangle.split.3x1"
         case "float": return "macwindow.on.rectangle"
         default: return "rectangle.split.2x2"
         }
@@ -1879,17 +1860,11 @@ enum CommandCatalog {
             "stack split west", "stack split east",
             "stack split north", "stack split south",
         ]),
-        Group(name: "Scroll layout", commands: [
-            "scroll focus next-column", "scroll focus prev-column",
-            "scroll move-window next-column", "scroll move-window prev-column",
-            "scroll width cycle",
-        ]),
         Group(name: "Spaces", commands: [
             "space focus 1", "space focus 2", "space focus 3",
             "space focus recent",
             "space move-window 1", "space move-window 2", "space move-window 3",
-            "space layout bsp", "space layout scroll",
-            "space layout float", "space layout toggle",
+            "space layout bsp", "space layout float", "space layout toggle",
             "move space display west", "move space display east",
         ]),
         Group(name: "Resize", commands: [

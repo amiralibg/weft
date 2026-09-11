@@ -1,7 +1,7 @@
 // WeftCore/Command.swift — one grammar for keybinds AND weftctl (§7).
 //
 // Anything bindable is scriptable: config values and CLI args parse through
-// `Command.parse`. M2 covers tiling on one display; spaces/displays/scroll/
+// `Command.parse`. M2 covers tiling on one display; spaces/displays/
 // stack arrive in M3–M5 and extend this enum (never a second grammar).
 
 public enum Direction: String, Sendable, Equatable {
@@ -24,8 +24,6 @@ public enum Command: Sendable, Equatable {
     case balance
     // Stack containers (M3).
     case stack(StackCommand)
-    // Scroll strip (M5).
-    case scroll(ScrollCommand)
     // Native spaces (M4).
     case space(SpaceCommand)
     case sticky(WindowID?, StickyMode)
@@ -67,16 +65,6 @@ public enum StackCommand: Sendable, Equatable {
     case prev
     /// Convert the focused stack back to a vertical split.
     case unstack
-}
-
-public enum ScrollCommand: Sendable, Equatable {
-    /// Focus the adjacent column by strip index (reaches parked columns;
-    /// the viewport follows on apply).
-    case focusColumn(Int)
-    /// Move the focused window into the adjacent column (merge).
-    case moveColumn(Int)
-    /// Cycle the focused column through the width preset ring.
-    case widthCycle
 }
 
 public enum QueryKind: String, Sendable, Equatable {
@@ -229,33 +217,6 @@ extension Command {
             }
         case "balance":
             return .balance
-        case "scroll":
-            // scroll focus prev-column|next-column
-            // scroll move-window prev-column|next-column
-            // scroll width cycle
-            guard parts.count >= 2 else { throw CommandParseError.badArgs(input) }
-            switch parts[1] {
-            case "focus":
-                guard parts.count == 3 else { throw CommandParseError.badArgs(input) }
-                switch parts[2] {
-                case "prev-column": return .scroll(.focusColumn(-1))
-                case "next-column": return .scroll(.focusColumn(1))
-                default: throw CommandParseError.badArgs(input)
-                }
-            case "move-window":
-                guard parts.count == 3 else { throw CommandParseError.badArgs(input) }
-                switch parts[2] {
-                case "prev-column": return .scroll(.moveColumn(-1))
-                case "next-column": return .scroll(.moveColumn(1))
-                default: throw CommandParseError.badArgs(input)
-                }
-            case "width":
-                guard parts == ["scroll", "width", "cycle"] else {
-                    throw CommandParseError.badArgs(input)
-                }
-                return .scroll(.widthCycle)
-            default: throw CommandParseError.badArgs(input)
-            }
         case "space":
             guard parts.count >= 3 else { throw CommandParseError.badArgs(input) }
             switch parts[1] {
@@ -268,6 +229,10 @@ extension Command {
             case "label":
                 return .space(.label(parts[2...].joined(separator: " ")))
             case "layout":
+                // "scroll" still parses. The layout is gone, but someone
+                // whose keybind or muscle memory still says it deserves an
+                // answer that explains that, not a syntax error — the daemon
+                // maps it to bsp and says so.
                 guard parts.count == 3,
                       ["bsp", "scroll", "float", "toggle"].contains(parts[2])
                 else { throw CommandParseError.badArgs(input) }

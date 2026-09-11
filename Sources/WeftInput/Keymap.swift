@@ -160,12 +160,6 @@ public struct Keymap: Sendable, Equatable {
                 ("alt-bracketleft", "stack prev"),
                 ("alt-bracketright", "stack next"),
                 ("alt-u", "stack unstack"),
-                // M5a: plain brackets stay stack-cycle (bsp spaces); scroll
-                // columns take alt-shift-brackets. Per-space conditional
-                // binds (DESIGN §6) land with M6 config and reunite these.
-                ("alt-shift-bracketleft", "scroll focus prev-column"),
-                ("alt-shift-bracketright", "scroll focus next-column"),
-                ("alt-r", "scroll width cycle"),
                 ("alt-1", "space focus 1"),
                 ("alt-2", "space focus 2"),
                 ("alt-3", "space focus 3"),

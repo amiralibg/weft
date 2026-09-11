@@ -32,7 +32,6 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         case modeChanged
         case layoutChanged
         case stackChanged
-        case scrollChanged
     }
 
     public var kind: Kind
@@ -46,8 +45,6 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
     public var title: String?
     public var stackIndex: Int?
     public var stackCount: Int?
-    public var scrollCol: Int?
-    public var scrollCols: Int?
 
     public init(
         kind: Kind,
@@ -60,9 +57,7 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         layout: String? = nil,
         title: String? = nil,
         stackIndex: Int? = nil,
-        stackCount: Int? = nil,
-        scrollCol: Int? = nil,
-        scrollCols: Int? = nil
+        stackCount: Int? = nil
     ) {
         self.kind = kind
         self.window = window
@@ -75,7 +70,5 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         self.title = title
         self.stackIndex = stackIndex
         self.stackCount = stackCount
-        self.scrollCol = scrollCol
-        self.scrollCols = scrollCols
     }
 }

@@ -200,9 +200,8 @@ public final class BorderRenderer: @unchecked Sendable {
         let style = lock.withLock { self.style }
         var known = lock.withLock { Set(self.overlays.keys) }
         if let scope { known.formIntersection(scope) }
-        // Windows that left the layout, and windows parked off-screen by the
-        // scroll layout — a border sitting at x = −5000 is invisible but it
-        // is still a window the compositor has to carry.
+        // Windows that left the layout: an overlay with nothing under it is
+        // still a window the compositor has to carry.
         let live = Set(frames.keys)
         for wid in known.subtracting(live) { destroy(wid) }
         for (wid, frame) in frames {
