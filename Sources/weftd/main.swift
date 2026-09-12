@@ -783,6 +783,7 @@ final class Daemon: @unchecked Sendable {
     /// read the stale value back. Membership is exact, costs no IPC, and is
     /// information the daemon already has.
     private func noteFocusedWindow(_ wid: WindowID) {
+        systemFocusLock.withLock { systemFocusLocked = wid }
         updateSpaces { sp in
             for sid in sp.visibleSpaces where sp.layouts[sid]?.windows.contains(wid) == true {
                 sp.focusedDisplay = sp.displayBySpace[sid]
@@ -792,6 +793,20 @@ final class Daemon: @unchecked Sendable {
         // Two repaints, no geometry, no WindowServer sweep. This is the whole
         // cost of following focus when the renderer is in-process.
         bordersBridge.renderer.setFocus(wid)
+    }
+
+    /// The window macOS says has focus, whether or not weft manages it.
+    ///
+    /// A float or a window a rule unmanaged is in no layout, so nothing in
+    /// `SpaceState` records that it is the one the user is typing into.
+    /// Written from the observer thread, read from the apply path.
+    private var systemFocusLocked: WindowID?
+    private let systemFocusLock = NSLock()
+
+    /// Whether focus is on a window no layout owns — a float over the tiles.
+    private func focusIsUnmanaged() -> Bool {
+        guard let focus = systemFocusLock.withLock({ systemFocusLocked }) else { return false }
+        return !readSpaces().layouts.values.contains { $0.windows.contains(focus) }
     }
 
     /// Display uuids west→east. The order `focus display west|east` counts in.
@@ -3093,6 +3108,14 @@ final class Daemon: @unchecked Sendable {
             guard let pid = pids[wid] else { return nil }
             switch current {
             case .tiling(let tree):
+                // A window the tree has never heard of is a float, or one a
+                // rule unmanaged, sitting over the tiles. It is the one window
+                // on a tiled desktop that raising is *for*: tiles do not
+                // overlap each other, so they hide nothing and need no raise,
+                // while a float focused from a keybind or the switcher came
+                // forward in every sense except the visible one — focused,
+                // taking key input, and still behind the tile it overlaps.
+                if !tree.windows.contains(wid) { return (wid, pid) }
                 guard let root = tree.root,
                       stackChain(root: root, containing: wid) != nil
                 else { return nil }
@@ -3148,7 +3171,14 @@ final class Daemon: @unchecked Sendable {
                 layout(tree, in: screen, config: config)
             }
             applyFrames(frames, force: force)
-            if let focus = tree.focus, raiseFocus {
+            // Do not raise the tree's focus over a float the user is actually
+            // in. `tree.focus` is the last *tile* that had focus, and it
+            // survives focus moving to a window no layout owns — so every
+            // background sweep pushed that tile back in front of the float,
+            // which is why a floating window would not stay on top however
+            // many times it was clicked. An explicit focus verb still raises:
+            // that is the user asking for this tile, not a sweep guessing.
+            if let focus = tree.focus, raiseFocus, stealFocus || !focusIsUnmanaged() {
                 raiseFronts([focus])
                 if stealFocus, let pid = pids[focus] {
                     focusAndWarp(window: focus, pid: pid)
