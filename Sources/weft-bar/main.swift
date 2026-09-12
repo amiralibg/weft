@@ -564,7 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Same fallback the row is built from: the row can come from the
         // cache, so acting on it must not require the in-memory copy.
         guard let update = latestUpdate ?? UpdateCheck.cached() else { return }
-        Updater.promptAndInstall(update)
+        Updater.shared.promptAndInstall(update)
     }
 
     /// Ask once per launch; `UpdateCheck` decides whether that turns into a

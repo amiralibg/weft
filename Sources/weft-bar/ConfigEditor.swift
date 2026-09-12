@@ -1206,6 +1206,7 @@ private struct DesktopRow: View {
 private struct AdvancedPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
+    @ObservedObject private var updater = Updater.shared
     @State private var newMode = ""
     @State private var preview = ""
     @State private var showsFile = false
@@ -1253,15 +1254,44 @@ private struct AdvancedPane: View {
                 }
                 if health.updateAvailable, let update = health.update {
                     LabeledContent {
-                        Button("Update to \(update.latest)…") {
-                            Updater.promptAndInstall(update)
+                        Button(updater.isRunning
+                            ? "Updating…" : "Update to \(update.latest)…")
+                        {
+                            updater.promptAndInstall(update)
                         }
                         .weftProminentButton()
                         .controlSize(.small)
+                        .disabled(updater.isRunning)
                     } label: {
                         Text("A newer weft is out")
-                        Text("Downloads the release, checks it, and restarts. "
-                            + "Your settings and permissions are kept.")
+                        // What the installer is doing, while it is doing it.
+                        // Pressing Update used to change nothing on screen for
+                        // the half minute it takes, which reads as a button
+                        // that did not work.
+                        if let step = updater.step {
+                            Text(step)
+                            Text("weft quits and reopens on its own when this finishes.")
+                        } else {
+                            Text("Downloads the release, checks it, and restarts. "
+                                + "Your settings and permissions are kept.")
+                        }
+                    }
+                }
+                if let failure = updater.failure {
+                    LabeledContent {
+                        Button("Release Page…") {
+                            if let u = URL(string: health.update?.url
+                                ?? "https://github.com/amiralibg/weft/releases/latest")
+                            {
+                                NSWorkspace.shared.open(u)
+                            }
+                        }
+                        .weftGlassButton()
+                        .controlSize(.small)
+                    } label: {
+                        Text("The update did not run")
+                            .foregroundStyle(.orange)
+                        Text(failure)
                     }
                 }
                 Toggle(isOn: store.bind(\.checkForUpdates)) {
