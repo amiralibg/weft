@@ -170,6 +170,7 @@ final class Daemon: @unchecked Sendable {
             syncQueue.async { [weak self] in self?.handleObserverEvent(event) }
         }
         observers.start()
+        startSpaceWatch()
         watchCurrent()
         startConfigWatcher()
         // Input last, and off the init path: tap creation can stall for
@@ -827,6 +828,53 @@ final class Daemon: @unchecked Sendable {
         DispatchQueue.getSpecific(key: coreKey) != nil
     }
 
+    /// React to the space having changed, whoever changed it.
+    ///
+    /// Records what it acted on so the watcher below does not do it again for
+    /// the same switch.
+    private func handleSpaceChange() {
+        let now = SpaceControl.currentSpaceByDisplay()
+        actedSpacesLock.withLock { actedSpacesLocked = now }
+        bordersBridge.renderer.clearOnSpaceChange()
+        bus.emit(DaemonEvent(kind: .spaceChanged))
+        syncFromSnapshot()
+    }
+
+    /// Notice a space change macOS did not tell us about.
+    ///
+    /// `NSWorkspace.activeSpaceDidChangeNotification` is the fast path and
+    /// stays the fast path, but it is not reliable enough to be the only one.
+    /// It is a GUI-level notification arriving in a launchd daemon, it does
+    /// not say which display moved, and on a trackpad swipe it can arrive
+    /// while the WindowServer is still animating — so the sweep it triggers
+    /// reads the space the user is leaving and files every window under it.
+    /// What that looks like from the outside is a window manager that only
+    /// understands the space changes it performed itself: swipe, and weft is
+    /// on the wrong desktop until a keybind switch puts it right.
+    ///
+    /// So: ask. `currentSpaceByDisplay` is ~40 µs and touches no window list,
+    /// which at 3 Hz is about 0.01% of one core — cheap enough to run for the
+    /// life of the daemon, and it catches a notification that never came and
+    /// one that came too early with the same code.
+    private func startSpaceWatch() {
+        // Seed it, or the first tick reads a difference against an empty
+        // dictionary and spends a full sweep re-discovering the desktop the
+        // startup sweep just finished with.
+        let start = SpaceControl.currentSpaceByDisplay()
+        actedSpacesLock.withLock { actedSpacesLocked = start }
+        let timer = DispatchSource.makeTimerSource(queue: syncQueue)
+        timer.schedule(deadline: .now() + 0.3, repeating: 0.3, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = SpaceControl.currentSpaceByDisplay()
+            let acted = self.actedSpacesLock.withLock { self.actedSpacesLocked }
+            guard !now.isEmpty, now != acted else { return }
+            self.handleSpaceChange()
+        }
+        timer.resume()
+        spaceWatch = timer
+    }
+
     private func readSpaces() -> SpaceState {
         isOnCore() ? spaces : core.sync { spaces }
     }
@@ -1308,6 +1356,15 @@ final class Daemon: @unchecked Sendable {
     /// Follow-up sweep after a rule relocates a window, so layout membership
     /// catches up with where the window actually is.
     private var pendingRuleResync: DispatchWorkItem?
+    /// The spaces weft has actually reacted to, per display. Compared against
+    /// the WindowServer by `spaceWatch`; also written by the notification path
+    /// so a switch weft heard about does not get handled twice.
+    ///
+    /// Written from the observer thread and read from the watcher's timer, so
+    /// it carries its own lock rather than belonging to either.
+    private var actedSpacesLocked: [String: SpaceID] = [:]
+    private let actedSpacesLock = NSLock()
+    private var spaceWatch: DispatchSourceTimer?
     /// Trailing re-apply after `space move-window`, for the size write an app
     /// drops while it is still changing spaces.
     private var pendingMoveSettle: DispatchWorkItem?
@@ -1528,9 +1585,7 @@ final class Daemon: @unchecked Sendable {
             // become AX-bindable here (apply-on-space_changed, §5.0). Runs
             // inline: the user is looking at the new space right now, so this
             // is the one event that must not wait out a debounce.
-            bordersBridge.renderer.clearOnSpaceChange()
-            bus.emit(DaemonEvent(kind: .spaceChanged))
-            syncFromSnapshot()
+            handleSpaceChange()
         case .displayChanged:
             // Geometry first: a resolution change or an unplug leaves every
             // layout sized to a screen that no longer exists, and the sweep

@@ -317,3 +317,23 @@ extension SpaceControl {
         return total
     }
 }
+
+extension SpaceControl {
+    /// Which space is showing on each display, right now, straight from the
+    /// WindowServer. Keyed by the display UUID `SLSCopyManagedDisplaySpaces`
+    /// uses, so it lines up with `SpaceState.currentByDisplay`.
+    ///
+    /// Deliberately the cheapest question that detects a space change: no
+    /// window list, no AX, no layout. Measured at ~40 µs on a two-display
+    /// setup, which is what makes it affordable to ask on a timer.
+    public static func currentSpaceByDisplay() -> [String: SpaceID] {
+        let cid = SLSMainConnectionID()
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [:] }
+        var out: [String: SpaceID] = [:]
+        for displayDict in raw {
+            guard let uuid = displayDict["Display Identifier"] as? String else { continue }
+            out[uuid] = SpaceID(SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
+        }
+        return out
+    }
+}
