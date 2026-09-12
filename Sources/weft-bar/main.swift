@@ -102,9 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let state = BarState()
     private let switcher = WindowSwitcher()
-    /// The update line, kept hidden unless there is a newer release.
-    private var updateItem: NSMenuItem?
+    /// The newest release the launch-time check found, if it found one.
     private var latestUpdate: UpdateCheck.Result?
+    /// `check-for-updates`, as of the last check. Gates the cache read on the
+    /// menu path: turning checking off has to stop the row appearing, and a
+    /// cached answer from before it was turned off would otherwise outlive it.
+    private var updatesEnabled = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -410,11 +413,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cheatItem.image = NSImage(systemSymbolName: "command", accessibilityDescription: nil)
         menu.addItem(cheatItem)
 
-        // Setup & Permissions
-        let setupItem = NSMenuItem(title: "Permissions…", action: #selector(openOnboarding), keyEquivalent: "")
-        setupItem.target = self
-        setupItem.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: nil)
-        menu.addItem(setupItem)
+        // Setup & Permissions — only while a permission is still missing.
+        // A granted permission is settled; the menu is for what needs doing
+        // now, and a row that says "everything is fine" every time you open it
+        // is a row nobody reads. Setup stays reachable from Settings, and this
+        // comes back by itself if a grant is ever revoked. `permissionsReady`
+        // is false when the daemon cannot be asked, which is exactly when
+        // someone needs the row most.
+        if !state.permissionsReady {
+            let setupItem = NSMenuItem(
+                title: "Finish setting up permissions…",
+                action: #selector(openOnboarding), keyEquivalent: ""
+            )
+            setupItem.target = self
+            setupItem.image = NSImage(
+                systemSymbolName: "exclamationmark.shield.fill", accessibilityDescription: nil
+            )
+            menu.addItem(setupItem)
+        }
 
         // Config Editor
         let configItem = NSMenuItem(title: "Settings…", action: #selector(openConfigEditor), keyEquivalent: ",")
@@ -441,15 +457,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Update — only ever present when there is actually one, so the menu
         // does not carry a permanent "you are up to date" line nobody reads.
-        updateItem = NSMenuItem(
-            title: "", action: #selector(openUpdatePage), keyEquivalent: ""
-        )
-        updateItem?.target = self
-        updateItem?.image = NSImage(
-            systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil
-        )
-        updateItem?.isHidden = true
-        if let updateItem { menu.addItem(updateItem) }
+        //
+        // Read from the cached answer on disk every time the menu opens, not
+        // from an item held in a property. `menuNeedsUpdate` calls
+        // `removeAllItems` and rebuilds, so the item the launch-time check
+        // unhid was thrown away before it was ever drawn and a fresh hidden
+        // one took its place: the update row could not appear at all. The
+        // cache is a small local file and this is the same read `weftctl
+        // doctor` does, so there is no network on the menu path.
+        if updatesEnabled, let update = latestUpdate ?? UpdateCheck.cached(),
+           update.isNewerThanRunning {
+            let item = NSMenuItem(
+                title: "Update to weft \(update.latest)…",
+                action: #selector(openUpdatePage), keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil
+            )
+            menu.addItem(item)
+        }
 
         // Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -486,72 +513,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func openOnboarding() {
         OnboardingWindowController.shared.show()
-    }
-
-    /// Update in place: the release's own installer, run from this bundle.
-    ///
-    /// `install-release.sh` already downloads, checks the checksum, keeps the
-    /// signing identity, restarts the service and reopens the app — the same
-    /// path the curl one-liner takes, not a second updater to keep in step
-    /// with it. The release page is still the answer when the app sits
-    /// somewhere this user cannot replace it, or the build carries no script.
-    @objc private func openUpdatePage() {
-        guard let update = latestUpdate else { return }
-        let releasePage = URL(string: update.url)
-        let appDir = Bundle.main.bundleURL.deletingLastPathComponent()
-        guard let script = Bundle.main.url(forResource: "install-release", withExtension: "sh"),
-              FileManager.default.isWritableFile(atPath: appDir.path)
-        else {
-            if let releasePage { NSWorkspace.shared.open(releasePage) }
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "Update weft to \(update.latest)?"
-        alert.informativeText = "Weft downloads the release, checks it, and restarts itself. "
-            + "Your settings and permissions are kept."
-        alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Release Notes")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            break
-        case .alertSecondButtonReturn:
-            if let releasePage { NSWorkspace.shared.open(releasePage) }
-            return
-        default:
-            return
-        }
-        // Output to a file, never a pipe: the installer quits WeftBar before
-        // replacing it, and a write into a pipe whose reader has exited kills
-        // the writer — half-way through swapping the app.
-        let log = EngineInstaller.logURL.deletingLastPathComponent()
-            .appendingPathComponent("weft-update.log")
-        try? FileManager.default.createDirectory(
-            at: log.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        FileManager.default.createFile(atPath: log.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: log) else {
-            if let releasePage { NSWorkspace.shared.open(releasePage) }
-            return
-        }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [script.path]
-        var env = ProcessInfo.processInfo.environment
-        env["WEFT_VERSION"] = "v\(update.latest)"
-        // Replace *this* copy, wherever the user put it — not a second one
-        // in ~/Applications next to an old one in /Applications.
-        env["WEFT_APP_DIR"] = appDir.path
-        p.environment = env
-        p.standardInput = FileHandle.nullDevice
-        p.standardOutput = handle
-        p.standardError = handle
-        do {
-            try p.run()
-        } catch {
-            if let releasePage { NSWorkspace.shared.open(releasePage) }
-        }
     }
 
     @objc private func openStageManagerSettings() {
@@ -599,6 +560,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(decoding: data, as: UTF8.self)
     }
 
+    @objc private func openUpdatePage() {
+        // Same fallback the row is built from: the row can come from the
+        // cache, so acting on it must not require the in-memory copy.
+        guard let update = latestUpdate ?? UpdateCheck.cached() else { return }
+        Updater.promptAndInstall(update)
+    }
+
     /// Ask once per launch; `UpdateCheck` decides whether that turns into a
     /// request or a cached answer.
     ///
@@ -609,12 +577,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `check-for-updates = false`.
     private func checkForUpdate() {
         let enabled = ConfigStore.readCheckForUpdates()
+        updatesEnabled = enabled
         UpdateCheck.refreshIfNeeded(enabled: enabled) { [weak self] result in
             guard let result, result.isNewerThanRunning else { return }
             Task { @MainActor in
                 self?.latestUpdate = result
-                self?.updateItem?.title = "Update to weft \(result.latest)…"
-                self?.updateItem?.isHidden = false
             }
         }
     }

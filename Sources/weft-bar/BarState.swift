@@ -25,6 +25,11 @@ final class BarState: ObservableObject {
     /// Set when weftd is running but needs restarting to pick up a
     /// permission granted while it was already up.
     @Published private(set) var needsRestart = false
+    /// Every permission weft needs is in place. Drives whether the menu
+    /// carries a Permissions row at all: once setup is done it is not a thing
+    /// anyone needs quick access to. Defaults false — when the daemon cannot
+    /// be asked, the row is the thing most likely to help.
+    @Published private(set) var permissionsReady = false
 
     /// Called after every successful refresh, so the status item can redraw
     /// without observing.
@@ -66,6 +71,7 @@ final class BarState: ObservableObject {
                 self.windows = next.windows
                 self.daemonUp = next.reachable
                 self.needsRestart = next.needsRestart
+                self.permissionsReady = next.permissionsReady
                 self.refreshing = false
                 self.onChange?()
                 if self.refreshAgain {
@@ -123,6 +129,7 @@ final class BarState: ObservableObject {
         var windows: [BarWindow] = []
         var reachable = false
         var needsRestart = false
+        var permissionsReady = false
     }
 
     private nonisolated static func takeSnapshot() -> Snapshot {
@@ -142,18 +149,21 @@ final class BarState: ObservableObject {
         }
 
         var needsRestart = false
+        var permissionsReady = false
         if let pJSON = BarIPC.send("query permissions"),
            let pData = pJSON.data(using: .utf8),
            let perms = try? JSONDecoder().decode(DaemonPermissions.self, from: pData)
         {
             needsRestart = perms.needsRestart ?? false
+            permissionsReady = perms.ready
         }
 
         return Snapshot(
             spaces: spaces,
             windows: windows,
             reachable: true,
-            needsRestart: needsRestart
+            needsRestart: needsRestart,
+            permissionsReady: permissionsReady
         )
     }
 }
