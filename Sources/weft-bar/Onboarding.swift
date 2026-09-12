@@ -55,7 +55,11 @@ struct DaemonPermissions: Decodable, Equatable {
     /// Screen Recording counts: without it every window title is empty.
     /// So does a pending restart: a weft that cannot move a window is not
     /// ready, however green the switches are.
-    var ready: Bool { accessibility && tapLive && screenRecording && !mustRestart }
+    /// Screen Recording is deliberately not part of this: macOS does not list
+    /// an unbundled binary for it, so requiring it here left weft permanently
+    /// reporting itself unfinished for anyone who had not added weftd by hand.
+    /// Titles come from Accessibility now.
+    var ready: Bool { accessibility && tapLive && !mustRestart }
 }
 
 enum PermissionKind: String, CaseIterable, Identifiable {
@@ -74,7 +78,8 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         switch self {
         case .accessibility: return "Move, resize and focus your windows."
         case .inputMonitoring: return "See your keybinds and mouse gestures."
-        case .screenRecording: return "Read window titles, for rules and the switcher."
+        case .screenRecording:
+            return "Optional. A faster path to window titles; weft reads them without it."
         }
     }
 
@@ -94,14 +99,22 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         "Privacy & Security › \(title)"
     }
 
-    /// All three. Screen Recording used to be waved through as "only the
-    /// focus highlight" — it is not. Without it macOS redacts `kCGWindowName`
-    /// for every window weftd does not own, so every window title comes back
-    /// empty: rules that match on title never fire, the window switcher lists
-    /// blank rows, and sketchybar shows nothing. Skipping it does not cost a
-    /// highlight, it costs a working install, and the people most likely to
-    /// skip it are the ones least likely to connect the two.
-    var isRequired: Bool { true }
+    /// Accessibility and Input Monitoring are required. Screen Recording is
+    /// not, any more.
+    ///
+    /// It was, for a while, and for a good reason: without it macOS redacts
+    /// `kCGWindowName` for every window weftd does not own, so title rules
+    /// never fired and the switcher listed blank rows. What made that
+    /// untenable is that macOS will not put an unbundled binary in the Screen
+    /// Recording list at all — not one such entry exists on a normal machine,
+    /// against several for Accessibility — so weftd can only get there if the
+    /// user adds the binary by hand with the + button. A required step that
+    /// the system will not let you complete the ordinary way is not a step.
+    ///
+    /// weftd reads titles through Accessibility instead, which it already
+    /// needs. The grant still helps — it is the cheaper path and it is what
+    /// the window list itself uses — so the step stays, as an optional one.
+    var isRequired: Bool { self != .screenRecording }
 
     var settingsURL: URL? {
         let anchor: String
@@ -453,7 +466,16 @@ final class SetupModel: ObservableObject {
         case .screenRecording: command = "request-screen-recording"
         }
         Task.detached {
-            _ = BarIPC.send(command)
+            let reply = BarIPC.send(command)
+            // "prompted" means macOS is showing its own dialog right now. It
+            // already explains the permission and carries a button to the
+            // pane, so opening the pane as well just slides a window under a
+            // modal — which is what made the first run feel like being asked
+            // the same thing twice. Every other reply: open the pane, which is
+            // the whole point of the step.
+            guard reply?.trimmingCharacters(in: .whitespacesAndNewlines) != "prompted" else {
+                return
+            }
             await MainActor.run { NSWorkspace.shared.open(url) }
         }
     }

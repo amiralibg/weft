@@ -811,6 +811,25 @@ public final class AXApplier: @unchecked Sendable {
         lock.withLock { windowElements[wid] != nil }
     }
 
+    /// A window's title, read through Accessibility.
+    ///
+    /// The window list's `kCGWindowName` is redacted to an empty string for
+    /// every other process unless Screen Recording is granted — and macOS does
+    /// not list an unbundled binary like weftd under Screen Recording at all,
+    /// so on a normal install that grant has to be added by hand or not at
+    /// all. AX has the same string and asks a permission weft already needs.
+    ///
+    /// Only ever called for a window whose title came back empty, so the
+    /// round trip is paid for the windows that need it and no others.
+    public func title(of wid: WindowID) -> String? {
+        guard let el = lock.withLock({ windowElements[wid] }) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &value) == .success,
+              let title = value as? String, !title.isEmpty
+        else { return nil }
+        return title
+    }
+
     /// The app's AX element, created once per pid with the 0.15 s ceiling
     /// every cross-process call here relies on.
     private func appElement(for pid: Int32) -> AXUIElement {

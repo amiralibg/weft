@@ -875,6 +875,54 @@ final class Daemon: @unchecked Sendable {
         spaceWatch = timer
     }
 
+    /// Fill in titles the window list would not give us.
+    ///
+    /// `kCGWindowName` comes back empty for every other process without Screen
+    /// Recording, and macOS does not list an unbundled binary under Screen
+    /// Recording at all — there is not one such entry on this machine, against
+    /// three for Accessibility — so weftd only gets that grant if someone adds
+    /// the binary by hand with the + button. Title rules quietly never matched
+    /// for everyone who did not.
+    ///
+    /// AX has the same string for the asking and needs a permission weft
+    /// cannot work without anyway. Paid for only where it buys something: no
+    /// title rules in the config, nothing to do; a title already read, nothing
+    /// to do. What is left is one round trip per untitled window on a config
+    /// that actually matches on titles.
+    private func fillMissingTitles(_ world: World, rules: [Rule]) -> World {
+        guard rules.contains(where: { $0.title != nil }) else { return world }
+        var world = world
+        for i in world.windows.indices where world.windows[i].title.isEmpty {
+            if let title = applier.title(of: world.windows[i].id) {
+                world.windows[i].title = title
+            }
+        }
+        return world
+    }
+
+    /// Whether weftd has ever put up the Accessibility prompt.
+    ///
+    /// A marker file, not a flag in memory: the prompt is what creates the TCC
+    /// row, the row outlives the process, and weftd restarts constantly. In
+    /// memory it would prompt again on every restart, which is the behaviour
+    /// this is here to stop.
+    private var accessibilityAskMarker: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/weft/.asked-accessibility")
+    }
+
+    private var hasAskedForAccessibility: Bool {
+        FileManager.default.fileExists(atPath: accessibilityAskMarker.path)
+    }
+
+    private func markAskedForAccessibility() {
+        let url = accessibilityAskMarker
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+    }
+
     private func readSpaces() -> SpaceState {
         isOnCore() ? spaces : core.sync { spaces }
     }
@@ -930,11 +978,12 @@ final class Daemon: @unchecked Sendable {
         // ── Phase 1 (off-core): read the world. No lock, no queue held. ──
         dispatchPrecondition(condition: .notOnQueue(core))
         let t0 = Date()
-        let world = WorldReader.snapshot()
+        var world = WorldReader.snapshot()
         let tRead = Date()
         Trace.record("sweep.world", ms: tRead.timeIntervalSince(t0) * 1000)
         refreshScreens()
         let cfg = currentConfig()
+        world = fillMissingTitles(world, rules: cfg.rules)
         // sid → display, and the display keyboard focus is on. Both are read
         // here, off-core, because `activeDisplayUUID` is a WindowServer round
         // trip and the core queue is what every keybind waits on.
@@ -1820,13 +1869,24 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: true, output: "trace reset")
         case "request-accessibility":
             // Setup's Accessibility step, and the only place weftd asks for
-            // it. Asking is what lists weftd in System Settings, and it shows
-            // macOS's own dialog — so it happens right after the user clicked
-            // the step that says so, never at startup.
+            // it. Asking with the prompt is what puts weftd in the list — an
+            // unbundled binary gets there no other way — so it has to happen
+            // at least once, right after the user clicked the step that says
+            // so, never at startup.
+            //
+            // But only once. macOS's dialog and the Settings pane say the same
+            // thing, and opening both put a modal on top of the switch it was
+            // telling the user to find. After the first ask the row exists for
+            // good, so every later visit checks without prompting and the pane
+            // is all the user sees. The reply says which happened; WeftBar
+            // opens the pane only when no dialog is on screen.
+            let firstAsk = !hasAskedForAccessibility
+            if firstAsk { markAskedForAccessibility() }
             let trusted = AXIsProcessTrustedWithOptions(
-                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                ["AXTrustedCheckOptionPrompt": firstAsk] as CFDictionary
             )
-            return IPCResponse(ok: true, output: trusted ? "Accessibility already granted" : "requested Accessibility")
+            if trusted { return IPCResponse(ok: true, output: "granted") }
+            return IPCResponse(ok: true, output: firstAsk ? "prompted" : "requested")
         case "request-screen-recording":
             // The same, for Screen Recording: without the request macOS never
             // lists weftd there, and the user has to add it with the + button.

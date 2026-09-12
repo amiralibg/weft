@@ -214,20 +214,19 @@ public enum Doctor {
         // 1c. Screen Recording. weftd's answer when there is a daemon to ask;
         // the grant that matters is its, not ours.
         //
-        // No longer filed as optional. Without it macOS redacts kCGWindowName
-        // for every window weftd does not own, so `query windows` comes back
-        // with `"title": ""` across the board — and a config full of
-        // title-matching rules then matches nothing, silently. That reads as
-        // "weft ignores my rules", not as a missing permission.
+        // Optional again, on better grounds than the first time. It does make
+        // titles cheaper — the window list carries them, no round trip — but
+        // macOS will not list an unbundled binary under Screen Recording, so
+        // weftd can only get there if someone adds it by hand. weftd reads
+        // titles through Accessibility when this is missing, so a config full
+        // of title rules works either way.
         if daemonPerms?.screenRecording ?? Permissions.screenRecording() {
-            print("[✓] Screen Recording: Granted (window titles readable)")
+            print("[✓] Screen Recording: Granted (window titles read from the window list)")
         } else {
-            print("[✗] Screen Recording: MISSING — every window title reads as empty.")
-            print("    System Settings -> Privacy & Security -> Screen Recording.")
-            print("    Title-matching rules match nothing, the window switcher lists")
-            print("    blank rows, and the focus highlight will not track focus.")
+            print("[○] Screen Recording: not granted — titles come from Accessibility instead.")
+            print("    Nothing is broken by this. To grant it anyway, macOS needs the")
+            print("    binary added by hand (+ in the pane); it does not list it for you:")
             print("      \(daemonPerms?.binary ?? "weftd")")
-            allOk = false
         }
 
         // 1d. A newer release. Cache only — `doctor` must work offline and
