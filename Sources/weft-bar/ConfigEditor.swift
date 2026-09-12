@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import WeftBarConfig
 import WeftConfig
+import enum WeftCore.WeftVersion
 import WeftPlatform
 
 // The Settings window.
@@ -1231,7 +1232,78 @@ private struct AdvancedPane: View {
                     Text("Tile windows of menu-bar apps")
                     Text("Usually their dropdown panels, which should not take a slot.")
                 }
-                Toggle("Check for new versions of weft", isOn: store.bind(\.checkForUpdates))
+            }
+
+            // Updating used to live here as a lone toggle, with the version
+            // nowhere and no way to act on an update from this window. The
+            // menu bar carried the only notice, and only while it was open.
+            Section {
+                LabeledContent("Version") {
+                    HStack(spacing: 8) {
+                        Text(WeftVersion.current)
+                            .monospacedDigit()
+                        if health.updateAvailable, let update = health.update {
+                            Text("\(update.latest) available")
+                                .foregroundStyle(.orange)
+                        } else if health.update != nil {
+                            Text("up to date")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if health.updateAvailable, let update = health.update {
+                    LabeledContent {
+                        Button("Update to \(update.latest)…") {
+                            Updater.promptAndInstall(update)
+                        }
+                        .weftProminentButton()
+                        .controlSize(.small)
+                    } label: {
+                        Text("A newer weft is out")
+                        Text("Downloads the release, checks it, and restarts. "
+                            + "Your settings and permissions are kept.")
+                    }
+                }
+                Toggle(isOn: store.bind(\.checkForUpdates)) {
+                    Text("Check for new versions of weft")
+                    Text("Asks GitHub once a day. Nothing is downloaded until you say so.")
+                }
+                LabeledContent {
+                    Button(health.checkingForUpdate ? "Checking…" : "Check Now") {
+                        health.checkForUpdatesNow()
+                    }
+                    .weftGlassButton()
+                    .controlSize(.small)
+                    .disabled(health.checkingForUpdate)
+                } label: {
+                    Text("Check now")
+                    if let checked = health.update?.checkedAt {
+                        Text("Last checked \(checked.formatted(.relative(presentation: .named))).")
+                    } else {
+                        Text("Not checked yet.")
+                    }
+                }
+            } header: {
+                Text("Updates")
+            }
+
+            // Setup is reachable from here whether or not anything is wrong.
+            // The menu bar only carries it while a permission is missing, and
+            // "everything is granted" is not a reason to make the window that
+            // explains the permissions unreachable.
+            Section {
+                LabeledContent {
+                    Button("Open Setup…") { OnboardingWindowController.shared.show() }
+                        .weftGlassButton()
+                        .controlSize(.small)
+                } label: {
+                    Text("Permissions")
+                    Text(health.needsPermissions
+                        ? "Something weft needs is still switched off."
+                        : "Accessibility, Input Monitoring and Screen Recording are in place.")
+                }
+            } header: {
+                Text("Permissions")
             }
 
             Section {
@@ -1818,6 +1890,12 @@ final class EngineHealth: ObservableObject {
     @Published var needsRestart = false
     /// Labels of the desktops that exist right now.
     @Published var liveSpaces: [String] = []
+    /// The newest release weft knows about, newer than this one or not.
+    /// Nil means nobody has asked yet, or asking failed.
+    @Published var update: UpdateCheck.Result?
+    /// A check the user asked for, in flight. Only ever set by the button —
+    /// the background read is silent.
+    @Published var checkingForUpdate = false
 
     let bordersPath = ExternalBinary.find("borders")
     let sketchybarPath = ExternalBinary.find("sketchybar")
@@ -1825,6 +1903,9 @@ final class EngineHealth: ObservableObject {
     private var timer: Timer?
 
     var needsPermissions: Bool { running && !(accessibility && keybindsLive) }
+
+    /// There is a newer weft than the one running.
+    var updateAvailable: Bool { update?.isNewerThanRunning ?? false }
 
     var tint: Color {
         if !running { return .orange }
@@ -1879,12 +1960,33 @@ final class EngineHealth: ObservableObject {
                 else { return [] }
                 return decoded.map(\.label)
             }()
+            // The cached answer only — a file read, no network. The window
+            // polls every five seconds and must not turn that into traffic.
+            let cachedUpdate = UpdateCheck.cached()
             await MainActor.run {
                 self.running = perms != nil
                 self.accessibility = perms?.accessibility ?? false
                 self.keybindsLive = perms?.tapLive ?? false
                 self.needsRestart = perms?.mustRestart ?? false
                 self.liveSpaces = spaces
+                if !self.checkingForUpdate { self.update = cachedUpdate }
+            }
+        }
+    }
+
+    /// Ask GitHub now, because the user pressed the button.
+    ///
+    /// The background path is throttled to a day, which is right for something
+    /// nobody asked for and wrong for something somebody did: "Check Now" that
+    /// returns a day-old answer is a button that does nothing.
+    func checkForUpdatesNow() {
+        guard !checkingForUpdate else { return }
+        checkingForUpdate = true
+        Task.detached(priority: .userInitiated) {
+            let result = await UpdateCheck.fetchNow()
+            await MainActor.run {
+                if let result { self.update = result }
+                self.checkingForUpdate = false
             }
         }
     }

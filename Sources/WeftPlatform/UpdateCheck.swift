@@ -97,6 +97,38 @@ public enum UpdateCheck {
         }.resume()
     }
 
+    /// Ask now, ignoring the throttle, and wait for the answer.
+    ///
+    /// For the "Check Now" button and nothing else. The throttle exists so a
+    /// window manager that restarts all day does not hammer a public API on
+    /// its own initiative; a person pressing a button is not that, and a
+    /// button that hands back a day-old answer has not done what it says.
+    /// Still writes the cache, so pressing it also resets the daily clock.
+    public static func fetchNow() async -> Result? {
+        guard let url = URL(string: releasesAPI) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("weft/\(WeftVersion.current)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = json["tag_name"] as? String
+        else { return cached() }
+
+        let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let page = (json["html_url"] as? String)
+            ?? "https://github.com/amiralibg/weft/releases/latest"
+        let result = Result(latest: latest, url: page, checkedAt: Date())
+        try? FileManager.default.createDirectory(
+            at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        if let encoded = try? JSONEncoder().encode(result) {
+            try? encoded.write(to: cacheURL, options: .atomic)
+        }
+        return result
+    }
+
     /// The one-liner that installs whatever is current. Shown, never run.
     public static let installCommand =
         "curl -fsSL https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash"
