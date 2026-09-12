@@ -341,7 +341,14 @@ public final class BorderRenderer: @unchecked Sendable {
                 cornerRadius: corner
             )
         }
-        draw(wid)
+        // Paint before ordering in, and do not order in at all if the paint
+        // did not happen. The window is already created and already sticky by
+        // this point, so showing it regardless is how an unpainted overlay
+        // ends up on screen as a solid rectangle with no window under it.
+        guard draw(wid) else {
+            destroy(wid)
+            return
+        }
         order(overlayWID, above: wid)
     }
 
@@ -399,14 +406,20 @@ public final class BorderRenderer: @unchecked Sendable {
         sync(frames: targets, focused: focus, scope: nil)
     }
 
-    private func draw(_ wid: WindowID) {
+    /// Returns false when there is nothing on screen for this overlay: no
+    /// backing store, so the window carries whatever the compositor last had
+    /// in that memory. An SLS window ordered in with an unpainted store shows
+    /// as a solid rectangle — the stray white border that appeared over a
+    /// window and belonged to nothing.
+    @discardableResult
+    private func draw(_ wid: WindowID) -> Bool {
         let (snapshot, currentFocus) = lock.withLock { (overlays[wid], self.focused) }
-        guard var overlay = snapshot else { return }
+        guard var overlay = snapshot else { return false }
         let context: CGContext
         if let cached = overlay.context {
             context = cached
         } else {
-            guard let fresh = SLWindowContextCreate(cid, overlay.wid, nil) else { return }
+            guard let fresh = SLWindowContextCreate(cid, overlay.wid, nil) else { return false }
             context = fresh
             overlay.context = fresh
             lock.withLock { overlays[wid] = overlay }
@@ -417,8 +430,9 @@ public final class BorderRenderer: @unchecked Sendable {
         context.clear(bounds)
         let isFocused = (wid == currentFocus)
         if (!style.showInactive && !isFocused) || style.width <= 0 {
+            // Cleared and flushed: an empty store is still a painted one.
             context.flush()
-            return
+            return true
         }
         // Painted just outside the window: the stroke is centred on a rect
         // half a line width outside the window's own edge, so it runs from
@@ -440,6 +454,7 @@ public final class BorderRenderer: @unchecked Sendable {
             Self.drawStackPips(in: context, bounds: bounds, stack: stack, color: overlay.color, style: style)
         }
         context.flush()
+        return true
     }
 
     /// A row of dots centred on the top edge: one per stack member, the front
