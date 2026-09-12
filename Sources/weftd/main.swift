@@ -893,11 +893,10 @@ final class Daemon: @unchecked Sendable {
     /// Fill in titles the window list would not give us.
     ///
     /// `kCGWindowName` comes back empty for every other process without Screen
-    /// Recording, and macOS does not list an unbundled binary under Screen
-    /// Recording at all — there is not one such entry on this machine, against
-    /// three for Accessibility — so weftd only gets that grant if someone adds
-    /// the binary by hand with the + button. Title rules quietly never matched
-    /// for everyone who did not.
+    /// Recording, so title rules quietly never matched for anyone who had not
+    /// granted it — and it is the permission people most reasonably decline to
+    /// a window manager, since "record my screen" is not what they think they
+    /// are agreeing to.
     ///
     /// AX has the same string for the asking and needs a permission weft
     /// cannot work without anyway. Paid for only where it buys something: no
@@ -915,23 +914,23 @@ final class Daemon: @unchecked Sendable {
         return world
     }
 
-    /// Whether weftd has ever put up the Accessibility prompt.
+    /// Whether weftd has ever put up macOS's own prompt for a permission.
     ///
     /// A marker file, not a flag in memory: the prompt is what creates the TCC
     /// row, the row outlives the process, and weftd restarts constantly. In
     /// memory it would prompt again on every restart, which is the behaviour
     /// this is here to stop.
-    private var accessibilityAskMarker: URL {
+    private func askMarker(_ service: String) -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/weft/.asked-accessibility")
+            .appendingPathComponent(".config/weft/.asked-\(service)")
     }
 
-    private var hasAskedForAccessibility: Bool {
-        FileManager.default.fileExists(atPath: accessibilityAskMarker.path)
+    private func hasAsked(_ service: String) -> Bool {
+        FileManager.default.fileExists(atPath: askMarker(service).path)
     }
 
-    private func markAskedForAccessibility() {
-        let url = accessibilityAskMarker
+    private func markAsked(_ service: String) {
+        let url = askMarker(service)
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
@@ -1895,26 +1894,35 @@ final class Daemon: @unchecked Sendable {
             // good, so every later visit checks without prompting and the pane
             // is all the user sees. The reply says which happened; WeftBar
             // opens the pane only when no dialog is on screen.
-            let firstAsk = !hasAskedForAccessibility
-            if firstAsk { markAskedForAccessibility() }
+            let firstAsk = !hasAsked("accessibility")
+            if firstAsk { markAsked("accessibility") }
             let trusted = AXIsProcessTrustedWithOptions(
                 ["AXTrustedCheckOptionPrompt": firstAsk] as CFDictionary
             )
             if trusted { return IPCResponse(ok: true, output: "granted") }
             return IPCResponse(ok: true, output: firstAsk ? "prompted" : "requested")
         case "request-screen-recording":
-            // The same, for Screen Recording: without the request macOS never
-            // lists weftd there, and the user has to add it with the + button.
-            // Requested unconditionally, not `preflight || request`. The
-            // preflight answers out of a per-process cache and `screenRecording()`
-            // falls back to "can I read anyone else's window title", which a
-            // handful of windows answer yes to without the grant — so a
-            // short-circuit could skip the one call that registers weftd, and
-            // the row the user is being sent to flip would never exist. Asking
-            // when the answer is already yes costs one no-op call.
-            let asked = CGRequestScreenCaptureAccess()
-            let granted = asked || CGPreflightScreenCaptureAccess()
-            return IPCResponse(ok: true, output: granted ? "Screen Recording already granted" : "requested Screen Recording")
+            // The same shape as Accessibility, for the same reason.
+            // `CGRequestScreenCaptureAccess` is what puts weftd in the list —
+            // it does work for an unbundled binary, the row just does not
+            // exist until something asks — and it also raises macOS's dialog.
+            // Calling it on every visit put that dialog on top of the pane
+            // every time, saying what the pane was already showing.
+            //
+            // Asked once, which is all the registration needs. After that the
+            // preflight answers without a dialog and the pane is all the user
+            // sees. The reply tells WeftBar which happened.
+            if hasAsked("screen-recording") {
+                return IPCResponse(
+                    ok: true, output: CGPreflightScreenCaptureAccess() ? "granted" : "requested"
+                )
+            }
+            markAsked("screen-recording")
+            if CGPreflightScreenCaptureAccess() {
+                return IPCResponse(ok: true, output: "granted")
+            }
+            _ = CGRequestScreenCaptureAccess()
+            return IPCResponse(ok: true, output: "prompted")
         case "request-input-access":
             // Ask TCC to list weftd under Input Monitoring, on demand.
             //

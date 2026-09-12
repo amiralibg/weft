@@ -55,10 +55,10 @@ struct DaemonPermissions: Decodable, Equatable {
     /// Screen Recording counts: without it every window title is empty.
     /// So does a pending restart: a weft that cannot move a window is not
     /// ready, however green the switches are.
-    /// Screen Recording is deliberately not part of this: macOS does not list
-    /// an unbundled binary for it, so requiring it here left weft permanently
-    /// reporting itself unfinished for anyone who had not added weftd by hand.
-    /// Titles come from Accessibility now.
+    /// Screen Recording is deliberately not part of this. Titles come from
+    /// Accessibility, so weft is fully working without it, and counting it
+    /// here would leave weft reporting itself unfinished — and the menu bar
+    /// carrying a permissions row — for a permission nothing is waiting on.
     var ready: Bool { accessibility && tapLive && !mustRestart }
 }
 
@@ -100,20 +100,17 @@ enum PermissionKind: String, CaseIterable, Identifiable {
     }
 
     /// Accessibility and Input Monitoring are required. Screen Recording is
-    /// not, any more.
+    /// not.
     ///
-    /// It was, for a while, and for a good reason: without it macOS redacts
+    /// It was, and for a real reason: without it macOS redacts
     /// `kCGWindowName` for every window weftd does not own, so title rules
-    /// never fired and the switcher listed blank rows. What made that
-    /// untenable is that macOS will not put an unbundled binary in the Screen
-    /// Recording list at all — not one such entry exists on a normal machine,
-    /// against several for Accessibility — so weftd can only get there if the
-    /// user adds the binary by hand with the + button. A required step that
-    /// the system will not let you complete the ordinary way is not a step.
+    /// never fired and the switcher listed blank rows. weftd reads titles
+    /// through Accessibility now — the same string, a permission it cannot
+    /// work without anyway — so nothing breaks when this is off.
     ///
-    /// weftd reads titles through Accessibility instead, which it already
-    /// needs. The grant still helps — it is the cheaper path and it is what
-    /// the window list itself uses — so the step stays, as an optional one.
+    /// The grant is still worth having: the window list carries titles with no
+    /// round trip. It just is not a thing to stop setup over, and it is the
+    /// one of the three that asks the most of the user for the least.
     var isRequired: Bool { self != .screenRecording }
 
     var settingsURL: URL? {
