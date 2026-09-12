@@ -614,6 +614,9 @@ final class Daemon: @unchecked Sendable {
             let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
             let frames: [WindowID: Frame]
             var grabbable = true
+            // Stack members behind the front one. They have a slot and a peek
+            // strip, but no border — see `hiddenStackMembers`.
+            var hidden: Set<WindowID> = []
             switch layout {
             case .tiling(let tree):
                 // A fullscreen window covers its neighbours, so there is no
@@ -622,6 +625,7 @@ final class Daemon: @unchecked Sendable {
                 frames = WeftCore.layout(tree, in: screen, config: config)
                 peeks += stackPeeks(in: tree, frames: frames)
                 positions.merge(stackPositions(in: tree)) { a, _ in a }
+                hidden = hiddenStackMembers(in: tree)
             case .float(let fl):
                 grabbable = false
                 // A float space has no computed geometry — the windows are
@@ -629,7 +633,9 @@ final class Daemon: @unchecked Sendable {
                 frames = liveFrames(of: fl.windows)
             }
             if wantBorders {
-                for (wid, frame) in frames { borderFrames[wid] = frame }
+                for (wid, frame) in frames where !hidden.contains(wid) {
+                    borderFrames[wid] = frame
+                }
             }
             if grabbable && cfg.mouseBorderResize {
                 all += dividers(in: frames, innerGap: cfg.innerGap)

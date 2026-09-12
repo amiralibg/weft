@@ -869,6 +869,29 @@ public func stackPositions(in tree: Tree) -> [WindowID: StackPosition] {
     return out
 }
 
+/// Every stack member that is not the front one.
+///
+/// The layout gives these a slot inset from the top, so each shows as a strip
+/// above the member in front — which is what makes a stack legible and what
+/// the peek zones make clickable. What it must not do is put a *border* round
+/// them: a border traces a window's bounds, and a window with eight points
+/// showing has no bounds worth tracing. All the user sees is the top edge, a
+/// hard line above a window that nothing explains — reported, reasonably, as a
+/// stray white line over the desktop. The front member's border carries pips
+/// saying how many are stacked and which one this is; that is the stack's
+/// marking, and it is enough.
+public func hiddenStackMembers(in tree: Tree) -> Set<WindowID> {
+    guard let root = tree.root else { return [] }
+    var out: Set<WindowID> = []
+    forEachStack(root) { c in
+        let active = min(max(c.active, 0), c.children.count - 1)
+        for (i, child) in c.children.enumerated() where i != active {
+            out.formUnion(child.windows)
+        }
+    }
+    return out
+}
+
 /// A strip of a hidden stack member that shows behind the front one, and the
 /// member it belongs to.
 public struct StackPeek: Sendable, Equatable {

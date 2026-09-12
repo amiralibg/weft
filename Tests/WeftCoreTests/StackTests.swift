@@ -347,3 +347,32 @@ private let peekConfig = TilingConfig(
     #expect(c.layout == .splitH)
     #expect(back.windows.sorted() == [1, 2, 3])
 }
+
+@Test func onlyTheFrontStackMemberGetsABorder() {
+    // Three windows, two of them stacked: the layout insets the hidden member
+    // from the top so it shows as a strip above the front one. That strip is a
+    // click target, not a window with bounds worth tracing — a border round it
+    // is only ever seen as its top edge, a hard line above a window with
+    // nothing to explain it.
+    var t = tree(1, 2, 3)
+    t = t.focusing(2).togglingStack()
+    let hidden = hiddenStackMembers(in: t)
+
+    // 2 and 3 are stacked; whichever is active keeps its border.
+    #expect(hidden.count == 1)
+    #expect(hidden.isSubset(of: [2, 3]))
+    // The window in its own slot is never hidden.
+    #expect(!hidden.contains(1))
+    // And the one the pips report as front is the one still drawn.
+    let front = Set(stackPositions(in: t).keys)
+    #expect(front.intersection(hidden).isEmpty)
+
+    // Every stacked window still gets a frame — only the border is withheld.
+    let frames = layout(t, in: stackScreen, config: TilingConfig())
+    #expect(frames.count == 3)
+}
+
+@Test func aTreeWithNoStacksHidesNothing() {
+    #expect(hiddenStackMembers(in: tree(1, 2, 3)).isEmpty)
+    #expect(hiddenStackMembers(in: Tree()).isEmpty)
+}
