@@ -553,13 +553,6 @@ final class Daemon: @unchecked Sendable {
         // app IPC — and the applier holds its own latest-wins queue for the
         // AX size writes, which are the only part an app can be slow at.
         applier.applyDragFrames(frames: frames, pids: allPids())
-        // From the same numbers, in the same breath. An external border
-        // process only learns about this move by being notified after the
-        // fact and reading the geometry back, which is why its borders trail
-        // the window during a drag.
-        if bordersBridge.drawsBorders {
-            bordersBridge.renderer.update(frames: frames, scope: Set(frames.keys))
-        }
     }
 
     /// Run the full frame-set protocol over the drag's final geometry.
@@ -591,8 +584,7 @@ final class Daemon: @unchecked Sendable {
     /// every apply, is the kind of thing that turns into lag.
     private func refreshDividerZones() {
         let cfg = currentConfig().general
-        let wantBorders = bordersBridge.drawsBorders
-        guard cfg.mouseBorderResize || wantBorders else {
+        guard cfg.mouseBorderResize else {
             dividerLock.withLock {
                 dividerZones = []
                 stackPeekZones = []
@@ -604,8 +596,6 @@ final class Daemon: @unchecked Sendable {
         let config = cfg.asTilingConfig()
         var all: [Divider] = []
         var peeks: [StackPeek] = []
-        var positions: [WindowID: StackPosition] = [:]
-        var borderFrames: [WindowID: Frame] = [:]
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
         let sp = readSpaces()
@@ -614,9 +604,6 @@ final class Daemon: @unchecked Sendable {
             let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
             let frames: [WindowID: Frame]
             var grabbable = true
-            // Stack members behind the front one. They have a slot and a peek
-            // strip, but no border — see `hiddenStackMembers`.
-            var hidden: Set<WindowID> = []
             switch layout {
             case .tiling(let tree):
                 // A fullscreen window covers its neighbours, so there is no
@@ -624,18 +611,11 @@ final class Daemon: @unchecked Sendable {
                 grabbable = tree.fullscreen == nil
                 frames = WeftCore.layout(tree, in: screen, config: config)
                 peeks += stackPeeks(in: tree, frames: frames)
-                positions.merge(stackPositions(in: tree)) { a, _ in a }
-                hidden = hiddenStackMembers(in: tree)
             case .float(let fl):
                 grabbable = false
                 // A float space has no computed geometry — the windows are
                 // wherever the user put them, so read it.
                 frames = liveFrames(of: fl.windows)
-            }
-            if wantBorders {
-                for (wid, frame) in frames where !hidden.contains(wid) {
-                    borderFrames[wid] = frame
-                }
             }
             if grabbable && cfg.mouseBorderResize {
                 all += dividers(in: frames, innerGap: cfg.innerGap)
@@ -648,16 +628,6 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
         input.updateStackZones(clickablePeeks.map(\.rect))
-        // Only windows in a layout, which is what makes menu-bar popovers,
-        // Spotlight and every other transient panel border-free without a
-        // single heuristic: they were never in a layout to begin with.
-        if wantBorders {
-            // Before the update, so the repaint it triggers draws the marks.
-            bordersBridge.renderer.setStackPositions(positions)
-            bordersBridge.renderer.update(
-                frames: borderFrames, focused: sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
-            )
-        }
     }
 
     /// Keybind entry point. Returns immediately (tap-thread safe); the command
@@ -796,9 +766,6 @@ final class Daemon: @unchecked Sendable {
                 return
             }
         }
-        // Two repaints, no geometry, no WindowServer sweep. This is the whole
-        // cost of following focus when the renderer is in-process.
-        bordersBridge.renderer.setFocus(wid)
     }
 
     /// The window macOS says has focus, whether or not weft manages it.
@@ -856,7 +823,6 @@ final class Daemon: @unchecked Sendable {
     private func handleSpaceChange() {
         let now = SpaceControl.currentSpaceByDisplay()
         actedSpacesLock.withLock { actedSpacesLocked = now }
-        bordersBridge.renderer.clearOnSpaceChange()
         bus.emit(DaemonEvent(kind: .spaceChanged))
         syncFromSnapshot()
     }
@@ -1660,9 +1626,6 @@ final class Daemon: @unchecked Sendable {
             // layout sized to a screen that no longer exists, and the sweep
             // below computes frames from these rects.
             refreshScreens()
-            // Scale factors and geometry both changed; every overlay's
-            // backing store is sized for a display that may not be there.
-            bordersBridge.renderer.clearOnSpaceChange()
             bus.emit(DaemonEvent(kind: .displayChanged))
             syncFromSnapshot()
         }

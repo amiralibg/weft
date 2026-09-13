@@ -304,9 +304,37 @@ Both are off by default, because both drive a program weft does not install.
 | [JankyBorders](https://github.com/FelixKratz/JankyBorders) | Highlight around the focused window, recoloured per layout and per mode | `brew install FelixKratz/formulae/borders` |
 | [SketchyBar](https://github.com/FelixKratz/SketchyBar) | Fires `--trigger weft_event` with `WEFT_*` variables on layout, space and focus changes | `brew install FelixKratz/formulae/sketchybar` |
 
-Weft draws its own window borders out of the box (Settings › Appearance), so
-JankyBorders is only for people who already use it. Turn either on in
-Settings › Advanced, which tells you whether the program is actually installed.
+### Window borders
+
+Weft draws borders through JankyBorders. It used to have its own in-process
+renderer; that was removed in 0.7.4 because its overlay windows cost about 16
+percentage points of GPU utilisation on an idle desktop — with borders on the
+GPU never went idle (median 21% against 2% without). JankyBorders does the same
+job for no measurable GPU cost, so there is one border renderer now instead of
+two.
+
+To turn borders on:
+
+```bash
+brew install FelixKratz/formulae/borders   # once
+```
+
+```toml
+[integrations.borders]
+enabled = true
+args = ["width=2.0", "active_color=0xff7aa2f7", "style=round", "hidpi=on"]
+```
+
+Then `weftctl service restart`. Weft starts and supervises the process for you;
+you do not run `borders` yourself.
+
+If borders are enabled and JankyBorders is not installed, weftd says so once in
+the log with the install command, and everything else keeps working. `weftctl
+doctor` reports the same thing.
+
+An existing config with `backend = "native"` still loads — the key is accepted
+and ignored, with a warning pointing at the install command. Settings ›
+Advanced tells you whether the program is actually installed.
 
 ## Building from source
 

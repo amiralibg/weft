@@ -464,8 +464,8 @@ private struct AppearancePane: View {
                 .padding(.bottom, 14)
                 .textCase(nil)
             } footer: {
-                if store.bordersEnabled, store.bordersBackend != "native" {
-                    Text("Borders are drawn by JankyBorders right now. Switch to weft's own in Advanced to use these settings.")
+                if store.bordersEnabled {
+                    Text("Borders are drawn by JankyBorders. These settings are passed to it.")
                 }
             }
         }
@@ -1367,20 +1367,13 @@ private struct AdvancedPane: View {
             }
 
             Section("Border drawing") {
-                Picker("Drawn by", selection: store.bind(\.bordersBackend)) {
-                    Text("Weft").tag("native")
-                    Text("JankyBorders").tag("janky")
-                }
-                .pickerStyle(.segmented)
-                if store.bordersBackend == "janky" {
-                    LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
-                    Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
-                    LabeledContent("Arguments") {
-                        TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-                            .disabled(store.bordersArgsLocked)
-                    }
+                LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
+                Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
+                LabeledContent("Arguments") {
+                    TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .disabled(store.bordersArgsLocked)
                 }
             }
 
@@ -1774,7 +1767,7 @@ extension Color {
     }
 
     init?(hex: String) {
-        guard !hex.isEmpty, let value = BorderRenderer.parseColor(hex) else { return nil }
+        guard !hex.isEmpty, let value = parseBorderColor(hex) else { return nil }
         self.init(argb: value)
     }
 

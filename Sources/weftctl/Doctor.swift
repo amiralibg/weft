@@ -292,9 +292,7 @@ public enum Doctor {
                 print("    - Window rules: \(validated.rules.count)")
                 print("    - Spaces configured: \(validated.spaces.count)")
 
-                if validated.integrations.borders.enabled && validated.integrations.borders.backend == .native {
-                    print("[✓] Borders: Native (in-process)")
-                } else if !reportHelper(
+                if !reportHelper(
                     name: "JankyBorders", binary: "borders", found: bordersFound,
                     enabled: validated.integrations.borders.enabled,
                     install: "brew install FelixKratz/formulae/borders",

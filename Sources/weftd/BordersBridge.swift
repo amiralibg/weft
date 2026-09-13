@@ -4,12 +4,6 @@ import WeftConfig
 import WeftCore
 
 final class BordersBridge: @unchecked Sendable {
-    /// Weft's own renderer. Always constructed, only fed when the config asks
-    /// for it — it costs nothing until the first window gets a border.
-    let renderer = BorderRenderer()
-    /// True when weft is drawing the borders itself, so the apply path can
-    /// skip computing frames nobody is going to paint.
-    private(set) var drawsBorders = false
     private let lock = NSLock()
     private var process: Process?
     private var isSupervised = false
@@ -29,35 +23,10 @@ final class BordersBridge: @unchecked Sendable {
     private var crashRestarts = 0
 
     func applyConfig(_ config: BordersIntegrationConfig, currentLayout: LayoutKind? = nil, currentMode: String? = nil) {
-        let native = config.enabled && config.backend == .native
-        drawsBorders = native
-        // Never both. Two renderers drawing the same rectangle is two
-        // rectangles, one of them a frame behind the other.
-        if native {
-            lock.withLock { stopInternal() }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                self?.retireExternalBorders(supervised: config.supervise)
-            }
-        }
-        renderer.setEnabled(native)
-        if native {
-            renderer.setStyle(BorderRenderer.Style(
-                width: config.resolvedWidth,
-                radius: config.radius ?? 10,
-                activeColor: BorderRenderer.parseColor(config.resolvedActiveColor) ?? 0xff7a_a2f7,
-                inactiveColor: BorderRenderer.parseColor(config.resolvedInactiveColor) ?? 0x4041_4868,
-                showInactive: config.showInactive,
-                // No radius in the config means "match the window": each
-                // border follows its own window's corners, and 10 is only
-                // the fallback for a window the WindowServer says nothing
-                // about. A number in the config is a deliberate override.
-                autoRadius: config.radius == nil
-            ))
-        }
         lock.withLock {
             lastConfig = config
-            if !config.enabled || config.backend == .native {
-                if !native { stopInternal() }
+            if !config.enabled {
+                stopInternal()
                 warnedMissing = false
                 warnedExternal = false
                 return
@@ -92,36 +61,6 @@ final class BordersBridge: @unchecked Sendable {
 
     private func findBordersBinary() -> String? { ExternalBinary.find("borders") }
 
-    /// Switching to the native renderer while a `borders` process is still up
-    /// means every window wears two rectangles.
-    ///
-    /// If weft was supervising it, weft started it and weft ends it — an
-    /// upgrade that changes the default backend must not leave the old
-    /// renderer running forever. If it was not, someone else started it and
-    /// it is not weft's to kill: say so instead.
-    private func retireExternalBorders(supervised: Bool) {
-        guard isBordersAlreadyRunning() else {
-            warnedExternal = false
-            return
-        }
-        // Native borders and JankyBorders cannot run concurrently. When native
-        // is active, terminate any external borders instance and its parent script
-        // to prevent duplicate outlines or compositor ghost lines.
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        proc.arguments = ["-9", "-x", "borders"]
-        try? proc.run()
-        proc.waitUntilExit()
-
-        let killrc = Process()
-        killrc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killrc.arguments = ["-9", "-f", "bordersrc"]
-        try? killrc.run()
-        killrc.waitUntilExit()
-
-        fputs("weftd: stopped external borders and bordersrc processes — weft draws its own now\n", stderr)
-    }
-
     private func startProcess(_ config: BordersIntegrationConfig) {
         guard let bin = findBordersBinary() else {
             // Say it once. `enabled = true` with borders not installed is a
@@ -130,9 +69,18 @@ final class BordersBridge: @unchecked Sendable {
             if !warnedMissing {
                 warnedMissing = true
                 fputs(
-                    "weftd: borders is enabled in weft.toml but the binary is not installed. "
-                        + "Install it (brew install FelixKratz/formulae/borders) or set "
-                        + "[integrations.borders] enabled = false. Searched \(ExternalBinary.searchedDescription())\n",
+                    """
+                    weftd: borders are enabled in weft.toml, but JankyBorders is not installed.
+                      Weft draws borders with JankyBorders. Install it with:
+                          brew install FelixKratz/formulae/borders
+                      Then restart weft:
+                          weftctl service restart
+                      Or turn borders off in weft.toml:
+                          [integrations.borders]
+                          enabled = false
+                      Searched \(ExternalBinary.searchedDescription())
+
+                    """,
                     stderr
                 )
             }
@@ -150,7 +98,7 @@ final class BordersBridge: @unchecked Sendable {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = config.args
+        p.arguments = config.resolvedArgs
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
 
@@ -204,16 +152,6 @@ final class BordersBridge: @unchecked Sendable {
         } else if let ac = config.activeColor[layout.rawValue] {
             targetColor = ac
         }
-        if config.backend == .native {
-            // In process: an assignment and, if it actually changed, a
-            // repaint. The external path below is a `fork` + `exec` of a CLI,
-            // which is what this used to cost on every focus change.
-            let resolved = targetColor ?? config.resolvedActiveColor
-            if let rgba = BorderRenderer.parseColor(resolved) {
-                renderer.setActiveColor(rgba)
-            }
-            return
-        }
         guard let color = targetColor else { return }
         let shouldSend: Bool = lock.withLock {
             if currentActiveColor != color {
@@ -232,8 +170,6 @@ final class BordersBridge: @unchecked Sendable {
     }
 
     func stop() {
-        drawsBorders = false
-        renderer.setEnabled(false)
         lock.withLock {
             stopped = true
             stopInternal()

@@ -126,27 +126,15 @@ public struct SketchybarIntegrationConfig: Sendable, Equatable {
     }
 }
 
-/// Which code draws the borders.
-public enum BordersBackend: String, Sendable, Equatable {
-    /// Weft's own renderer, in-process. Borders only around windows weft is
-    /// managing, placed from the same frames weft applies, with no second
-    /// process and no `fork` per colour change.
-    case native
-    /// The external `borders` binary (JankyBorders). Kept because it has
-    /// options weft's renderer does not, and because a config that already
-    /// worked should keep working.
-    case janky
-}
-
 public struct BordersIntegrationConfig: Sendable, Equatable {
     public var enabled: Bool
-    public var backend: BordersBackend
     public var args: [String]
     public var supervise: Bool
     public var activeColor: [String: String]
     public var modeColor: [String: String]
-    /// Native renderer only. Nil means "take it from `args`", so a config
-    /// written for JankyBorders needs no edits to work with the native one.
+    /// Nil means "take it from `args`". Set, these seed the JankyBorders
+    /// arguments, so a config written for the old native renderer keeps
+    /// producing the same border without being rewritten.
     public var width: Double?
     public var radius: Double?
     public var inactiveColor: String?
@@ -154,7 +142,6 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
 
     public init(
         enabled: Bool = false,
-        backend: BordersBackend = .native,
         args: [String] = [],
         supervise: Bool = true,
         activeColor: [String: String] = [:],
@@ -165,7 +152,6 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         showInactive: Bool = true
     ) {
         self.enabled = enabled
-        self.backend = backend
         self.args = args
         self.supervise = supervise
         self.activeColor = activeColor
@@ -185,7 +171,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         return nil
     }
 
-    /// Stroke width the native renderer should use.
+    /// Stroke width to pass to JankyBorders.
     public var resolvedWidth: Double {
         width ?? arg("width").flatMap(Double.init) ?? 2
     }
@@ -199,6 +185,39 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
     public var resolvedActiveColor: String {
         arg("active_color") ?? "0xff7aa2f7"
     }
+
+    /// The argument list to hand JankyBorders.
+    ///
+    /// `args` is passed through as written, and the typed keys that used to
+    /// belong to the in-process renderer (`width`, `radius`, `inactive-color`)
+    /// are folded in for any that `args` does not already set. A weft.toml
+    /// written against the old `backend = "native"` therefore keeps drawing
+    /// the same border with no edits.
+    public var resolvedArgs: [String] {
+        var out = args
+        func addIfAbsent(_ key: String, _ value: String?) {
+            guard let value, arg(key) == nil else { return }
+            out.append("\(key)=\(value)")
+        }
+        addIfAbsent("width", width.map { String($0) })
+        addIfAbsent("radius", radius.map { String($0) })
+        // `show-inactive = false` has no JankyBorders equivalent; a fully
+        // transparent inactive colour is the same picture.
+        addIfAbsent("inactive_color", showInactive ? inactiveColor : "0x00000000")
+        return out
+    }
+}
+
+/// Parse a border colour as written in weft.toml — `0xAARRGGBB`, `#rrggbb`
+/// or bare hex — into 0xAARRGGBB. `#rrggbb` with no alpha is opaque.
+public func parseBorderColor(_ text: String) -> UInt32? {
+    var s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if s.hasPrefix("0x") { s.removeFirst(2) }
+    else if s.hasPrefix("#") { s.removeFirst(1) }
+    guard let value = UInt32(s, radix: 16) else { return nil }
+    if s.count == 6 { return 0xff00_0000 | value }
+    if s.count == 8 { return value }
+    return nil
 }
 
 public struct IntegrationsConfig: Sendable, Equatable {
@@ -597,11 +616,21 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 integrations.borders.supervise = b
             case "backend":
+                // Removed in 0.7.4: the in-process renderer is gone and
+                // JankyBorders is the only backend. The key is still accepted
+                // so an existing weft.toml keeps loading.
                 guard case .string(let sv) = v else { throw err(path, "expected string") }
-                guard let backend = BordersBackend(rawValue: sv) else {
+                guard sv == "native" || sv == "janky" else {
                     throw err(path, "expected native|janky")
                 }
-                integrations.borders.backend = backend
+                if sv == "native" {
+                    warnings.append(ConfigWarning(
+                        line: doc.lines[path] ?? 0,
+                        message: "[integrations.borders] backend = \"native\" was removed in 0.7.4 "
+                            + "(it cost ~16pp of GPU) — using JankyBorders. "
+                            + "Install it with: brew install FelixKratz/formulae/borders"
+                    ))
+                }
             case "width":
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.width = d

@@ -92,7 +92,6 @@ final class ConfigStore: ObservableObject {
 
     // Integrations
     @Published var bordersEnabled = false
-    @Published var bordersBackend = "native"
     @Published var bordersWidth = 2.0
     @Published var bordersRadius = 10.0
     /// Follow each window's own corners. Stored as the *absence* of
@@ -197,7 +196,6 @@ final class ConfigStore: ObservableObject {
     private func readIntegrations() {
         let b = document.firstIndex(ofHeader: "[integrations.borders]").map { document.sections[$0] }
         bordersEnabled = b?.bool("enabled") ?? false
-        bordersBackend = b?.string("backend") ?? "native"
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 2
@@ -388,28 +386,28 @@ final class ConfigStore: ObservableObject {
             let i = document.ensureSection("[integrations.borders]")
             var s = document.sections[i]
             s.set("enabled", bool: bordersEnabled)
-            s.set("backend", string: bordersBackend)
             s.set("supervise", bool: bordersSupervise)
-            if bordersBackend == "native" {
-                s.set("width", double: bordersWidth)
-                if bordersAutoRadius {
-                    s.remove("radius")
-                } else {
-                    s.set("radius", double: bordersRadius)
-                }
-                if activeColorEdited {
-                    s.setRaw(
-                        "active-color",
-                        #"{ bsp = "\#(bordersActiveColor)", float = "\#(bordersActiveColor)" }"#
-                    )
-                }
-                s.set("show-inactive", bool: bordersShowInactive)
-                if bordersInactiveColor.isEmpty {
-                    s.remove("inactive-color")
-                } else {
-                    s.set("inactive-color", string: bordersInactiveColor)
-                }
+            // Removed in 0.7.4. Saving Settings migrates the file off it.
+            s.remove("backend")
+            s.set("width", double: bordersWidth)
+            if bordersAutoRadius {
+                s.remove("radius")
+            } else {
+                s.set("radius", double: bordersRadius)
             }
+            if activeColorEdited {
+                s.setRaw(
+                    "active-color",
+                    #"{ bsp = "\#(bordersActiveColor)", float = "\#(bordersActiveColor)" }"#
+                )
+            }
+            s.set("show-inactive", bool: bordersShowInactive)
+            if bordersInactiveColor.isEmpty {
+                s.remove("inactive-color")
+            } else {
+                s.set("inactive-color", string: bordersInactiveColor)
+            }
+
             let args = bordersArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
             if s.isMultiline("args") {
                 // Hand-wrapped across lines. The form showed only the first

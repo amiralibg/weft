@@ -148,10 +148,8 @@ struct Container {
 - **Stack rendering is free**: every member gets the *same* frame; only z-order changes.
   Raising the active child is one `SLSOrderWindow` call — no AX, no resize, no repaint of
   the others. Switching stack members is the cheapest operation in the whole WM.
-- Stack decoration is drawn by weft's in-process border renderer
-  (`WeftPlatform/BorderRenderer.swift`): a row of dots on the front member's border, one per
-  member, the front one solid (`stackPositions`). Members behind show as title-bar strips
-  above the front one, and a bare click on a strip raises that member — the strips are hit
+- Stack decoration: members behind the front one show as title-bar strips
+  above it, and a bare click on a strip raises that member — the strips are hit
   zones published to the event tap beside the divider zones (`stackPeeks`), under the same
   `mouse-border-resize` opt-in. Stack state is still published on the bus for sketchybar
   (§10) for anyone who wants it in their bar instead.
@@ -512,6 +510,16 @@ Budget (unchanged, now met with ~150x headroom on the common verbs):
 **Decision: weft draws nothing.** No borders, no bar, no stack indicators, no overlay windows.
 Drawing means an `NSWindow` per decoration, a compositing pass on every layout change, and a
 whole class of z-order bugs.
+
+> This was violated between 0.6 and 0.7.3 by an in-process border renderer
+> (`WeftPlatform/BorderRenderer.swift`), and the violation cost exactly what this
+> paragraph predicted. Measured on an M4, five interleaved cycles per condition,
+> paired per cycle against weft-off: the native renderer cost **+15.8pp of GPU
+> utilisation (t=4.17)** and kept the GPU off idle entirely (median 21% against
+> 2%), while JankyBorders over the same harness cost **+5.1pp (t=1.02, not
+> significant)**. weftd also carried one full-window RGBA backing store per
+> visible window — 59.5MB of 80MB total footprint — to paint a few px of ring.
+> The renderer was removed in 0.7.4 and this decision stands as written.
 borders already does borders better, and sketchybar already does bars better. weft's job is to
 be the *authoritative, cheap, complete* source of state for both.
 
