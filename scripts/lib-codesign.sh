@@ -62,6 +62,7 @@ weft_signing_identity() {
         echo "$WEFT_SIGN_CN"
         return 0
     fi
+    _weft_signing_retire_orphan >&2
     if _weft_signing_create >&2; then
         echo "$WEFT_SIGN_CN"
         return 0
@@ -93,6 +94,31 @@ _weft_signing_ready() {
     # match on the unfiltered list.
     security find-identity -p codesigning "$WEFT_SIGN_KEYCHAIN" 2>/dev/null \
         | grep -q "\"$WEFT_SIGN_CN\""
+}
+
+# A keychain our saved password cannot unlock is one whose password file was
+# lost — `~/.config/weft` deleted, or a purge whose keychain delete failed. The
+# password was random and lived only in that file, so nothing can open it again.
+# Left in place, the next `security` call on it raises a GUI "enter the keychain
+# password" dialog that no password the user knows will satisfy. Move it aside
+# instead: the new identity costs one re-grant, which the old one already did.
+_weft_signing_retire_orphan() {
+    [ -f "$WEFT_SIGN_KEYCHAIN" ] || return 0
+    local pw
+    pw="$(_weft_signing_password)"
+    # `-p` never prompts; a wrong password just fails.
+    security unlock-keychain -p "$pw" "$WEFT_SIGN_KEYCHAIN" >/dev/null 2>&1 && return 0
+
+    local bak
+    bak="$WEFT_SIGN_KEYCHAIN.orphaned-$(date +%Y%m%d%H%M%S).bak"
+    echo "==> weft's signing keychain no longer matches its saved password"
+    echo "    moving it to $bak and making a new one;"
+    echo "    macOS permissions will need granting once more"
+    cp "$WEFT_SIGN_KEYCHAIN" "$bak" 2>/dev/null || true
+    # delete-keychain also drops it from the search list, which a plain mv
+    # would leave pointing at nothing.
+    security delete-keychain "$WEFT_SIGN_KEYCHAIN" >/dev/null 2>&1 \
+        || rm -f "$WEFT_SIGN_KEYCHAIN"
 }
 
 _weft_signing_create() {

@@ -102,19 +102,26 @@ remove "$SOCKET" "$HOME/Library/Logs/weft" \
     "$STATE"
 
 if [ "$PURGE" = 1 ]; then
-    say "Removing your settings"
-    remove "$HOME/.config/weft"
-
     # The identity every permission grant is keyed to. Only on a purge: keep
     # it, and a reinstall keeps its permissions without asking again.
+    #
+    # Before the settings, which hold its password: a keychain that outlives
+    # its password file makes the next install ask for a password nobody knows.
     say "Removing weft's signing identity"
     if [ -f "$KEYCHAIN" ]; then
         if [ "$DRY" = 1 ]; then
             echo "    would remove $KEYCHAIN"
         elif security delete-keychain "$KEYCHAIN" >/dev/null 2>&1; then
             echo "    removed $KEYCHAIN"
+        elif rm -f "$KEYCHAIN"; then
+            echo "    removed $KEYCHAIN (not on the keychain search list)"
+        else
+            echo "WARNING: could not remove $KEYCHAIN — delete it by hand"
         fi
     fi
+
+    say "Removing your settings"
+    remove "$HOME/.config/weft"
 
     say "Removing weft from Privacy & Security"
     for id in com.weft.weftd com.weft.bar; do
