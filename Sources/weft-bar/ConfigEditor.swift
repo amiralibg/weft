@@ -2071,6 +2071,11 @@ final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
         window.isReleasedWhenClosed = false
+        // A window AppKit keeps alive between showings stays filed under the
+        // space it was first ordered into, so reopening it from another space
+        // either yanks the user back to the old one or shows nothing at all.
+        // `moveToActiveSpace` brings it to whichever space is in front now.
+        window.collectionBehavior.insert(.moveToActiveSpace)
         window.center()
         window.setFrameAutosaveName("WeftSettings")
         super.init(window: window)

@@ -98,6 +98,11 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
     override init() {
         super.init()
         panel.level = .floating
+        // A panel AppKit keeps alive between showings stays filed under the
+        // space it was first ordered into, so reopening it from another space
+        // either yanks the user back to the old one or shows nothing at all.
+        // `moveToActiveSpace` brings it to whichever space is in front now.
+        panel.collectionBehavior.insert(.moveToActiveSpace)
         panel.hasShadow = true
         panel.isMovable = false
         panel.isOpaque = false

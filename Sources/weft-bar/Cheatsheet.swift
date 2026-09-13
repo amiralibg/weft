@@ -395,6 +395,11 @@ final class CheatsheetWindowController: NSWindowController {
         window.isMovableByWindowBackground = true
         window.center()
         window.isReleasedWhenClosed = false
+        // A window AppKit keeps alive between showings stays filed under the
+        // space it was first ordered into, so reopening it from another space
+        // either yanks the user back to the old one or shows nothing at all.
+        // `moveToActiveSpace` brings it to whichever space is in front now.
+        window.collectionBehavior.insert(.moveToActiveSpace)
         window.setFrameAutosaveName("WeftCheatsheet")
         super.init(window: window)
 
