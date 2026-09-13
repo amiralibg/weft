@@ -276,8 +276,15 @@ enabled = false
 # weftd starts borders and restarts it if it dies.
 supervise = true
 
-# Passed straight through to the borders binary.
-args = ["width=2.0", "active_color=0xff7aa2f7", "inactive_color=0x40414868", "style=round", "hidpi=on"]
+# What the border looks like. Every one of these reaches borders live — change
+# it here or in Settings and it re-applies without a restart.
+width = 2.0
+style = "round"          # round follows each window's own corners; or "square"
+inactive-color = "0x40414868"
+
+# Anything weft does not model goes here, passed straight through, and wins
+# over the keys above:
+#   args = ["background_color=0x30000000", "blacklist=Safari"]
 
 # Recolour the border by the current layout, and by the active mode. Handy for
 # modes: the border turns red the moment you enter the resize layer.

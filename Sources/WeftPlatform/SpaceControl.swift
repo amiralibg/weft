@@ -201,12 +201,44 @@ public enum SpaceControl {
 
     // MARK: - Degraded space focus (unprivileged, always "works")
 
+    /// Whether macOS will act on the ⌃N the keystroke fallback posts.
+    ///
+    /// "Switch to Desktop N" ships **off** on macOS, and without it — and
+    /// without the scripting addition — `space focus` cannot move the user
+    /// anywhere at all: the keystroke goes out and nothing receives it. That
+    /// was worth knowing up front rather than one failed keybind at a time,
+    /// because the failure is otherwise completely silent.
+    ///
+    /// Symbolic hot key ids 118…126 are Switch to Desktop 1…9. An id absent
+    /// from the dictionary is one macOS has never been asked about, which
+    /// means the shipped default: off.
+    public static func missionControlSwitchShortcuts() -> Set<Int> {
+        guard let hotkeys = UserDefaults(suiteName: "com.apple.symbolichotkeys")?
+            .dictionary(forKey: "AppleSymbolicHotKeys")
+        else { return [] }
+        var on: Set<Int> = []
+        for n in 118...126 {
+            guard let entry = hotkeys["\(n)"] as? [String: Any],
+                  let enabled = entry["enabled"] as? Bool, enabled
+            else { continue }
+            on.insert(n - 117)
+        }
+        return on
+    }
+
+    /// True when `space focus` has *some* way to switch desktops: the
+    /// scripting addition, or at least one Mission Control shortcut.
+    public static func canFocusSpaces() -> Bool {
+        ScriptingAddition.isAvailable() || !missionControlSwitchShortcuts().isEmpty
+    }
+
     /// Focus a space by its 1-based Mission Control number via ctrl+N.
-    /// Costs the ~250ms system animation (the SA path in M4-SA makes it
-    /// instant). Returns false for out-of-range numbers. NOTE: requires
-    /// Settings → Keyboard → Shortcuts → Mission Control → "Switch to
-    /// Desktop N" enabled — undetectable from here, so callers must say so
-    /// when nothing happens.
+    /// Costs the ~250ms system animation (the SA path makes it instant).
+    /// Returns false for out-of-range numbers.
+    ///
+    /// Whether the keystroke reaches anything is a separate question, and one
+    /// `missionControlSwitchShortcuts()` can now answer up front — posting a
+    /// key nothing is bound to looks identical to success from here.
     @discardableResult
     public static func focusSpaceNumber(_ n: Int) -> Bool {
         // Hardware keycodes for 1..9 (ANSI positions, layout-independent).
@@ -251,6 +283,22 @@ public struct PlatformCapability: Codable, Sendable {
     public var moveSpaceToDisplay: Bool
     public var moveSpaceToDisplayNote: String
 
+    /// What the ⌃N fallback can actually reach right now. Reported rather
+    /// than assumed: the shortcuts it needs are off on a stock macOS, and a
+    /// note that says "needs them enabled" reads the same whether they are or
+    /// not.
+    static func keystrokeNote() -> String {
+        let on = SpaceControl.missionControlSwitchShortcuts().sorted()
+        guard !on.isEmpty else {
+            return "unavailable: no scripting addition, and System Settings → Keyboard → Shortcuts "
+                + "→ Mission Control → 'Switch to Desktop N' is off, so the ⌃N fallback reaches "
+                + "nothing. Space switching will not work until one of the two is in place."
+        }
+        let covered = on.map(String.init).joined(separator: ", ")
+        return "degraded: ⌃N keystroke, ~250ms animation; desktops \(covered) only "
+            + "(the rest need 'Switch to Desktop N' enabled, or the scripting addition)"
+    }
+
     /// Not an SA gap: the symbol the compat-id sequence needs is gone from
     /// SkyLight on macOS 26, so no connection of any privilege can do it.
     static let spaceToDisplayNote =
@@ -280,8 +328,8 @@ public struct PlatformCapability: Codable, Sendable {
             stickyNote: "SLSSetWindowTags sticky bit silently ignored (2026-09-04 probe) — needs weft-sa",
             orderWindow: false,
             orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe) — needs weft-sa",
-            focusSpaceKeystroke: true,
-            focusSpaceKeystrokeNote: "degraded: ctrl+N keystroke, ~250ms animation; needs Mission Control shortcuts enabled",
+            focusSpaceKeystroke: !SpaceControl.missionControlSwitchShortcuts().isEmpty,
+            focusSpaceKeystrokeNote: Self.keystrokeNote(),
             moveSpaceToDisplay: false,
             moveSpaceToDisplayNote: Self.spaceToDisplayNote
         )

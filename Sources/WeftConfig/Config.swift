@@ -136,6 +136,14 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
     /// arguments, so a config written for the old native renderer keeps
     /// producing the same border without being rewritten.
     public var width: Double?
+    /// Corner shape: `round`, `square` or `uniform`, straight from
+    /// JankyBorders' `style=`.
+    public var style: String?
+    /// The old native renderer's corner radius, in points. JankyBorders has
+    /// no equivalent — it only knows round vs square — so this is kept for
+    /// back-compat and read as a *shape* by `resolvedStyle`, never emitted.
+    /// It used to be passed through as `radius=`, which is not an argument
+    /// JankyBorders accepts: it rejected the whole invocation and exited 1.
     public var radius: Double?
     public var inactiveColor: String?
     public var showInactive: Bool
@@ -147,6 +155,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         activeColor: [String: String] = [:],
         modeColor: [String: String] = [:],
         width: Double? = nil,
+        style: String? = nil,
         radius: Double? = nil,
         inactiveColor: String? = nil,
         showInactive: Bool = true
@@ -157,6 +166,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         self.activeColor = activeColor
         self.modeColor = modeColor
         self.width = width
+        self.style = style
         self.radius = radius
         self.inactiveColor = inactiveColor
         self.showInactive = showInactive
@@ -182,28 +192,58 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
     }
 
     /// Fallback active colour, for a layout with no entry in `active-color`.
+    ///
+    /// `active-color` is a per-layout table, so the bare fallback is whatever
+    /// `args` says, then weft's own blue. `bsp` is read first because that is
+    /// the layout all but a float space is in, and it is what the Settings
+    /// window's one colour well writes.
     public var resolvedActiveColor: String {
-        arg("active_color") ?? "0xff7aa2f7"
+        activeColor["bsp"] ?? arg("active_color") ?? "0xff7aa2f7"
+    }
+
+    /// Corner shape, as JankyBorders spells it.
+    ///
+    /// The old native renderer took a numeric `radius`; JankyBorders only
+    /// knows round, square and uniform, so a radius survives as the shape it
+    /// implied — zero meant square corners, anything else meant rounded.
+    /// `round` follows each window's own corners, which is what the Settings
+    /// window's "Match each window's corners" always meant.
+    public var resolvedStyle: String {
+        if let style { return style }
+        if let s = arg("style") { return s }
+        if let radius { return radius <= 0 ? "square" : "round" }
+        return "round"
     }
 
     /// The argument list to hand JankyBorders.
     ///
-    /// `args` is passed through as written, and the typed keys that used to
-    /// belong to the in-process renderer (`width`, `radius`, `inactive-color`)
-    /// are folded in for any that `args` does not already set. A weft.toml
-    /// written against the old `backend = "native"` therefore keeps drawing
-    /// the same border with no edits.
+    /// `args` is passed through as written and always wins — it is the escape
+    /// hatch for anything the Settings window does not model (`blacklist`,
+    /// `background_color`, a `gradient(...)` colour) — and every key weft owns
+    /// is folded in for whatever `args` leaves unset.
+    ///
+    /// Every key here is one `man borders` lists. It matters more than it
+    /// looks: JankyBorders rejects an *invocation* containing an argument it
+    /// does not know ("Invalid argument", exit 1), so a single stray key does
+    /// not degrade — it takes the whole border with it, on launch and on
+    /// every live update.
     public var resolvedArgs: [String] {
         var out = args
         func addIfAbsent(_ key: String, _ value: String?) {
             guard let value, arg(key) == nil else { return }
             out.append("\(key)=\(value)")
         }
-        addIfAbsent("width", width.map { String($0) })
-        addIfAbsent("radius", radius.map { String($0) })
+        addIfAbsent("width", String(resolvedWidth))
+        addIfAbsent("style", resolvedStyle)
+        // Off is the JankyBorders default, and off on a Retina display means
+        // the border is drawn at 1x and scaled up: a 2-point ring of the
+        // chosen colour arrives as a soft, washed-out version of it. Nobody
+        // picking a colour in Settings is asking for that.
+        addIfAbsent("hidpi", "on")
+        addIfAbsent("active_color", resolvedActiveColor)
         // `show-inactive = false` has no JankyBorders equivalent; a fully
         // transparent inactive colour is the same picture.
-        addIfAbsent("inactive_color", showInactive ? inactiveColor : "0x00000000")
+        addIfAbsent("inactive_color", showInactive ? resolvedInactiveColor : "0x00000000")
         return out
     }
 }
@@ -634,9 +674,23 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "width":
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.width = d
+            case "style":
+                guard case .string(let sv) = v else { throw err(path, "expected string") }
+                guard ["round", "square", "uniform"].contains(sv) else {
+                    throw err(path, "expected round|square|uniform")
+                }
+                integrations.borders.style = sv
             case "radius":
+                // No longer emitted: JankyBorders has no numeric radius, and
+                // passing one made it reject the whole invocation. Still
+                // parsed, and read as `style` (see `resolvedStyle`).
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.radius = d
+                warnings.append(ConfigWarning(
+                    line: doc.lines[path] ?? 0,
+                    message: "[integrations.borders] radius is not something JankyBorders can draw — "
+                        + "using style = \"\(d <= 0 ? "square" : "round")\". Set `style` instead."
+                ))
             case "inactive-color":
                 guard case .string(let sv) = v else { throw err(path, "expected string hex") }
                 integrations.borders.inactiveColor = sv

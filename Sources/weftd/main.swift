@@ -2047,9 +2047,26 @@ final class Daemon: @unchecked Sendable {
                 return IPCResponse(ok: false, error: "unknown space '\(target)' (labels: \(sp.labels.values.sorted().joined(separator: ", ")))")
             }
             let label = sp.labels[sid] ?? "\(sid)"
-            if sp.currentByDisplay.values.contains(sid) {
-                // Already there. Do not re-tile or re-activate: doing so on a
-                // repeated keypress yanked focus around for no reason.
+            // From `displays`, read from the WindowServer a line above, not
+            // from `sp` — weft's cached idea of where the user is.
+            //
+            // The two disagree whenever a desktop changed without weft doing
+            // it and the notification has not landed yet: a trackpad swipe,
+            // Mission Control, an app activating on another desktop. Asking
+            // the cache meant `space focus` answered "already on 3" while the
+            // user was looking at 5, and returned ok — so nothing switched,
+            // nothing re-tiled, and nothing was logged either. A keybind that
+            // does nothing at all and reports success is the worst of the
+            // three outcomes available here.
+            if displays.contains(where: { $0.currentSpace == sid }) {
+                // Genuinely already there. Do not re-tile or re-activate:
+                // doing so on a repeated keypress yanked focus around for no
+                // reason.
+                if !sp.currentByDisplay.values.contains(sid) {
+                    // The cache was the stale one. Correct it, so the next
+                    // command does not start from the same wrong answer.
+                    syncQueue.async { [weak self] in self?.syncFromSnapshot() }
+                }
                 return IPCResponse(ok: true, output: "already on \(label)")
             }
             let previous = currentSID()
@@ -2074,6 +2091,21 @@ final class Daemon: @unchecked Sendable {
                     ok: false,
                     error: "space '\(label)' is desktop #\(number); the keystroke fallback only covers 1-9. "
                         + "Load the scripting addition (sudo yabai --load-sa, or weft's own) for instant switching to any desktop."
+                )
+            }
+            // Say it before posting the key rather than after. ⌃N is a
+            // *shortcut*, and "Switch to Desktop N" is off on a stock macOS —
+            // so with no scripting addition this is the ordinary case, not an
+            // edge one, and posting a keystroke into the void and then
+            // reporting a timeout describes the symptom rather than the cause.
+            let shortcuts = SpaceControl.missionControlSwitchShortcuts()
+            guard shortcuts.contains(number) else {
+                return IPCResponse(
+                    ok: false,
+                    error: "cannot switch to '\(label)': there is no scripting addition, and "
+                        + "'Switch to Desktop \(number)' is off, so weft has nothing to switch with. "
+                        + "Turn it on in System Settings → Keyboard → Keyboard Shortcuts → "
+                        + "Mission Control → Mission Control, or load the scripting addition."
                 )
             }
             updateSpaces { s in

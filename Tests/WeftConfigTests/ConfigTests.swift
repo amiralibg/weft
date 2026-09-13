@@ -228,6 +228,103 @@ import Testing
     #expect(cfg.integrations.borders.modeColor["resize"] == "0xffed8796")
 }
 
+/// `borders` rejects an invocation containing a key it does not know — it
+/// prints "Invalid argument" and exits 1, taking every *other* setting in the
+/// same invocation with it. So the argument list weft builds may only contain
+/// keys `man borders` lists. `radius` is the one that got in: the Settings
+/// window's corner-radius slider wrote it, and a border with a radius set
+/// never drew at all.
+@Test func resolvedArgsOnlyUseKeysJankyBordersKnows() throws {
+    let known: Set<String> = [
+        "style", "active_color", "inactive_color", "background_color",
+        "width", "hidpi", "ax_focus", "blacklist", "whitelist",
+    ]
+    let cfg = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        width = 3.0
+        radius = 12.0
+        inactive-color = "0x40414868"
+        active-color = { bsp = "0xffff0000" }
+        """)
+    let keys: Set<String> = Set(
+        cfg.integrations.borders.resolvedArgs.map { String($0.split(separator: "=")[0]) }
+    )
+    let unknown = keys.subtracting(known)
+    #expect(unknown.isEmpty, "borders would reject: \(unknown.sorted())")
+}
+
+/// A config written entirely from the Settings window has an empty `args`, so
+/// everything the border looks like has to come from the typed keys. Colour,
+/// width and shape all reaching JankyBorders is the whole point; `hidpi` is
+/// there because its default is off, and off on a Retina display renders the
+/// border at 1x — the chosen colour arrives visibly washed out.
+@Test func resolvedArgsCarryEverythingSettingsCanChange() throws {
+    let cfg = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        width = 3.0
+        style = "square"
+        show-inactive = true
+        inactive-color = "0x40414868"
+        active-color = { bsp = "0xffff0000", float = "0xff00ff00" }
+        """)
+    let args = Set(cfg.integrations.borders.resolvedArgs)
+    #expect(args.contains("width=3.0"))
+    #expect(args.contains("style=square"))
+    #expect(args.contains("hidpi=on"))
+    #expect(args.contains("active_color=0xffff0000"))
+    #expect(args.contains("inactive_color=0x40414868"))
+}
+
+/// `args` stays the escape hatch for anything the Settings window does not
+/// model, so a key written there wins over the one weft would have folded in.
+@Test func explicitArgsWinOverTheTypedKeys() throws {
+    let cfg = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        width = 3.0
+        args = ["width=9.0", "hidpi=off", "background_color=0x30000000"]
+        """)
+    let args = cfg.integrations.borders.resolvedArgs
+    #expect(args.contains("width=9.0"))
+    #expect(!args.contains("width=3.0"))
+    #expect(args.contains("hidpi=off"))
+    #expect(args.filter { $0.hasPrefix("hidpi=") }.count == 1)
+    #expect(args.contains("background_color=0x30000000"))
+}
+
+/// The old numeric radius is still parsed — files have it — but it survives
+/// as the shape it implied, with a warning naming the key that replaced it.
+@Test func aNumericRadiusBecomesAStyleAndSaysSo() throws {
+    let square = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        radius = 0
+        """)
+    #expect(square.integrations.borders.resolvedStyle == "square")
+    #expect(square.warnings.contains { $0.message.contains("radius") })
+
+    let round = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        radius = 12.0
+        """)
+    #expect(round.integrations.borders.resolvedStyle == "round")
+}
+
+/// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
+/// a fully transparent inactive colour rather than silently ignored.
+@Test func hidingInactiveBordersMakesThemTransparent() throws {
+    let cfg = try loadConfig("""
+        [integrations.borders]
+        enabled = true
+        show-inactive = false
+        inactive-color = "0x40414868"
+        """)
+    #expect(cfg.integrations.borders.resolvedArgs.contains("inactive_color=0x00000000"))
+}
+
 @Test func parsesMigratedConfig() throws {
     guard let text = try? String(contentsOfFile: "/tmp/migrated_clean.toml", encoding: .utf8) else { return }
     let validated = try loadConfig(text)

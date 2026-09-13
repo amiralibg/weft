@@ -207,7 +207,7 @@ private struct DesktopHero: View {
                 outer: store.outerTop,
                 bordersOn: store.bordersEnabled,
                 border: store.bordersWidth,
-                corner: store.bordersAutoRadius ? nil : store.bordersRadius,
+                corner: store.bordersStyle == "square" ? 0 : nil,
                 accent: Color(hex: store.bordersActiveColor) ?? .weft,
                 inactive: store.bordersShowInactive
                     ? (Color(hex: store.bordersInactiveColor) ?? Color.white.opacity(0.18)) : nil
@@ -430,10 +430,11 @@ private struct AppearancePane: View {
                         supportsOpacity: false
                     )
                     DoubleSliderRow(title: "Thickness", value: store.bind(\.bordersWidth), range: 1...12)
-                    Toggle("Match each window's corners", isOn: store.bind(\.bordersAutoRadius))
-                    if !store.bordersAutoRadius {
-                        DoubleSliderRow(title: "Corner radius", value: store.bind(\.bordersRadius), range: 0...32, step: 1)
+                    Picker("Corners", selection: store.bind(\.bordersStyle)) {
+                        Text("Match the window").tag("round")
+                        Text("Square").tag("square")
                     }
+                    .pickerStyle(.segmented)
                     Toggle("Outline the other windows too", isOn: store.bind(\.bordersShowInactive))
                     if store.bordersShowInactive {
                         ColorPicker(
@@ -454,7 +455,7 @@ private struct AppearancePane: View {
                     outer: store.outerTop,
                     bordersOn: store.bordersEnabled,
                     border: store.bordersWidth,
-                    corner: store.bordersAutoRadius ? nil : store.bordersRadius,
+                    corner: store.bordersStyle == "square" ? 0 : nil,
                     accent: Color(hex: store.bordersActiveColor) ?? .weft,
                     inactive: store.bordersShowInactive
                         ? (Color(hex: store.bordersInactiveColor) ?? Color.white.opacity(0.18)) : nil
@@ -1366,6 +1367,41 @@ private struct AdvancedPane: View {
                 Text("A mode is a second layer of shortcuts — like resize mode — that only works after you enter it. Give a shortcut “Enter mode” in Shortcuts to reach it.")
             }
 
+            Section {
+                if let s = health.spaceSwitching {
+                    LabeledContent("Switching desktops") {
+                        Label(
+                            s.instant ? "Instant" : (s.works ? "Keystroke" : "Not available"),
+                            systemImage: s.works
+                                ? (s.instant ? "checkmark.circle.fill" : "checkmark.circle")
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(s.works ? (s.instant ? Color.green : .secondary) : Color.orange)
+                    }
+                    Text(s.detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if !s.works {
+                        Button("Open Keyboard Shortcuts") {
+                            if let url = URL(string:
+                                "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Shortcuts")
+                            {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                } else {
+                    LabeledContent("Switching desktops") {
+                        Text(health.running ? "Checking…" : "Weft isn't running")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Desktops")
+            } footer: {
+                Text("Shortcuts like “space focus 2” switch desktops through the scripting addition, or by pressing ⌃N for you. macOS ships ⌃N turned off, so without the addition you have to turn it on.")
+            }
+
             Section("Border drawing") {
                 LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
                 Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
@@ -1913,6 +1949,9 @@ final class EngineHealth: ObservableObject {
     @Published var needsRestart = false
     /// Labels of the desktops that exist right now.
     @Published var liveSpaces: [String] = []
+    /// Whether `space focus` has any way at all to change desktop, and what
+    /// it would use. Nil until the daemon has answered once.
+    @Published var spaceSwitching: SpaceSwitching?
     /// The newest release weft knows about, newer than this one or not.
     /// Nil means nobody has asked yet, or asking failed.
     @Published var update: UpdateCheck.Result?
@@ -1967,8 +2006,37 @@ final class EngineHealth: ObservableObject {
         timer = nil
     }
 
+    /// How the daemon can change desktops, in the terms the Settings window
+    /// needs: works or does not, and one line saying why.
+    struct SpaceSwitching: Equatable {
+        var works: Bool
+        var instant: Bool
+        var detail: String
+    }
+
     func refresh() {
         Task.detached(priority: .utility) {
+            struct Capability: Decodable {
+                var focusSpaceKeystroke: Bool
+                var focusSpaceKeystrokeNote: String
+                var moveWindowToSpace: Bool
+            }
+            let switching: SpaceSwitching? = {
+                guard let json = BarIPC.send("query capability"),
+                      let data = json.data(using: .utf8),
+                      let cap = try? JSONDecoder().decode(Capability.self, from: data)
+                else { return nil }
+                // `moveWindowToSpace` is the scripting addition's tell: it is
+                // the one capability nothing else can provide.
+                let instant = cap.moveWindowToSpace
+                return SpaceSwitching(
+                    works: instant || cap.focusSpaceKeystroke,
+                    instant: instant,
+                    detail: instant
+                        ? "Instant, through the scripting addition."
+                        : cap.focusSpaceKeystrokeNote
+                )
+            }()
             let perms: DaemonPermissions? = {
                 guard let json = BarIPC.send("query permissions"),
                       let data = json.data(using: .utf8)
@@ -1992,6 +2060,7 @@ final class EngineHealth: ObservableObject {
                 self.keybindsLive = perms?.tapLive ?? false
                 self.needsRestart = perms?.mustRestart ?? false
                 self.liveSpaces = spaces
+                self.spaceSwitching = switching
                 if !self.checkingForUpdate { self.update = cachedUpdate }
             }
         }

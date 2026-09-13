@@ -322,19 +322,36 @@ brew install FelixKratz/formulae/borders   # once
 ```toml
 [integrations.borders]
 enabled = true
-args = ["width=2.0", "active_color=0xff7aa2f7", "style=round", "hidpi=on"]
+width = 2.0
+style = "round"          # or "square"
+active-color = { bsp = "0xff7aa2f7", float = "0xffe0af68" }
+inactive-color = "0x40414868"
 ```
 
-Then `weftctl service restart`. Weft starts and supervises the process for you;
-you do not run `borders` yourself.
+Weft starts and supervises the process for you, and every key above reaches it
+live — changing one in Settings or in the file re-applies it without a restart.
+`args` is still there for anything weft does not model (`background_color`,
+`blacklist`, a `gradient(...)` colour), and anything you set there wins over
+the keys above.
+
+Weft also applies these to a `borders` you started yourself — from
+`~/.config/borders/bordersrc`, say. It will not supervise or restart that
+process, but it does drive its appearance, so set `enabled = false` here if you
+would rather your own config owned it.
+
+Borders are drawn at Retina resolution (`hidpi=on`), which JankyBorders does not
+do by default; without it a thin border is drawn at 1x and scaled up, and the
+colour you chose arrives looking washed out.
 
 If borders are enabled and JankyBorders is not installed, weftd says so once in
 the log with the install command, and everything else keeps working. `weftctl
 doctor` reports the same thing.
 
 An existing config with `backend = "native"` still loads — the key is accepted
-and ignored, with a warning pointing at the install command. Settings ›
-Advanced tells you whether the program is actually installed.
+and ignored, with a warning pointing at the install command. The same goes for
+`radius`: JankyBorders has no numeric corner radius, so a radius is read as the
+shape it implied (`0` square, anything else round) and a warning names `style`.
+Settings › Advanced tells you whether the program is actually installed.
 
 ## Building from source
 

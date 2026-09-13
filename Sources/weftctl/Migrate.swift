@@ -338,7 +338,9 @@ public enum Migrate {
         toml += "#   brew install FelixKratz/formulae/borders\n"
         toml += "enabled = false\n"
         toml += "supervise = true\n"
-        toml += "args = [\"width=2.0\", \"active_color=0xff7aa2f7\", \"inactive_color=0x40414868\"]\n"
+        toml += "width = 2.0\n"
+        toml += "style = \"round\"\n"
+        toml += "inactive-color = \"0x40414868\"\n"
         toml += "active-color = { bsp = \"0xff7aa2f7\", float = \"0xffe0af68\" }\n\n"
 
         toml += "[integrations.sketchybar]\n"

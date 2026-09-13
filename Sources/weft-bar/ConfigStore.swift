@@ -93,12 +93,11 @@ final class ConfigStore: ObservableObject {
     // Integrations
     @Published var bordersEnabled = false
     @Published var bordersWidth = 2.0
-    @Published var bordersRadius = 10.0
-    /// Follow each window's own corners. Stored as the *absence* of
-    /// `radius`: a number in the file is an override, and writing one on
-    /// every save would quietly switch matching off for anyone who ever
-    /// pressed Save.
-    @Published var bordersAutoRadius = true
+    /// JankyBorders' `style`: `round` follows each window's own corners,
+    /// `square` squares them off. It replaced a "Corner radius" slider that
+    /// wrote `radius =`, which JankyBorders rejects outright — see
+    /// `BordersIntegrationConfig.resolvedArgs`.
+    @Published var bordersStyle = "round"
     /// The focused border's colour, read from `active-color`. Written back
     /// only when changed here: the file may hold a per-layout table the one
     /// colour picker cannot represent, and opening Settings must not
@@ -199,10 +198,14 @@ final class ConfigStore: ObservableObject {
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 2
-        bordersAutoRadius = b?.double("radius") == nil
+        bordersStyle = b?.string("style")
+            ?? Self.argValue(b?.rawValue("args"), "style")
+            // A file still carrying the old numeric radius reads as the shape
+            // that radius meant, which is what weftd makes of it too.
+            ?? (b?.double("radius")).map { $0 <= 0 ? "square" : "round" }
+            ?? "round"
         bordersActiveColor = Self.firstColor(in: b?.rawValue("active-color")) ?? "0xff7aa2f7"
         activeColorEdited = false
-        bordersRadius = b?.double("radius") ?? 10
         bordersInactiveColor = b?.string("inactive-color")
             ?? Self.argValue(b?.rawValue("args"), "inactive_color")
             ?? ""
@@ -390,11 +393,10 @@ final class ConfigStore: ObservableObject {
             // Removed in 0.7.4. Saving Settings migrates the file off it.
             s.remove("backend")
             s.set("width", double: bordersWidth)
-            if bordersAutoRadius {
-                s.remove("radius")
-            } else {
-                s.set("radius", double: bordersRadius)
-            }
+            s.set("style", string: bordersStyle)
+            // Removed along with the slider that wrote it: a `radius=` in
+            // the argument list makes borders exit before it draws anything.
+            s.remove("radius")
             if activeColorEdited {
                 s.setRaw(
                     "active-color",
