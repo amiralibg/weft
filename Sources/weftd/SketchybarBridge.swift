@@ -63,9 +63,14 @@ final class SketchybarBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var config = SketchybarIntegrationConfig()
     private let queue = DispatchQueue(label: "weft.sketchybar", qos: .utility)
+    /// The arguments last sent per event. Touched only on `queue`.
+    private var lastArgs: [String: [String]] = [:]
 
     func updateConfig(_ config: SketchybarIntegrationConfig) {
         lock.withLock { self.config = config }
+        // A reload can change what the bar's scripts do with the same
+        // payload, so the next trigger of each event goes out regardless.
+        queue.async { [self] in lastArgs.removeAll() }
     }
 
     /// Honours `bar-name`, so a fork or a renamed binary works, and actually
@@ -85,7 +90,7 @@ final class SketchybarBridge: @unchecked Sendable {
         }
         guard let bin = findSketchybarBinary() else { return }
 
-        queue.async {
+        queue.async { [self] in
             var args = ["--trigger", event]
             if let sid = state.spaceID {
                 args.append("WEFT_SPACE_ID=\(sid)")
@@ -114,6 +119,13 @@ final class SketchybarBridge: @unchecked Sendable {
                 }
             }
             args.append("WEFT_MODE=\(state.mode)")
+
+            // A trigger is a fork + exec of sketchybar, which then runs every
+            // item script subscribed to the event. Focus churn repeats the
+            // same event with the same payload many times over, and each
+            // repeat told the bar nothing it did not already have.
+            guard lastArgs[event] != args else { return }
+            lastArgs[event] = args
 
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: bin)

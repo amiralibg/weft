@@ -147,6 +147,13 @@ final class Daemon: @unchecked Sendable {
                 if Daemon.traceEvents { fputs("event \(line)\n", stderr) }
             }
             guard let self else { return }
+            // Both consumers below are opt-in, and the summary costs a
+            // core-queue hop on every flushed event. Skip it when neither
+            // would read it.
+            let integrations = self.currentConfig().integrations
+            let bordersWantColour = integrations.borders.enabled
+                && (!integrations.borders.activeColor.isEmpty || !integrations.borders.modeColor.isEmpty)
+            guard integrations.sketchybar.enabled || bordersWantColour else { return }
             let state = self.currentStateSummary()
             self.sketchybarBridge.trigger(event: event.kind.rawValue, state: state)
             if let lk = state.layout {
@@ -212,8 +219,34 @@ final class Daemon: @unchecked Sendable {
             if !ok {
                 self?.requestInputAccess(reason: "tap denied at startup")
             }
+            self?.startTapWatch()
         }
     }
+
+    /// Keeps the event tap alive for the life of the daemon.
+    ///
+    /// A tap that failed at startup — Accessibility not granted yet, or TCC
+    /// still settling after a login or an OS update — was only ever retried
+    /// when something queried permissions, which in practice meant only while
+    /// WeftBar was running and polling. Otherwise keybinds stayed dead until
+    /// weftd was restarted. A live tap can also be switched off or invalidated
+    /// without the callback ever hearing about it, and the same check turns it
+    /// back on or rebuilds it. Every 5 s with a wide leeway: two cheap calls,
+    /// nothing on core.
+    private func startTapWatch() {
+        tapWatchQueue.async { [weak self] in
+            guard let self, self.tapWatch == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.tapWatchQueue)
+            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(2))
+            timer.setEventHandler { [weak self] in _ = self?.input.ensureTap() }
+            timer.resume()
+            self.tapWatch = timer
+        }
+    }
+
+    private let tapWatchQueue = DispatchQueue(label: "weft.tap-watch", qos: .utility)
+    /// Touched only on `tapWatchQueue`.
+    private var tapWatch: DispatchSourceTimer?
 
     /// Ask TCC for Input Monitoring — and, more to the point, get weftd *listed*.
     ///
@@ -371,7 +404,7 @@ final class Daemon: @unchecked Sendable {
             }
             guard let hit = findWindow(at: location) else { return }
             noteFocusedWindow(hit.wid)
-            if let pid = pids[hit.wid] {
+            if let pid = pid(of: hit.wid) {
                 applier.focusWindow(hit.wid, pid: pid)
             }
             raiseFronts([hit.wid])
@@ -839,27 +872,49 @@ final class Daemon: @unchecked Sendable {
     /// understands the space changes it performed itself: swipe, and weft is
     /// on the wrong desktop until a keybind switch puts it right.
     ///
-    /// So: ask. `currentSpaceByDisplay` is ~40 µs and touches no window list,
-    /// which at 3 Hz is about 0.01% of one core — cheap enough to run for the
-    /// life of the daemon, and it catches a notification that never came and
-    /// one that came too early with the same code.
+    /// So: ask — at the moments a change is likely, not three times a second
+    /// forever. `currentSpaceByDisplay` is cheap (~40 µs, no window list), but
+    /// a 3 Hz timer is still a WindowServer round trip and a CPU wake-up every
+    /// 333 ms for the life of the daemon on a machine that is otherwise idle,
+    /// which is the wrong trade for something that should cost nothing when
+    /// nothing moves.
+    ///
+    /// The early notification is covered by looking again a beat after every
+    /// one (`scheduleSpaceRechecks`). A switch with no notification at all
+    /// almost always moves keyboard focus, and every focus event checks. What
+    /// is left — a switch that neither notifies nor moves focus — is caught by
+    /// a slow backstop with a wide leeway, so the kernel can fold its wake-up
+    /// into one it was making anyway.
     private func startSpaceWatch() {
-        // Seed it, or the first tick reads a difference against an empty
+        // Seed it, or the first check reads a difference against an empty
         // dictionary and spends a full sweep re-discovering the desktop the
         // startup sweep just finished with.
         let start = SpaceControl.currentSpaceByDisplay()
         actedSpacesLock.withLock { actedSpacesLocked = start }
         let timer = DispatchSource.makeTimerSource(queue: syncQueue)
-        timer.schedule(deadline: .now() + 0.3, repeating: 0.3, leeway: .milliseconds(100))
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            let now = SpaceControl.currentSpaceByDisplay()
-            let acted = self.actedSpacesLock.withLock { self.actedSpacesLocked }
-            guard !now.isEmpty, now != acted else { return }
-            self.handleSpaceChange()
-        }
+        timer.schedule(deadline: .now() + 3, repeating: 3, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in self?.checkSpaceChanged() }
         timer.resume()
         spaceWatch = timer
+    }
+
+    /// Sweep only if the WindowServer is showing a different space from the
+    /// one weft last acted on. On `syncQueue`, like everything that sweeps.
+    private func checkSpaceChanged() {
+        let now = SpaceControl.currentSpaceByDisplay()
+        let acted = actedSpacesLock.withLock { actedSpacesLocked }
+        guard !now.isEmpty, now != acted else { return }
+        handleSpaceChange()
+    }
+
+    /// Look again after a space notification, for the swipe whose
+    /// notification arrived while the WindowServer was still animating.
+    private func scheduleSpaceRechecks() {
+        for delay in [0.35, 1.0] {
+            syncQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.checkSpaceChanged()
+            }
+        }
     }
 
     /// Fill in titles the window list would not give us.
@@ -1356,7 +1411,7 @@ final class Daemon: @unchecked Sendable {
 
     private func watchCurrent() {
         let sp = readSpaces()
-        let pids = self.pids
+        let pids = allPids()
         let currentSids = Set(sp.currentByDisplay.values)
         let wids = sp.layouts
             .filter { currentSids.contains($0.key) }
@@ -1566,7 +1621,11 @@ final class Daemon: @unchecked Sendable {
             }
             scheduleDragSettleApply()
         case .windowFocused(let wid):
-            // Before anything else, and even when focus went to nothing:
+            // A desktop switch nobody announced usually shows up as focus
+            // landing on a window over there. No window list involved, and it
+            // is what lets the space watch run slowly instead of at 3 Hz.
+            checkSpaceChanged()
+            // Before the rest, and even when focus went to nothing:
             // closing a window moves focus, and for an app that keeps its
             // closed windows this is the only event there is.
             evictOrderedOut()
@@ -1589,6 +1648,12 @@ final class Daemon: @unchecked Sendable {
             guard let homeSID = sp0.visibleSpaces.first(where: {
                 sp0.layouts[$0]?.windows.contains(wid) == true
             }) else {
+                // A float, a rule's `manage = false`, a quirk, a panel: known
+                // to the last sweep and deliberately in no layout. Another
+                // sweep would reach the same verdict, and clicking back and
+                // forth between a tile and a float cost two full WindowServer
+                // sweeps plus a re-apply of every visible space per click.
+                if core.sync(execute: { self.unmanaged.contains(wid) }) { return }
                 scheduleSync()
                 return
             }
@@ -1621,6 +1686,7 @@ final class Daemon: @unchecked Sendable {
             // inline: the user is looking at the new space right now, so this
             // is the one event that must not wait out a debounce.
             handleSpaceChange()
+            scheduleSpaceRechecks()
         case .displayChanged:
             // Geometry first: a resolution change or an unplug leaves every
             // layout sized to a screen that no longer exists, and the sweep
@@ -1767,7 +1833,7 @@ final class Daemon: @unchecked Sendable {
             )
             applyFrames([wid: target])
             raiseFronts([wid])
-            if let pid = pids[wid] {
+            if let pid = pid(of: wid) {
                 focusAndWarp(window: wid, pid: pid)
             }
             bus.emit(stateChangedEvent())
@@ -2102,7 +2168,10 @@ final class Daemon: @unchecked Sendable {
             guard shortcuts.contains(number) else {
                 return IPCResponse(
                     ok: false,
-                    error: "cannot switch to '\(label)': there is no scripting addition, and "
+                    error: "cannot switch to '\(label)': "
+                        + (ScriptingAddition.isAvailable() && !ScriptingAddition.supportsSpaceFocus()
+                            ? "the scripting addition in Dock does not support this macOS release, and "
+                            : "there is no scripting addition, and ")
                         + "'Switch to Desktop \(number)' is off, so weft has nothing to switch with. "
                         + "Turn it on in System Settings → Keyboard → Keyboard Shortcuts → "
                         + "Mission Control → Mission Control, or load the scripting addition."
@@ -2320,14 +2389,14 @@ final class Daemon: @unchecked Sendable {
             applySpaceLayout(sid)
             bus.emit(stateChangedEvent())
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self, let pid = self.pids[wid] else { return }
+                guard let self, let pid = self.pid(of: wid) else { return }
                 self.focusAndWarp(window: wid, pid: pid)
             }
             return IPCResponse(ok: true, output: "focusing \(bundleID) (instant space switch + raise)")
         } else if let (_, number) = Daemon.spaceNumber(sid, in: world), (1...9).contains(number) {
             SpaceControl.focusSpaceNumber(number)
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                guard let self, let pid = self.pids[wid] else { return }
+                guard let self, let pid = self.pid(of: wid) else { return }
                 self.focusAndWarp(window: wid, pid: pid)
             }
             return IPCResponse(ok: true, output: "focusing \(bundleID) (space switch + raise)")
@@ -2751,8 +2820,15 @@ final class Daemon: @unchecked Sendable {
         case (.bsp, .float(let f)):
             sp.layouts[sid] = .tiling(treeFromOrder(f.order, focus: f.focus))
         case (.float, .tiling(let t)):
+            // The screen comes from `sp`, never from `readSpaces()`. Callers
+            // run this inside `updateSpaces`, which holds `spaces` for
+            // writing; reading it again from in here is an exclusivity
+            // violation, and Swift aborts the daemon on the spot. That is the
+            // SIGABRT in `usableScreen(for:)` under `applyDeclaredLayouts`,
+            // and `space layout float` walked into the same one.
+            let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
             sp.layouts[sid] = .float(floatFromWindows(
-                t.windows, actuals: conversionFrames(of: t.windows, sid: sid), focus: t.focus
+                t.windows, actuals: conversionFrames(of: t.windows, screen: screen), focus: t.focus
             ))
         }
     }
@@ -2772,10 +2848,9 @@ final class Daemon: @unchecked Sendable {
     /// floating position. A window that is off every screen — dragged there,
     /// or stranded by an unplugged monitor — would be "restored" to nowhere,
     /// so anything off-display gets a cascaded rect on this space's screen.
-    private func conversionFrames(of wids: [WindowID], sid: SpaceID) -> [WindowID: Frame] {
+    private func conversionFrames(of wids: [WindowID], screen: Frame) -> [WindowID: Frame] {
         let live = liveFrames(of: wids)
         let displays = SpaceControl.displayLayout().map(\.frame)
-        let screen = usableScreen(for: sid)
         var out: [WindowID: Frame] = [:]
         var cascade = 0.0
         for wid in wids {
@@ -2865,8 +2940,13 @@ final class Daemon: @unchecked Sendable {
 
     private func handleQuery(_ text: String) -> IPCResponse {
         let parts = text.split(separator: " ").map(String.init)
-        guard parts.count == 2 else {
-            return IPCResponse(ok: false, error: "usage: query <displays|spaces|windows|world|state|tree|trace|capability|permissions>")
+        // `--no-ax` skips the Accessibility round trip per running app that
+        // fills in `bound`. WeftBar fetches the window list on every change
+        // and never reads `bound`, so every app on the machine was being woken
+        // to answer an AX query on every focus change, for nothing.
+        let noAX = parts.count == 3 && parts[2] == "--no-ax"
+        guard parts.count == 2 || noAX else {
+            return IPCResponse(ok: false, error: "usage: query <displays|spaces|windows|world|state|tree|trace|capability|permissions> [--no-ax]")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -3006,7 +3086,7 @@ final class Daemon: @unchecked Sendable {
         case "windows", "world":
             // Diagnostic path: pays the per-app AX round trip so `bound`
             // reflects the S0 cold-start gap. Never used by the hot paths.
-            let world = WorldReader.snapshot(includeAXBinding: true)
+            let world = WorldReader.snapshot(includeAXBinding: !noAX)
             guard parts[1] == "windows" else { return emit(world) }
             // Why each window is or is not tiled, alongside the window. A
             // window weft has quietly decided not to manage is the single
@@ -3158,7 +3238,7 @@ final class Daemon: @unchecked Sendable {
         dispatchPrecondition(condition: .notOnQueue(core))
         guard !wids.isEmpty else { return }
         let applier = self.applier
-        let pids = self.pids
+        let pids = allPids()
         let current = currentLayout()
         let targets: [(WindowID, Int32)] = wids.compactMap { wid in
             guard let pid = pids[wid] else { return nil }
@@ -3236,7 +3316,7 @@ final class Daemon: @unchecked Sendable {
             // that is the user asking for this tile, not a sweep guessing.
             if let focus = tree.focus, raiseFocus, stealFocus || !focusIsUnmanaged() {
                 raiseFronts([focus])
-                if stealFocus, let pid = pids[focus] {
+                if stealFocus, let pid = pid(of: focus) {
                     focusAndWarp(window: focus, pid: pid)
                 }
             }
@@ -3244,7 +3324,7 @@ final class Daemon: @unchecked Sendable {
             // Never position floats: everything here is the user's own
             // arrangement. Front the focused one so focus changes stay
             // visible, and leave the rest alone.
-            if let focus = fl.focus, let pid = pids[focus], raiseFocus {
+            if let focus = fl.focus, let pid = pid(of: focus), raiseFocus {
                 if stealFocus {
                     focusAndWarp(window: focus, pid: pid)
                 } else {
@@ -3304,6 +3384,7 @@ final class Daemon: @unchecked Sendable {
         var healed = 0
         var stranded: [WindowID] = []
         let frames = currentVisibleFrames()
+        let pids = allPids()
         for wid in pids.keys.sorted() {
             guard let f = WorldReader.frame(of: wid) else { continue }
             // Off *every* display, not merely partly off one: a window the

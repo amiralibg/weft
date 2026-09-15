@@ -367,7 +367,23 @@ public final class InputManager: @unchecked Sendable {
     /// for a while, and the Setup window polls at exactly that rate.
     @discardableResult
     public func ensureTap() -> Bool {
-        if tapInstalled { return true }
+        if let tap = box.lock.withLock({ box.tap }) {
+            if CFMachPortIsValid(tap) {
+                // Switched off without the callback hearing about it. The
+                // callback re-enables on `tapDisabledBy…`, but that event
+                // travels through the tap itself, so a tap turned off while
+                // nothing was being typed can simply stay off.
+                if !CGEvent.tapIsEnabled(tap: tap) {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                    fputs("weftd: input tap was disabled — re-enabled it\n", stderr)
+                }
+                return true
+            }
+            // Invalidated: a revoked grant, a WindowServer restart. Nothing
+            // arrives through a dead port, so drop it and build a new one.
+            fputs("weftd: input tap was invalidated — reinstalling it\n", stderr)
+            dropTap()
+        }
         let go: Bool = retryLock.withLock {
             guard Date().timeIntervalSince(lastRetry) >= 1.0 else { return false }
             lastRetry = Date()
@@ -439,6 +455,26 @@ public final class InputManager: @unchecked Sendable {
         }
         _ = done.wait(timeout: .now() + 5)
         return result.value
+    }
+
+    /// Forget a tap whose port has died, so the next `start` builds a fresh
+    /// one. `tap` is cleared now, so `tapInstalled` stops lying at once; the
+    /// run-loop source is removed on the tap thread, which owns it, and ahead
+    /// of any `start` queued after this call.
+    private func dropTap() {
+        box.lock.withLock { box.tap = nil }
+        loop.perform { [weak self] in
+            guard let self else { return }
+            let source = self.lock.withLock { () -> CFRunLoopSource? in
+                let s = self.source
+                self.source = nil
+                self.running = false
+                return s
+            }
+            if let source {
+                CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, CFRunLoopMode.defaultMode!)
+            }
+        }
     }
 
     public func stop() {

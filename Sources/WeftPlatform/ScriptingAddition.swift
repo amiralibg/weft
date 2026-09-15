@@ -163,6 +163,14 @@ public enum ScriptingAddition {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { Darwin.close(fd) }
+        // Bounded both ways. Every caller is on the command path, and keybinds
+        // run one at a time: a Dock that accepts the connection and never
+        // answers would otherwise park `recv` forever, and every keybind after
+        // it would queue behind that one without a word in the log.
+        var timeout = timeval(tv_sec: 0, tv_usec: 500_000)
+        let tvSize = socklen_t(MemoryLayout<timeval>.size)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, tvSize)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, tvSize)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -206,6 +214,8 @@ public enum ScriptingAddition {
         if bytesRead > 0 {
             return Data(buffer.prefix(bytesRead))
         }
+        // A timeout is no answer at all, not an empty acknowledgement.
+        if bytesRead < 0 { return nil }
         return Data()
     }
 }

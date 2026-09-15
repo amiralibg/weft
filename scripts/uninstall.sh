@@ -119,6 +119,15 @@ if [ "$PURGE" = 1 ]; then
             echo "WARNING: could not remove $KEYCHAIN — delete it by hand"
         fi
     fi
+    # Its password's copy in the login keychain (see lib-codesign.sh).
+    if security find-generic-password -s weft-signing-keychain >/dev/null 2>&1; then
+        if [ "$DRY" = 1 ]; then
+            echo "    would remove the weft-signing-keychain password from the login keychain"
+        else
+            security delete-generic-password -s weft-signing-keychain >/dev/null 2>&1 \
+                && echo "    removed the weft-signing-keychain password from the login keychain"
+        fi
+    fi
 
     say "Removing your settings"
     remove "$HOME/.config/weft"

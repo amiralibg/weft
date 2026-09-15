@@ -43,7 +43,21 @@
 
 WEFT_SIGN_KEYCHAIN="${WEFT_SIGN_KEYCHAIN:-$HOME/Library/Keychains/weft-signing.keychain-db}"
 WEFT_SIGN_CN="weft self-signed"
-WEFT_SIGN_PASSFILE="${WEFT_SIGN_PASSFILE:-$HOME/.config/weft/.signing-keychain}"
+# The keychain's password lives beside weft's state, not in ~/.config/weft.
+#
+# That folder is the one people delete to reset their settings, and losing the
+# password retires the keychain (see _weft_signing_retire_orphan): a new
+# certificate, a new designated requirement, and every grant silently stops
+# applying while System Settings still shows the switches on. That is "no
+# keybind works after updating", and one machine had its identity retired three
+# times in six days. The old location is still read, once, and carried over.
+WEFT_SIGN_PASSFILE="${WEFT_SIGN_PASSFILE:-$HOME/Library/Application Support/weft/signing-keychain-password}"
+WEFT_SIGN_PASSFILE_LEGACY="$HOME/.config/weft/.signing-keychain"
+# And a copy in the login keychain, which no settings reset or folder cleanup
+# touches. A file can always be deleted by hand; this one machine lost it three
+# times, and each loss cost every permission grant weft had.
+WEFT_SIGN_PASS_SERVICE="weft-signing-keychain"
+WEFT_SIGN_LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 # Echoes the identity to sign with, creating it on first run. Empty output
 # means signing is not available and the caller should carry on unsigned.
@@ -71,16 +85,33 @@ weft_signing_identity() {
 }
 
 _weft_signing_password() {
-    if [ -s "$WEFT_SIGN_PASSFILE" ]; then
-        cat "$WEFT_SIGN_PASSFILE"
-        return 0
+    if [ ! -s "$WEFT_SIGN_PASSFILE" ] && [ -s "$WEFT_SIGN_PASSFILE_LEGACY" ]; then
+        mkdir -p "$(dirname "$WEFT_SIGN_PASSFILE")"
+        cp "$WEFT_SIGN_PASSFILE_LEGACY" "$WEFT_SIGN_PASSFILE" && chmod 600 "$WEFT_SIGN_PASSFILE"
     fi
-    mkdir -p "$(dirname "$WEFT_SIGN_PASSFILE")"
-    # The keychain holds one self-signed code-signing key and nothing else, but
-    # a random password kept 0600 costs two lines and avoids a constant in a
-    # public repo being the thing that unlocks it.
-    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > "$WEFT_SIGN_PASSFILE"
-    chmod 600 "$WEFT_SIGN_PASSFILE"
+    if [ ! -s "$WEFT_SIGN_PASSFILE" ]; then
+        local saved
+        saved="$(security find-generic-password -s "$WEFT_SIGN_PASS_SERVICE" -w \
+            "$WEFT_SIGN_LOGIN_KEYCHAIN" 2>/dev/null)"
+        if [ -n "$saved" ]; then
+            mkdir -p "$(dirname "$WEFT_SIGN_PASSFILE")"
+            printf '%s' "$saved" > "$WEFT_SIGN_PASSFILE" && chmod 600 "$WEFT_SIGN_PASSFILE"
+        fi
+    fi
+    if [ ! -s "$WEFT_SIGN_PASSFILE" ]; then
+        mkdir -p "$(dirname "$WEFT_SIGN_PASSFILE")"
+        # The keychain holds one self-signed code-signing key and nothing
+        # else, but a random password kept 0600 costs two lines and avoids a
+        # constant in a public repo being the thing that unlocks it.
+        LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > "$WEFT_SIGN_PASSFILE"
+        chmod 600 "$WEFT_SIGN_PASSFILE"
+    fi
+    # Mirror it into the login keychain every time: that also covers every
+    # install that made its password before the copy existed. `-U` updates in
+    # place. Never fatal — a locked login keychain (an SSH session) just
+    # leaves the file as the only copy, which is how it always was.
+    security add-generic-password -U -a "$(id -un)" -s "$WEFT_SIGN_PASS_SERVICE" \
+        -w "$(cat "$WEFT_SIGN_PASSFILE")" "$WEFT_SIGN_LOGIN_KEYCHAIN" >/dev/null 2>&1 || true
     cat "$WEFT_SIGN_PASSFILE"
 }
 

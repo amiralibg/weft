@@ -203,7 +203,9 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let id: UInt64
             let label: String
         }
-        guard let jsonStr = BarIPC.send("query windows"),
+        // `--no-ax`: the switcher never reads `bound`. The plain form is the
+        // fallback for a daemon older than the flag.
+        guard let jsonStr = BarIPC.send("query windows --no-ax") ?? BarIPC.send("query windows"),
               let data = jsonStr.data(using: .utf8),
               let wins = try? JSONDecoder().decode([QueryWin].self, from: data)
         else { return [] }
