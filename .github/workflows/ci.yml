@@ -19,7 +19,19 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: macos-15
+    name: Build and test (${{ matrix.toolchain }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: supported
+            runner: macos-15
+          # Compile against the next SDK before it reaches users. This does not
+          # replace a real macOS 27 smoke test for private SkyLight behavior,
+          # but it catches SDK and Swift 6.4 source/link breakage on every push.
+          - toolchain: Xcode 27
+            runner: xcode-27
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
     steps:
@@ -43,10 +55,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: spm-${{ matrix.runner }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
-            spm-${{ runner.os }}-
+            spm-${{ matrix.runner }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            spm-${{ matrix.runner }}-
 
       - name: Build
         run: swift build --build-tests

@@ -20,11 +20,25 @@ public enum BarIPC {
         }
     }
 
-    /// Hold the daemon's event stream open, calling `onEvent` for every line.
+    /// Hold the daemon's event stream open, calling `onEvent` for state
+    /// snapshots only. Older daemons validate but ignore the server-side
+    /// filter, so filter again here to avoid turning each raw event plus its
+    /// resulting snapshot into duplicate UI refreshes.
+    ///
     /// Blocking; returns when the stream ends. Callers reconnect.
-    public static func subscribe(onEvent: @escaping (String) -> Void) -> Bool {
+    public static func subscribeToState(onEvent: @escaping () -> Void) -> Bool {
         IPCClient.subscribe(
-            path: IPCPaths.socketPath(), command: "subscribe", onLine: onEvent
-        )
+            path: IPCPaths.socketPath(), command: "subscribe stateChanged"
+        ) { line in
+            guard let data = line.data(using: .utf8),
+                  let event = try? JSONDecoder().decode(StreamEvent.self, from: data),
+                  event.kind == "stateChanged"
+            else { return }
+            onEvent()
+        }
+    }
+
+    private struct StreamEvent: Decodable {
+        var kind: String
     }
 }

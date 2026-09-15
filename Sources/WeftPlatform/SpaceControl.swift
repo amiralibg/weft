@@ -229,7 +229,7 @@ public enum SpaceControl {
     /// True when `space focus` has *some* way to switch desktops: the
     /// scripting addition, or at least one Mission Control shortcut.
     public static func canFocusSpaces() -> Bool {
-        ScriptingAddition.isAvailable() || !missionControlSwitchShortcuts().isEmpty
+        ScriptingAddition.supportsSpaceFocus() || !missionControlSwitchShortcuts().isEmpty
     }
 
     /// Focus a space by its 1-based Mission Control number via ctrl+N.
@@ -290,9 +290,12 @@ public struct PlatformCapability: Codable, Sendable {
     static func keystrokeNote() -> String {
         let on = SpaceControl.missionControlSwitchShortcuts().sorted()
         guard !on.isEmpty else {
-            return "unavailable: no scripting addition, and System Settings → Keyboard → Shortcuts "
+            let addition = ScriptingAddition.isAvailable()
+                ? "the scripting addition lacks its Dock spaces capability"
+                : "no scripting addition is active"
+            return "unavailable: \(addition), and System Settings → Keyboard → Shortcuts "
                 + "→ Mission Control → 'Switch to Desktop N' is off, so the ⌃N fallback reaches "
-                + "nothing. Space switching will not work until one of the two is in place."
+                + "nothing. Space switching will not work until one of the two paths is restored."
         }
         let covered = on.map(String.init).joined(separator: ", ")
         return "degraded: ⌃N keystroke, ~250ms animation; desktops \(covered) only "
@@ -308,6 +311,7 @@ public struct PlatformCapability: Codable, Sendable {
 
     public static var current: PlatformCapability {
         if ScriptingAddition.isAvailable() {
+            let instantFocus = ScriptingAddition.supportsSpaceFocus()
             return PlatformCapability(
                 moveWindowToSpace: true,
                 moveWindowToSpaceNote: "enabled via scripting addition (instant, non-activating)",
@@ -315,8 +319,11 @@ public struct PlatformCapability: Codable, Sendable {
                 stickyNote: "enabled via scripting addition",
                 orderWindow: true,
                 orderWindowNote: "enabled via scripting addition",
-                focusSpaceKeystroke: true,
-                focusSpaceKeystrokeNote: "instant space switching via scripting addition (animation bypassed)",
+                focusSpaceKeystroke: instantFocus
+                    || !SpaceControl.missionControlSwitchShortcuts().isEmpty,
+                focusSpaceKeystrokeNote: instantFocus
+                    ? "instant space switching via scripting addition (animation bypassed)"
+                    : Self.keystrokeNote(),
                 moveSpaceToDisplay: false,
                 moveSpaceToDisplayNote: Self.spaceToDisplayNote
             )

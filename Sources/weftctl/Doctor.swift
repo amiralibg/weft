@@ -248,7 +248,12 @@ public enum Doctor {
         // 3. Scripting Addition
         if let (ver, attrib) = ScriptingAddition.handshake() {
             print("[\u{2713}] Scripting Addition: Active (version \(ver), attrib 0x\(String(attrib, radix: 16)))")
-            print("    - Instant space switching: Available")
+            if ScriptingAddition.supportsSpaceFocus() {
+                print("    - Instant space switching: Available")
+            } else {
+                print("    - Instant space switching: Unavailable (Dock spaces capability is missing)")
+                print("      The socket is alive, but its patterns do not match this macOS build.")
+            }
             print("    - Non-activating window moves: Available")
             print("    - Sticky window toggle: Available")
         } else {
@@ -263,14 +268,19 @@ public enum Doctor {
         // because the symptom is a keybind that does nothing at all, with no
         // error anywhere the user looks.
         let switchShortcuts = SpaceControl.missionControlSwitchShortcuts().sorted()
-        if ScriptingAddition.isAvailable() {
+        if ScriptingAddition.supportsSpaceFocus() {
             print("[\u{2713}] Switching desktops: instant, via the scripting addition")
         } else if switchShortcuts.isEmpty {
             print("[\u{2717}] Switching desktops: nothing to switch with.")
             print("    `space focus` falls back to a \u{2303}N keystroke, and every")
             print("    'Switch to Desktop N' shortcut is off, so the keystroke lands nowhere.")
             print("    Turn them on: System Settings \u{2192} Keyboard \u{2192} Keyboard Shortcuts")
-            print("    \u{2192} Mission Control \u{2192} Mission Control, or load the scripting addition.")
+            if ScriptingAddition.isAvailable() {
+                print("    \u{2192} Mission Control \u{2192} Mission Control, or update and reload a")
+                print("    scripting addition whose Dock patterns support this macOS build.")
+            } else {
+                print("    \u{2192} Mission Control \u{2192} Mission Control, or load the scripting addition.")
+            }
             allOk = false
         } else {
             let covered = switchShortcuts.map(String.init).joined(separator: ", ")

@@ -42,33 +42,57 @@ public enum ScriptingAddition {
         return nil
     }
 
-    /// Cached availability. The handshake is a connect + round trip, and this
-    /// was called on the command path for every space verb; the addition is
-    /// loaded into Dock and does not come and go within a few seconds.
+    /// The Dock-spaces pointer is what opcode 2 uses. A scripting-addition
+    /// socket can be alive with this bit clear when its byte patterns do not
+    /// match a new macOS release; in that state the opcode acknowledges the
+    /// request but does nothing.
+    private static let attributeDockSpaces: UInt32 = 0x01
+
+    /// Cached handshake. It is a connect + round trip, and capability checks
+    /// run on the command path; the addition is loaded into Dock and does not
+    /// come and go within a few seconds.
     private static let availabilityLock = NSLock()
-    nonisolated(unsafe) private static var cachedAvailable: (value: Bool, at: Date)?
+    nonisolated(unsafe) private static var cachedHandshake: (
+        version: String?, attrib: UInt32?, at: Date
+    )?
     private static let availabilityTTL: TimeInterval = 5
 
     /// Check if the scripting addition socket is active and responsive.
     public static func isAvailable() -> Bool {
-        let now = Date()
-        if let cached = availabilityLock.withLock({ cachedAvailable }),
-           now.timeIntervalSince(cached.at) < availabilityTTL
-        {
-            return cached.value
-        }
-        let ok = handshake() != nil
-        availabilityLock.withLock { cachedAvailable = (ok, now) }
-        return ok
+        handshake() != nil
+    }
+
+    /// Whether instant desktop switching is actually initialized, not merely
+    /// whether the socket answers. This distinction is observable on a new
+    /// macOS release: yabai-sa still starts its socket but reports attrib 0
+    /// when none of its Dock patterns matched.
+    public static func supportsSpaceFocus() -> Bool {
+        guard let status = handshake() else { return false }
+        return status.attrib & attributeDockSpaces != 0
     }
 
     /// Forget the cached handshake — call after a Dock restart reloads the SA.
     public static func invalidateAvailability() {
-        availabilityLock.withLock { cachedAvailable = nil }
+        availabilityLock.withLock { cachedHandshake = nil }
     }
 
     /// Query the scripting addition handshake: version and capabilities attribute mask.
     public static func handshake() -> (version: String, attrib: UInt32)? {
+        let now = Date()
+        if let cached = availabilityLock.withLock({ cachedHandshake }),
+           now.timeIntervalSince(cached.at) < availabilityTTL
+        {
+            guard let version = cached.version, let attrib = cached.attrib else { return nil }
+            return (version, attrib)
+        }
+        let status = requestHandshake()
+        availabilityLock.withLock {
+            cachedHandshake = (status?.version, status?.attrib, now)
+        }
+        return status
+    }
+
+    private static func requestHandshake() -> (version: String, attrib: UInt32)? {
         guard let response = send(opcode: opcodeHandshake) else { return nil }
         guard response.count >= 1 else { return nil }
         // Format: version string null-terminated, followed by uint32 attrib
@@ -92,6 +116,7 @@ public enum ScriptingAddition {
 
     /// Instantly switch focus to space `sid` without Mission Control animations.
     public static func focusSpace(_ sid: SpaceID) -> Bool {
+        guard supportsSpaceFocus() else { return false }
         var payload = Data()
         var sidLE = UInt64(sid).littleEndian
         withUnsafeBytes(of: &sidLE) { payload.append(contentsOf: $0) }

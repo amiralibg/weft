@@ -2877,6 +2877,53 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: true, output: str)
         }
         switch parts[1] {
+        case "bar-state":
+            // WeftBar only needs the daemon's already-authoritative model.
+            // Sending it through `query spaces` + `query windows` made every
+            // menu refresh perform two complete WindowServer sweeps, including
+            // the diagnostic query's AX round trip to every app. The bar polls
+            // as a reconnect backstop and also refreshes after events, so that
+            // ostensibly harmless UI work could keep WindowServer and several
+            // apps busy while the desktop itself was idle.
+            let sp = readSpaces()
+            let cfg = currentConfig()
+            let metadata: (
+                pids: [WindowID: Int32],
+                apps: [WindowID: String],
+                titles: [WindowID: String]
+            ) = isOnCore()
+                ? (pids, appNames, windowTitles)
+                : core.sync { (self.pids, self.appNames, self.windowTitles) }
+            var windowSpaces: [WindowID: [SpaceID]] = [:]
+            let spaces = sp.order.compactMap { sid -> SpaceStatus? in
+                guard let display = sp.displayBySpace[sid] else { return nil }
+                let label = sp.labels[sid] ?? "\(sid)"
+                let layout = sp.layouts[sid]?.kind
+                    ?? sp.overrides[sid]
+                    ?? cfg.spaces.first(where: { $0.label == label })?.layout
+                    ?? cfg.general.defaultLayout
+                let windows = sp.layouts[sid]?.windows.sorted() ?? []
+                for wid in windows { windowSpaces[wid, default: []].append(sid) }
+                return SpaceStatus(
+                    id: sid,
+                    label: label,
+                    layout: layout.rawValue,
+                    windows: windows,
+                    current: sp.currentByDisplay[display] == sid,
+                    display: display
+                )
+            }
+            let windows = windowSpaces.keys.sorted().compactMap { wid -> BarWindowStatus? in
+                guard let pid = metadata.pids[wid] else { return nil }
+                return BarWindowStatus(
+                    id: wid,
+                    app: metadata.apps[wid] ?? "?",
+                    title: metadata.titles[wid] ?? "",
+                    pid: pid,
+                    spaces: windowSpaces[wid] ?? []
+                )
+            }
+            return emit(BarStateStatus(spaces: spaces, windows: windows))
         case "trace":
             return emit(Trace.stats())
         case "state":
@@ -3301,6 +3348,19 @@ private struct StateView: Codable, Sendable {
     var windows: [WindowID]
     var screen: Frame
     var frames: [FrameEntry]
+}
+
+private struct BarStateStatus: Codable, Sendable {
+    var spaces: [SpaceStatus]
+    var windows: [BarWindowStatus]
+}
+
+private struct BarWindowStatus: Codable, Sendable {
+    var id: WindowID
+    var app: String
+    var title: String
+    var pid: Int32
+    var spaces: [SpaceID]
 }
 
 private struct DaemonPermissions: Codable, Sendable {
