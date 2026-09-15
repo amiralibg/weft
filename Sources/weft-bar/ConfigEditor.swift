@@ -465,7 +465,7 @@ private struct AppearancePane: View {
                 .padding(.bottom, 14)
                 .textCase(nil)
             } footer: {
-                if store.bordersEnabled {
+                if store.bordersEnabled && store.bordersBackend == "janky" {
                     Text("Borders are drawn by JankyBorders. These settings are passed to it.")
                 }
             }
@@ -1399,17 +1399,23 @@ private struct AdvancedPane: View {
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("Shortcuts like “space focus 2” switch desktops through the scripting addition, or by pressing ⌃N for you. macOS ships ⌃N turned off, so without the addition you have to turn it on.")
+                Text("Switching desktops works with System Integrity Protection on. Sending a window to another desktop without following it, and keeping a window on every desktop, need weft-sa, which only loads with SIP partly off. weft-sa isn't released yet, so there's no reason to change SIP for weft.")
             }
 
             Section("Border drawing") {
-                LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
-                Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
-                LabeledContent("Arguments") {
-                    TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .disabled(store.bordersArgsLocked)
+                Picker("Drawn by", selection: store.bind(\.bordersBackend)) {
+                    Text("Weft").tag("native")
+                    Text("JankyBorders").tag("janky")
+                }
+                if store.bordersBackend == "janky" {
+                    LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
+                    Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
+                    LabeledContent("Arguments") {
+                        TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(store.bordersArgsLocked)
+                    }
                 }
             }
 
@@ -2026,15 +2032,19 @@ final class EngineHealth: ObservableObject {
                       let data = json.data(using: .utf8),
                       let cap = try? JSONDecoder().decode(Capability.self, from: data)
                 else { return nil }
-                // `moveWindowToSpace` is the scripting addition's tell: it is
-                // the one capability nothing else can provide.
-                let instant = cap.moveWindowToSpace
+                // Instant no longer means weft-sa: the Dock swipe is instant
+                // too, and needs nothing installed. The daemon's note leads
+                // with "instant" for either; `moveWindowToSpace` says which.
+                let instant = cap.focusSpaceKeystroke
+                    && cap.focusSpaceKeystrokeNote.hasPrefix("instant")
                 return SpaceSwitching(
-                    works: instant || cap.focusSpaceKeystroke,
+                    works: cap.focusSpaceKeystroke,
                     instant: instant,
-                    detail: instant
-                        ? "Instant, through the scripting addition."
-                        : cap.focusSpaceKeystrokeNote
+                    detail: !instant
+                        ? cap.focusSpaceKeystrokeNote
+                        : cap.moveWindowToSpace
+                            ? "Instant, through weft-sa."
+                            : "Instant, through weft's Dock swipe. Nothing to install."
                 )
             }()
             let perms: DaemonPermissions? = {

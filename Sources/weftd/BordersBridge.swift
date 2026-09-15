@@ -28,8 +28,51 @@ final class BordersBridge: @unchecked Sendable {
     /// second forever — a permanent 1 Hz fork bomb in a background daemon,
     /// with a line of log each time, for a decorative border.
     private var crashRestarts = 0
+    /// Weft's own renderer. Idle — no windows, no work — until borders are
+    /// on with `backend = "native"`, which is the default.
+    let renderer = BorderRenderer()
+    private var drawsNative = false
+    /// One "JankyBorders is running too" line per launch of it, not per reload.
+    private var warnedDoubleBorders = false
+
+    /// Whether weft is drawing the borders itself, so the layout path knows
+    /// to hand it frames.
+    var drawsBorders: Bool { lock.withLock { drawsNative } }
 
     func applyConfig(_ config: BordersIntegrationConfig, currentLayout: LayoutKind? = nil, currentMode: String? = nil) {
+        let native = config.enabled && config.backend == .native
+        lock.withLock { drawsNative = native }
+        if native {
+            // Never both: two renderers drawing the same ring is two rings,
+            // one of them a frame behind. A `borders` weft started, weft
+            // stops; one someone else started is theirs, so say so instead.
+            lock.withLock {
+                stopInternal()
+                currentActiveColor = nil
+            }
+            renderer.setStyle(Self.style(config))
+            if let currentLayout, let currentMode {
+                updateColor(layout: currentLayout, mode: currentMode, config: config)
+            }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else { return }
+                let running = self.isBordersAlreadyRunning()
+                let warn: Bool = self.lock.withLock {
+                    defer { self.warnedDoubleBorders = running }
+                    return running && !self.warnedDoubleBorders
+                }
+                if warn {
+                    fputs(
+                        "weftd: JankyBorders is running outside weft while weft draws its own borders, "
+                            + "so windows get two. Quit it, or set backend = \"janky\" under "
+                            + "[integrations.borders] to keep using it.\n",
+                        stderr
+                    )
+                }
+            }
+            return
+        }
+        renderer.setStyle(nil)
         var toSend: [String]?
         lock.withLock {
             lastConfig = config
@@ -147,14 +190,12 @@ final class BordersBridge: @unchecked Sendable {
                 warnedMissing = true
                 fputs(
                     """
-                    weftd: borders are enabled in weft.toml, but JankyBorders is not installed.
-                      Weft draws borders with JankyBorders. Install it with:
+                    weftd: [integrations.borders] has backend = "janky", but JankyBorders is not installed.
+                      Let weft draw them instead — remove that line, or set:
+                          backend = "native"
+                      Or install JankyBorders and restart weft:
                           brew install FelixKratz/formulae/borders
-                      Then restart weft:
                           weftctl service restart
-                      Or turn borders off in weft.toml:
-                          [integrations.borders]
-                          enabled = false
                       Searched \(ExternalBinary.searchedDescription())
 
                     """,
@@ -236,6 +277,19 @@ final class BordersBridge: @unchecked Sendable {
         }
     }
 
+    /// Weft's renderer takes what `[integrations.borders]` says. A radius set
+    /// in the file is drawn as written; none follows each window's corners.
+    static func style(_ config: BordersIntegrationConfig) -> BorderRenderer.Style {
+        BorderRenderer.Style(
+            width: config.resolvedWidth,
+            radius: config.radius,
+            square: config.resolvedStyle == "square",
+            activeColor: BorderRenderer.parseColor(config.resolvedActiveColor) ?? 0xff7a_a2f7,
+            inactiveColor: BorderRenderer.parseColor(config.resolvedInactiveColor) ?? 0x4041_4868,
+            showInactive: config.showInactive
+        )
+    }
+
     func updateColor(layout: LayoutKind, mode: String, config: BordersIntegrationConfig) {
         guard config.enabled else { return }
         var targetColor: String? = nil
@@ -243,6 +297,13 @@ final class BordersBridge: @unchecked Sendable {
             targetColor = mc
         } else if let ac = config.activeColor[layout.rawValue] {
             targetColor = ac
+        }
+        if config.backend == .native {
+            // In process: an assignment, and a repaint if it changed. The path
+            // below is a fork + exec of a CLI.
+            let resolved = targetColor ?? config.resolvedActiveColor
+            if let argb = BorderRenderer.parseColor(resolved) { renderer.setActiveColor(argb) }
+            return
         }
         guard let color = targetColor else { return }
         let shouldSend: Bool = lock.withLock {
@@ -259,8 +320,10 @@ final class BordersBridge: @unchecked Sendable {
     func stop() {
         lock.withLock {
             stopped = true
+            drawsNative = false
             stopInternal()
         }
+        renderer.setStyle(nil)
     }
 
     private func stopInternal() {

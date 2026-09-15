@@ -335,7 +335,7 @@ public enum Migrate {
         toml += "[integrations.borders]\n"
         toml += "# Draws a highlight around the focused window. Off until you ask for it:\n"
         toml += "# WeftBar -> Settings -> Integrations, or set enabled = true here.\n"
-        toml += "#   brew install FelixKratz/formulae/borders\n"
+        toml += "# Weft draws it itself; there is nothing to install.\n"
         toml += "enabled = false\n"
         toml += "supervise = true\n"
         toml += "width = 2.0\n"

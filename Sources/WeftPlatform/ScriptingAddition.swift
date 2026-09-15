@@ -3,7 +3,8 @@ import Foundation
 import WeftCore
 
 /// Client for the Scripting Addition daemon running inside Dock.app.
-/// Supports both `weft-sa` and `yabai-sa` sockets seamlessly.
+/// weft-sa only: weft depends on no other window manager's addition, so a
+/// macOS release that breaks one is a release weft can fix itself.
 public enum ScriptingAddition {
     // Known SA opcodes (matching Dock payload)
     private static let opcodeHandshake: UInt8 = 1
@@ -21,25 +22,16 @@ public enum ScriptingAddition {
     private static let opcodeWindowListToSpace: UInt8 = 18
     private static let opcodeWindowToSpace: UInt8 = 19
 
-    /// Path to active SA socket, if any exists.
+    /// Path to weft-sa's socket, if it exists.
     ///
-    /// `yabai-sa` is accepted deliberately: it is the same Dock payload with
-    /// the same opcode table, so weft can drive it when the user already has
-    /// `yabai --load-sa` in place. It is checked second so weft's own socket
-    /// always wins when both exist.
+    /// yabai's addition used to be accepted here too. It is no longer: when
+    /// macOS 27 broke its Dock patterns, weft could do nothing but wait for
+    /// someone else's release.
     public static func socketPath() -> String? {
         let user = NSUserName()
         guard !user.isEmpty else { return nil }
-        let candidates = [
-            "/tmp/weft-sa_\(user).socket",
-            "/tmp/yabai-sa_\(user).socket",
-        ]
-        for path in candidates {
-            if FileManager.default.fileExists(atPath: path) {
-                return path
-            }
-        }
-        return nil
+        let path = "/tmp/weft-sa_\(user).socket"
+        return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
     /// The Dock-spaces pointer is what opcode 2 uses. A scripting-addition
@@ -64,7 +56,7 @@ public enum ScriptingAddition {
 
     /// Whether instant desktop switching is actually initialized, not merely
     /// whether the socket answers. This distinction is observable on a new
-    /// macOS release: yabai-sa still starts its socket but reports attrib 0
+    /// macOS release: an addition still starts its socket but reports attrib 0
     /// when none of its Dock patterns matched.
     public static func supportsSpaceFocus() -> Bool {
         guard let status = handshake() else { return false }

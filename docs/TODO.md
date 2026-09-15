@@ -158,10 +158,17 @@ window moves fail, and sticky does not work. It is also named as the single
 largest ongoing maintenance cost in the whole design: the payload finds Dock
 internals by byte-pattern scan and must be re-derived on most macOS releases.
 
-- [ ] Make the call explicitly — ship our own addition, keep depending on
-      yabai's, or say publicly that we will not. All three are defensible; the
-      current state, "still open", is the one that is not, because users cannot
-      plan around it.
+- [x] Make the call explicitly. **Decided (2026-09-15): weft owns all of it,
+      and depends on no one else's addition.** macOS 27 broke yabai's Dock
+      patterns and weft could only wait for someone else's release; that is
+      the failure this decision exists to prevent.
+      - Switching desktops needs no addition at all: `DockSwipe` posts a
+        synthetic Dock swipe (SIP on, Accessibility only). Verified on 27.0.
+      - weft-sa, weft's own addition, is for the two things only Dock can do:
+        sending a window to another desktop without following it, and sticky.
+        It needs SIP partly off, and the README and Settings say exactly that.
+      - yabai's socket is no longer read, even when its addition is loaded.
+- [ ] Build weft-sa: loader, arm64e payload, Dock pattern table for 26 and 27.
 
 ## Suggested order
 

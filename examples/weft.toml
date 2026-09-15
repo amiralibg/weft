@@ -195,8 +195,8 @@ reserve = 0
 # regular expressions, so "Foo|Bar" matches either.
 #
 #   manage = false   leave the window completely alone — never tiled, never moved
-#   space = "..."    move it there when it opens (needs the scripting addition
-#                    for an instant move; without it, it lands on next focus)
+#   space = "..."    move it there when it opens (needs weft-sa for an
+#                    instant move; without it, it lands on next focus)
 #
 # Weft already floats anything that is not a real window on its own: a dialog
 # or popover (its AX subrole is not a standard window), a window the app
@@ -266,14 +266,15 @@ manage = false
 # reports the combination, and so does Settings › Integrations.
 
 [integrations.borders]
-# Draws a highlight around the focused window, via JankyBorders.
-# Install it first, or this does nothing but log one line:
-#   brew install FelixKratz/formulae/borders
-# (weft had its own renderer until 0.7.4; it was removed because its overlay
-# windows cost ~16pp of GPU. `backend = "native"` is still accepted, ignored.)
+# Draws a highlight around the focused window. Weft draws it itself; nothing
+# to install.
 enabled = false
 
-# weftd starts borders and restarts it if it dies.
+# "native" (default): weft draws them. "janky": JankyBorders does, for its
+# extras (gradients, blacklist) — brew install FelixKratz/formulae/borders
+# backend = "native"
+
+# With backend = "janky": weftd starts borders and restarts it if it dies.
 supervise = true
 
 # What the border looks like. Every one of these reaches borders live — change

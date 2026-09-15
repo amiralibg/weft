@@ -245,42 +245,35 @@ public enum Doctor {
             allOk = false
         }
 
-        // 3. Scripting Addition
+        // 3. weft-sa, weft's own scripting addition. Optional: it is what
+        // moves a window to another desktop without following it, and sticky.
         if let (ver, attrib) = ScriptingAddition.handshake() {
-            print("[\u{2713}] Scripting Addition: Active (version \(ver), attrib 0x\(String(attrib, radix: 16)))")
-            if ScriptingAddition.supportsSpaceFocus() {
-                print("    - Instant space switching: Available")
-            } else {
-                print("    - Instant space switching: Unavailable (Dock spaces capability is missing)")
-                print("      The socket is alive, but its patterns do not match this macOS build.")
+            print("[\u{2713}] weft-sa: loaded (version \(ver), attrib 0x\(String(attrib, radix: 16)))")
+            if !ScriptingAddition.supportsSpaceFocus() {
+                print("    Its Dock hooks did not resolve on this macOS build: it answers and does nothing.")
             }
-            print("    - Non-activating window moves: Available")
-            print("    - Sticky window toggle: Available")
         } else {
-            print("[\u{25CB}] Scripting Addition: Not active (operating in degraded/fallback mode)")
-            print("    - Note: For instant space transitions without Mission Control animations,")
-            print("      ensure yabai.osax or weft-sa is loaded into Dock.app.")
+            print("[\u{25CB}] weft-sa: not loaded — moving windows to other desktops and sticky are unavailable")
+            print("    weft-sa needs System Integrity Protection partly off, and is not released yet.")
+            print("    Everything else works with SIP on; there is no reason to change it for weft.")
         }
 
-        // Without the addition, `space focus` is a synthetic ⌃N — and that
-        // keystroke reaches nothing unless the Mission Control shortcuts are
-        // on, which on a stock macOS they are not. Reported on its own line
-        // because the symptom is a keybind that does nothing at all, with no
-        // error anywhere the user looks.
+        // Switching desktops: weft-sa when loaded, otherwise weft's own Dock
+        // swipe, otherwise a ⌃N that reaches nothing unless the Mission
+        // Control shortcuts are on — and on a stock macOS they are not.
+        // Reported on its own line because the symptom is a keybind that does
+        // nothing at all, with no error anywhere the user looks.
         let switchShortcuts = SpaceControl.missionControlSwitchShortcuts().sorted()
         if ScriptingAddition.supportsSpaceFocus() {
-            print("[\u{2713}] Switching desktops: instant, via the scripting addition")
+            print("[\u{2713}] Switching desktops: instant, via weft-sa")
+        } else if DockSwipe.isSupported {
+            print("[\u{2713}] Switching desktops: instant, via weft's Dock swipe (no scripting addition, SIP on)")
         } else if switchShortcuts.isEmpty {
             print("[\u{2717}] Switching desktops: nothing to switch with.")
-            print("    `space focus` falls back to a \u{2303}N keystroke, and every")
-            print("    'Switch to Desktop N' shortcut is off, so the keystroke lands nowhere.")
+            print("    This macOS release does not take weft's Dock swipe (26.6 or later does), and")
+            print("    every 'Switch to Desktop N' shortcut is off, so the \u{2303}N fallback lands nowhere.")
             print("    Turn them on: System Settings \u{2192} Keyboard \u{2192} Keyboard Shortcuts")
-            if ScriptingAddition.isAvailable() {
-                print("    \u{2192} Mission Control \u{2192} Mission Control, or update and reload a")
-                print("    scripting addition whose Dock patterns support this macOS build.")
-            } else {
-                print("    \u{2192} Mission Control \u{2192} Mission Control, or load the scripting addition.")
-            }
+            print("    \u{2192} Mission Control \u{2192} Mission Control.")
             allOk = false
         } else {
             let covered = switchShortcuts.map(String.init).joined(separator: ", ")
@@ -327,7 +320,8 @@ public enum Doctor {
 
                 if !reportHelper(
                     name: "JankyBorders", binary: "borders", found: bordersFound,
-                    enabled: validated.integrations.borders.enabled,
+                    enabled: validated.integrations.borders.enabled
+                        && validated.integrations.borders.backend == .janky,
                     install: "brew install FelixKratz/formulae/borders",
                     setting: "[integrations.borders]"
                 ) { allOk = false }

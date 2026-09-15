@@ -186,6 +186,26 @@ open -a WeftBar --args --setup
 weftctl doctor          # the same checks, in a terminal
 ```
 
+### System Integrity Protection
+
+Weft works with SIP on. Two features don't, and they are the only reason SIP
+ever comes up:
+
+| Feature | SIP |
+|---|---|
+| Tiling, focus, shortcuts, rules, stacks, borders, the switcher | On |
+| Switching desktops (`space focus`) | On — weft's own Dock swipe, macOS 26.6 or later |
+| Sending a window to another desktop without following it (`space move-window`, `alt-shift-1…5` in the shipped config, a rule's `space =`) | Partly off, with weft-sa |
+| Keeping a window on every desktop (`sticky`) | Partly off, with weft-sa |
+
+Only Dock can put another app's window on a different desktop. weft-sa is
+weft's own code running inside Dock to ask it to, and macOS will not load code
+into Dock while SIP is fully on.
+
+**weft-sa is not released yet.** Until it is, those two features report that
+they are unavailable, and there is no reason to change SIP for weft. Weft does
+not use yabai's scripting addition, even when one is loaded.
+
 ## Default keybindings
 
 `⌥` is Option/Alt. A matched chord is swallowed, so `⌥H` moves focus rather than
@@ -297,61 +317,56 @@ switched on whose binary is not installed.
 
 ## Integrations
 
-Both are off by default, because both drive a program weft does not install.
-
 | | What it does | Install |
 |---|---|---|
-| [JankyBorders](https://github.com/FelixKratz/JankyBorders) | Highlight around the focused window, recoloured per layout and per mode | `brew install FelixKratz/formulae/borders` |
+| Borders | Highlight around the focused window, recoloured per layout and per mode | Nothing — weft draws them |
 | [SketchyBar](https://github.com/FelixKratz/SketchyBar) | Fires `--trigger weft_event` with `WEFT_*` variables on layout, space and focus changes | `brew install FelixKratz/formulae/sketchybar` |
 
+Both are off by default.
+
 ### Window borders
-
-Weft draws borders through JankyBorders. It used to have its own in-process
-renderer; that was removed in 0.7.4 because its overlay windows cost about 16
-percentage points of GPU utilisation on an idle desktop — with borders on the
-GPU never went idle (median 21% against 2% without). JankyBorders does the same
-job for no measurable GPU cost, so there is one border renderer now instead of
-two.
-
-To turn borders on:
-
-```bash
-brew install FelixKratz/formulae/borders   # once
-```
 
 ```toml
 [integrations.borders]
 enabled = true
 width = 2.0
-style = "round"          # or "square"
+style = "round"          # follows each window's own corners; or "square"
 active-color = { bsp = "0xff7aa2f7", float = "0xffe0af68" }
 inactive-color = "0x40414868"
+show-inactive = true     # false borders only the focused window
 ```
 
-Weft starts and supervises the process for you, and every key above reaches it
-live — changing one in Settings or in the file re-applies it without a restart.
-`args` is still there for anything weft does not model (`background_color`,
-`blacklist`, a `gradient(...)` colour), and anything you set there wins over
-the keys above.
+Every key applies live, from Settings or the file. `radius = 12.0` fixes the
+corner radius instead of following each window.
 
-Weft also applies these to a `borders` you started yourself — from
-`~/.config/borders/bordersrc`, say. It will not supervise or restart that
-process, but it does drive its appearance, so set `enabled = false` here if you
-would rather your own config owned it.
+Weft draws borders in `weftd`, from the frames it is applying, so a border does
+not trail its window while it moves. Only windows in a layout get one, so
+popovers, Spotlight and other panels never do.
 
-Borders are drawn at Retina resolution (`hidpi=on`), which JankyBorders does not
-do by default; without it a thin border is drawn at 1x and scaled up, and the
-colour you chose arrives looking washed out.
+A border is four thin strips and four small corner pieces around the window —
+about 1% of its area — rather than one transparent window laid over it. That
+difference is most of the cost: the compositor pays for a window's area on every
+frame the app underneath draws. Strips in an opaque colour are copied, not
+blended. Moving windows moves every border in one WindowServer transaction with
+no redraw; a border is redrawn only when its colour or size changes.
 
-If borders are enabled and JankyBorders is not installed, weftd says so once in
-the log with the install command, and everything else keeps working. `weftctl
-doctor` reports the same thing.
+Measured on a MacBook Air (M4), macOS 27.0, two windows, interleaved cycles
+compared against no borders:
 
-An existing config with `backend = "native"` still loads — the key is accepted
-and ignored, with a warning pointing at the install command. The same goes for
-`radius`: JankyBorders has no numeric corner radius, so a radius is read as the
-shape it implied (`0` square, anything else round) and a warning names `style`.
-Settings › Advanced tells you whether the program is actually installed.
+| | GPU, apps drawing | Memory |
+|---|---|---|
+| One transparent window per border (weft's renderer until 0.7.4) | +24 pp | +154 MB |
+| JankyBorders | +14 to +22 pp | its own process |
+| Weft | +4 to +8 pp | +2 MB in weftd |
+
+With nothing on screen changing, all of them measure at zero. Background load
+moved between cycles, so treat the numbers as an order, not a precise result.
+
+`backend = "janky"` hands drawing to
+[JankyBorders](https://github.com/FelixKratz/JankyBorders) instead, for what
+weft does not draw: `gradient(...)` colours, `blacklist`, `background_color`.
+Weft then starts and supervises `borders`, passes the keys above to it, and
+passes `args` through unchanged.
 
 ## Building from source
 

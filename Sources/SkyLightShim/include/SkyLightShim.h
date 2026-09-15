@@ -112,4 +112,29 @@ extern int32_t SLSTransactionCommit(CFTypeRef transaction, int32_t synchronous);
 extern int32_t SLSTransactionMoveWindowWithGroup(CFTypeRef transaction, SLWindowID wid, CGPoint point);
 extern int32_t SLSTransactionOrderWindow(CFTypeRef transaction, SLWindowID wid, int32_t order, SLWindowID relativeWid);
 
+// MARK: - Borders (weft's own windows)
+//
+// Everything below acts on windows this process creates, so none of it needs
+// a scripting addition or any privilege weft does not already have (S5).
+// `SLSNewWindow`'s `type` is 2 for a plain buffered window; the region is the
+// window's shape in window-local coordinates, and (x, y) places its origin in
+// the global, top-left-origin space `SLSGetWindowBounds` reports in.
+
+extern int32_t SLSNewWindow(SLConnectionID cid, int32_t type, float x, float y,
+                            CFTypeRef region, SLWindowID *outWID);
+extern int32_t SLSReleaseWindow(SLConnectionID cid, SLWindowID wid);
+extern int32_t SLSSetWindowShape(SLConnectionID cid, SLWindowID wid, float x, float y, CFTypeRef region);
+extern int32_t SLSSetWindowResolution(SLConnectionID cid, SLWindowID wid, double resolution);
+extern int32_t SLSSetWindowOpacity(SLConnectionID cid, SLWindowID wid, bool opaque);
+extern int32_t SLSSetWindowLevel(SLConnectionID cid, SLWindowID wid, int32_t level);
+extern int32_t SLSGetWindowLevel(SLConnectionID cid, SLWindowID wid, int32_t *outLevel);
+/// Drawing surface for one of our own windows. Returns a retained CGContext.
+extern CGContextRef SLWindowContextCreate(SLConnectionID cid, SLWindowID wid, CFDictionaryRef options) CF_RETURNS_RETAINED;
+
+// Region helpers live in CoreGraphics, not SkyLight, and are in no public
+// header. Only BorderShim.h calls them; see there for why.
+extern int32_t CGSNewRegionWithRectList(const CGRect *rects, int count, CFTypeRef *outRegion);
+extern int32_t CGSReleaseRegion(CFTypeRef region);
+
+#include "BorderShim.h"
 #include "AXBridge.h"

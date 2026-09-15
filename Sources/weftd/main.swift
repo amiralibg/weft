@@ -586,6 +586,7 @@ final class Daemon: @unchecked Sendable {
         // app IPC — and the applier holds its own latest-wins queue for the
         // AX size writes, which are the only part an app can be slow at.
         applier.applyDragFrames(frames: frames, pids: allPids())
+        if bordersBridge.drawsBorders { bordersBridge.renderer.move(frames) }
     }
 
     /// Run the full frame-set protocol over the drag's final geometry.
@@ -617,7 +618,8 @@ final class Daemon: @unchecked Sendable {
     /// every apply, is the kind of thing that turns into lag.
     private func refreshDividerZones() {
         let cfg = currentConfig().general
-        guard cfg.mouseBorderResize else {
+        let wantBorders = bordersBridge.drawsBorders
+        guard cfg.mouseBorderResize || wantBorders else {
             dividerLock.withLock {
                 dividerZones = []
                 stackPeekZones = []
@@ -629,6 +631,10 @@ final class Daemon: @unchecked Sendable {
         let config = cfg.asTilingConfig()
         var all: [Divider] = []
         var peeks: [StackPeek] = []
+        // From the same numbers the apply just used. A border process learns
+        // a window moved after the fact and reads the geometry back, which is
+        // why its borders trail the window.
+        var borderFrames: [WindowID: Frame] = [:]
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
         let sp = readSpaces()
@@ -644,11 +650,18 @@ final class Daemon: @unchecked Sendable {
                 grabbable = tree.fullscreen == nil
                 frames = WeftCore.layout(tree, in: screen, config: config)
                 peeks += stackPeeks(in: tree, frames: frames)
+                if wantBorders {
+                    // Stack members behind the front one have a slot and a
+                    // peek strip, but no border of their own.
+                    let hidden = hiddenStackMembers(in: tree)
+                    for (wid, frame) in frames where !hidden.contains(wid) { borderFrames[wid] = frame }
+                }
             case .float(let fl):
                 grabbable = false
                 // A float space has no computed geometry — the windows are
                 // wherever the user put them, so read it.
                 frames = liveFrames(of: fl.windows)
+                if wantBorders { borderFrames.merge(frames) { current, _ in current } }
             }
             if grabbable && cfg.mouseBorderResize {
                 all += dividers(in: frames, innerGap: cfg.innerGap)
@@ -661,6 +674,17 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
         input.updateStackZones(clickablePeeks.map(\.rect))
+        if wantBorders {
+            // Only windows in a layout, which is what keeps popovers,
+            // Spotlight and every other transient panel border-free with no
+            // heuristic at all. The active border goes where macOS says focus
+            // is: a float no layout owns gets none, rather than the last tile
+            // keeping a highlight it no longer has.
+            let system = systemFocusLock.withLock { systemFocusLocked }
+            let focus = system.map { borderFrames[$0] != nil ? $0 : nil }
+                ?? sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
+            bordersBridge.renderer.update(frames: borderFrames, focused: focus)
+        }
     }
 
     /// Keybind entry point. Returns immediately (tap-thread safe); the command
@@ -793,6 +817,8 @@ final class Daemon: @unchecked Sendable {
     /// information the daemon already has.
     private func noteFocusedWindow(_ wid: WindowID) {
         systemFocusLock.withLock { systemFocusLocked = wid }
+        // A recolour, or the one border moving over: no layout pass needed.
+        if bordersBridge.drawsBorders { bordersBridge.renderer.setFocus(wid) }
         updateSpaces { sp in
             for sid in sp.visibleSpaces where sp.layouts[sid]?.windows.contains(wid) == true {
                 sp.focusedDisplay = sp.displayBySpace[sid]
@@ -857,6 +883,9 @@ final class Daemon: @unchecked Sendable {
         let now = SpaceControl.currentSpaceByDisplay()
         actedSpacesLock.withLock { actedSpacesLocked = now }
         bus.emit(DaemonEvent(kind: .spaceChanged))
+        // Borders are sticky, so the old desktop's would hang over the new
+        // one until the sweep below replaces them.
+        if bordersBridge.drawsBorders { bordersBridge.renderer.clear() }
         syncFromSnapshot()
     }
 
@@ -1614,9 +1643,13 @@ final class Daemon: @unchecked Sendable {
             // tiling-WM feedback loop, §11 risk 7). Drop them; a genuine user
             // drag settles first and THEN retiles once (trailing edge), so we
             // never fight the hand mid-drag.
-            if let actual = WorldReader.frame(of: wid),
-               applier.isEcho(wid: wid, frame: actual)
-            {
+            let actual = WorldReader.frame(of: wid)
+            // Before the echo check: an echo that landed a few points off its
+            // target (a terminal rounding to cells) is where the window is.
+            if let actual, bordersBridge.drawsBorders {
+                bordersBridge.renderer.observe(wid, actual: actual)
+            }
+            if let actual, applier.isEcho(wid: wid, frame: actual) {
                 return
             }
             scheduleDragSettleApply()
@@ -1692,6 +1725,8 @@ final class Daemon: @unchecked Sendable {
             // layout sized to a screen that no longer exists, and the sweep
             // below computes frames from these rects.
             refreshScreens()
+            // Scale factors and geometry both changed under every border.
+            bordersBridge.renderer.displaysChanged()
             bus.emit(DaemonEvent(kind: .displayChanged))
             syncFromSnapshot()
         }
@@ -2144,10 +2179,11 @@ final class Daemon: @unchecked Sendable {
                     }
                     if let previous, previous != sid { s.recentSpace = previous }
                 }
-                // SA switch is instant (no 250ms animation) — safe to tile + focus now.
+                // Instant either way (weft-sa or the Dock swipe), and verified
+                // landed — safe to tile + focus now.
                 applySpaceLayout(sid, stealFocus: true)
                 bus.emit(stateChangedEvent())
-                return IPCResponse(ok: true, output: "switching to \(label) (instant via scripting addition)")
+                return IPCResponse(ok: true, output: "switched to \(label)")
             }
             guard let number = sp.ordinal(of: sid) else {
                 return IPCResponse(ok: false, error: "space \(sid) is not on any display")
@@ -2156,7 +2192,7 @@ final class Daemon: @unchecked Sendable {
                 return IPCResponse(
                     ok: false,
                     error: "space '\(label)' is desktop #\(number); the keystroke fallback only covers 1-9. "
-                        + "Load the scripting addition (sudo yabai --load-sa, or weft's own) for instant switching to any desktop."
+                        + "weft's Dock swipe reaches every desktop on macOS 26.6 or later."
                 )
             }
             // Say it before posting the key rather than after. ⌃N is a
@@ -2169,12 +2205,13 @@ final class Daemon: @unchecked Sendable {
                 return IPCResponse(
                     ok: false,
                     error: "cannot switch to '\(label)': "
-                        + (ScriptingAddition.isAvailable() && !ScriptingAddition.supportsSpaceFocus()
-                            ? "the scripting addition in Dock does not support this macOS release, and "
-                            : "there is no scripting addition, and ")
-                        + "'Switch to Desktop \(number)' is off, so weft has nothing to switch with. "
-                        + "Turn it on in System Settings → Keyboard → Keyboard Shortcuts → "
-                        + "Mission Control → Mission Control, or load the scripting addition."
+                        + (DockSwipe.isSupported
+                            ? "the Dock swipe did not land, and "
+                            : "this macOS release does not take weft's Dock swipe (26.6 or later does), and ")
+                        + "'Switch to Desktop \(number)' is off, so weft has nothing else to switch with. "
+                        + (AXIsProcessTrusted()
+                            ? "Turn it on in System Settings → Keyboard → Keyboard Shortcuts → Mission Control."
+                            : "Grant weftd Accessibility: both ways of switching post events, which needs it.")
                 )
             }
             updateSpaces { s in
@@ -2189,7 +2226,7 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(
                 ok: false,
                 error: "ctrl+\(number) did not switch to '\(label)'. Enable System Settings → Keyboard → "
-                    + "Shortcuts → Mission Control → 'Switch to Desktop \(number)', or load the scripting addition."
+                    + "Shortcuts → Mission Control → 'Switch to Desktop \(number)'."
             )
         case .moveWindow(let target, let widOpt):
             guard let sid = sp.resolveSpace(target) else {
@@ -2401,7 +2438,7 @@ final class Daemon: @unchecked Sendable {
             }
             return IPCResponse(ok: true, output: "focusing \(bundleID) (space switch + raise)")
         } else {
-            return IPCResponse(ok: false, error: "cannot switch to space for \(bundleID) (needs weft-sa)")
+            return IPCResponse(ok: false, error: "cannot switch to the desktop holding \(bundleID)")
         }
     }
 

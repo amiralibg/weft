@@ -126,8 +126,19 @@ public struct SketchybarIntegrationConfig: Sendable, Equatable {
     }
 }
 
+/// Who draws the borders.
+public enum BordersBackend: String, Sendable, Equatable {
+    /// Weft, in weftd: no second process, and drawn from the frames weft is
+    /// applying, so a border never trails its window.
+    case native
+    /// JankyBorders, for anyone who wants its extras (`gradient(...)`,
+    /// `blacklist`, `background_color`). A program weft does not install.
+    case janky
+}
+
 public struct BordersIntegrationConfig: Sendable, Equatable {
     public var enabled: Bool
+    public var backend: BordersBackend
     public var args: [String]
     public var supervise: Bool
     public var activeColor: [String: String]
@@ -150,6 +161,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
 
     public init(
         enabled: Bool = false,
+        backend: BordersBackend = .native,
         args: [String] = [],
         supervise: Bool = true,
         activeColor: [String: String] = [:],
@@ -161,6 +173,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         showInactive: Bool = true
     ) {
         self.enabled = enabled
+        self.backend = backend
         self.args = args
         self.supervise = supervise
         self.activeColor = activeColor
@@ -656,21 +669,10 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 integrations.borders.supervise = b
             case "backend":
-                // Removed in 0.7.4: the in-process renderer is gone and
-                // JankyBorders is the only backend. The key is still accepted
-                // so an existing weft.toml keeps loading.
-                guard case .string(let sv) = v else { throw err(path, "expected string") }
-                guard sv == "native" || sv == "janky" else {
+                guard case .string(let sv) = v, let backend = BordersBackend(rawValue: sv) else {
                     throw err(path, "expected native|janky")
                 }
-                if sv == "native" {
-                    warnings.append(ConfigWarning(
-                        line: doc.lines[path] ?? 0,
-                        message: "[integrations.borders] backend = \"native\" was removed in 0.7.4 "
-                            + "(it cost ~16pp of GPU) — using JankyBorders. "
-                            + "Install it with: brew install FelixKratz/formulae/borders"
-                    ))
-                }
+                integrations.borders.backend = backend
             case "width":
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.width = d
@@ -681,16 +683,12 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 }
                 integrations.borders.style = sv
             case "radius":
-                // No longer emitted: JankyBorders has no numeric radius, and
-                // passing one made it reject the whole invocation. Still
-                // parsed, and read as `style` (see `resolvedStyle`).
+                // Weft's renderer draws it as written. JankyBorders has no
+                // numeric radius — passing one made it reject the whole
+                // invocation — so there it is read as `style` instead, and
+                // the warning below says so.
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.radius = d
-                warnings.append(ConfigWarning(
-                    line: doc.lines[path] ?? 0,
-                    message: "[integrations.borders] radius is not something JankyBorders can draw — "
-                        + "using style = \"\(d <= 0 ? "square" : "round")\". Set `style` instead."
-                ))
             case "inactive-color":
                 guard case .string(let sv) = v else { throw err(path, "expected string hex") }
                 integrations.borders.inactiveColor = sv
@@ -724,6 +722,17 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             default:
                 throw err(path, "unknown key")
             }
+        }
+        // After the loop: whether `radius` means anything depends on
+        // `backend`, which may come after it in the file.
+        let borders = integrations.borders
+        if borders.backend == .janky, let radius = borders.radius {
+            let path = "integrations.borders.radius"
+            warnings.append(ConfigWarning(
+                line: doc.lines[path] ?? 0,
+                message: "[integrations.borders] radius is not something JankyBorders can draw — "
+                    + "using style = \"\(radius <= 0 ? "square" : "round")\". Set `style` instead."
+            ))
         }
     }
 

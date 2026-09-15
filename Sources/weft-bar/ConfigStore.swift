@@ -92,6 +92,8 @@ final class ConfigStore: ObservableObject {
 
     // Integrations
     @Published var bordersEnabled = false
+    /// `native` (weft draws them) or `janky` (JankyBorders does).
+    @Published var bordersBackend = "native"
     @Published var bordersWidth = 2.0
     /// JankyBorders' `style`: `round` follows each window's own corners,
     /// `square` squares them off. It replaced a "Corner radius" slider that
@@ -195,6 +197,7 @@ final class ConfigStore: ObservableObject {
     private func readIntegrations() {
         let b = document.firstIndex(ofHeader: "[integrations.borders]").map { document.sections[$0] }
         bordersEnabled = b?.bool("enabled") ?? false
+        bordersBackend = b?.string("backend") == "janky" ? "janky" : "native"
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 2
@@ -390,13 +393,17 @@ final class ConfigStore: ObservableObject {
             var s = document.sections[i]
             s.set("enabled", bool: bordersEnabled)
             s.set("supervise", bool: bordersSupervise)
-            // Removed in 0.7.4. Saving Settings migrates the file off it.
-            s.remove("backend")
+            // Written only when it is not the default, so a file that never
+            // chose keeps following it.
+            if bordersBackend == "janky" {
+                s.set("backend", string: "janky")
+            } else {
+                s.remove("backend")
+            }
             s.set("width", double: bordersWidth)
             s.set("style", string: bordersStyle)
-            // Removed along with the slider that wrote it: a `radius=` in
-            // the argument list makes borders exit before it draws anything.
-            s.remove("radius")
+            // `radius` is left as the file has it: weft's renderer draws it,
+            // and weftd never hands it to JankyBorders.
             if activeColorEdited {
                 s.setRaw(
                     "active-color",

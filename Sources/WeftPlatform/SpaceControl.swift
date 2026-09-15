@@ -111,20 +111,24 @@ public enum SpaceControl {
         return CFUUIDCreateString(nil, unmanaged.takeRetainedValue()) as String?
     }
 
-    // MARK: - Space Focus (Instant via SA or degraded via ctrl+N)
+    // MARK: - Space Focus (weft-sa, else weft's own Dock swipe, else ctrl+N)
 
-    /// Instantly switch focus to space `sid` without animation (via SA).
+    /// Switch to space `sid`, instantly wherever this Mac allows it.
+    ///
+    /// weft-sa first when it is loaded and its Dock hooks resolved; otherwise
+    /// weft's own synthetic Dock swipe, which needs neither SIP off nor an
+    /// addition. The ⌃N keystroke is the caller's last resort, not this one's.
     ///
     /// Returns true **only if the WindowServer actually reports `sid` as
-    /// current afterwards**. The scripting addition acknowledges a write
-    /// whether or not it acted on it — and an unrelated `yabai-sa` socket
-    /// answers on the same path — so trusting the send is how "alt-3 does
-    /// nothing but weft thinks it switched" happened: the daemon retiled a
-    /// space that was never brought to the front. Verify, then report.
+    /// current afterwards**. An addition acknowledges a write whether or not
+    /// it acted on it, and a swipe Dock refused looks exactly like one it
+    /// took, so trusting either is how "alt-3 does nothing but weft thinks it
+    /// switched" happened: the daemon retiled a space that was never brought
+    /// to the front. Verify, then report.
     @discardableResult
     public static func focusSpace(_ sid: SpaceID) -> Bool {
-        guard ScriptingAddition.focusSpace(sid) else { return false }
-        return waitForCurrentSpace(sid)
+        if ScriptingAddition.focusSpace(sid), waitForCurrentSpace(sid) { return true }
+        return DockSwipe.focusSpace(sid)
     }
 
     /// True once any display reports `sid` as its current space. The Dock
@@ -226,10 +230,11 @@ public enum SpaceControl {
         return on
     }
 
-    /// True when `space focus` has *some* way to switch desktops: the
-    /// scripting addition, or at least one Mission Control shortcut.
+    /// True when `space focus` has *some* way to switch desktops: weft-sa,
+    /// weft's Dock swipe, or at least one Mission Control shortcut.
     public static func canFocusSpaces() -> Bool {
-        ScriptingAddition.supportsSpaceFocus() || !missionControlSwitchShortcuts().isEmpty
+        ScriptingAddition.supportsSpaceFocus() || DockSwipe.isSupported
+            || !missionControlSwitchShortcuts().isEmpty
     }
 
     /// Focus a space by its 1-based Mission Control number via ctrl+N.
@@ -290,16 +295,24 @@ public struct PlatformCapability: Codable, Sendable {
     static func keystrokeNote() -> String {
         let on = SpaceControl.missionControlSwitchShortcuts().sorted()
         guard !on.isEmpty else {
-            let addition = ScriptingAddition.isAvailable()
-                ? "the scripting addition lacks its Dock spaces capability"
-                : "no scripting addition is active"
-            return "unavailable: \(addition), and System Settings → Keyboard → Shortcuts "
-                + "→ Mission Control → 'Switch to Desktop N' is off, so the ⌃N fallback reaches "
-                + "nothing. Space switching will not work until one of the two paths is restored."
+            return "unavailable: this macOS release does not take weft's Dock swipe (26.6 or later "
+                + "does), weft-sa is not loaded, and System Settings → Keyboard → Shortcuts → "
+                + "Mission Control → 'Switch to Desktop N' is off, so the ⌃N fallback reaches nothing."
         }
         let covered = on.map(String.init).joined(separator: ", ")
         return "degraded: ⌃N keystroke, ~250ms animation; desktops \(covered) only "
-            + "(the rest need 'Switch to Desktop N' enabled, or the scripting addition)"
+            + "(the rest need 'Switch to Desktop N' enabled)"
+    }
+
+    /// How `space focus` switches on this Mac, best first.
+    static var focus: (available: Bool, note: String) {
+        if ScriptingAddition.supportsSpaceFocus() {
+            return (true, "instant, via weft-sa")
+        }
+        if DockSwipe.isSupported {
+            return (true, "instant, via weft's Dock swipe (no scripting addition, SIP on)")
+        }
+        return (!SpaceControl.missionControlSwitchShortcuts().isEmpty, keystrokeNote())
     }
 
     /// Not an SA gap: the symbol the compat-id sequence needs is gone from
@@ -310,20 +323,17 @@ public struct PlatformCapability: Codable, Sendable {
         + "half missing, and weft-sa would not change that. Move the windows instead."
 
     public static var current: PlatformCapability {
+        let focus = Self.focus
         if ScriptingAddition.isAvailable() {
-            let instantFocus = ScriptingAddition.supportsSpaceFocus()
             return PlatformCapability(
                 moveWindowToSpace: true,
-                moveWindowToSpaceNote: "enabled via scripting addition (instant, non-activating)",
+                moveWindowToSpaceNote: "enabled via weft-sa (instant, non-activating)",
                 sticky: true,
-                stickyNote: "enabled via scripting addition",
+                stickyNote: "enabled via weft-sa",
                 orderWindow: true,
-                orderWindowNote: "enabled via scripting addition",
-                focusSpaceKeystroke: instantFocus
-                    || !SpaceControl.missionControlSwitchShortcuts().isEmpty,
-                focusSpaceKeystrokeNote: instantFocus
-                    ? "instant space switching via scripting addition (animation bypassed)"
-                    : Self.keystrokeNote(),
+                orderWindowNote: "enabled via weft-sa",
+                focusSpaceKeystroke: focus.available,
+                focusSpaceKeystrokeNote: focus.note,
                 moveSpaceToDisplay: false,
                 moveSpaceToDisplayNote: Self.spaceToDisplayNote
             )
@@ -335,8 +345,8 @@ public struct PlatformCapability: Codable, Sendable {
             stickyNote: "SLSSetWindowTags sticky bit silently ignored (2026-09-04 probe) — needs weft-sa",
             orderWindow: false,
             orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe) — needs weft-sa",
-            focusSpaceKeystroke: !SpaceControl.missionControlSwitchShortcuts().isEmpty,
-            focusSpaceKeystrokeNote: Self.keystrokeNote(),
+            focusSpaceKeystroke: focus.available,
+            focusSpaceKeystrokeNote: focus.note,
             moveSpaceToDisplay: false,
             moveSpaceToDisplayNote: Self.spaceToDisplayNote
         )

@@ -507,21 +507,30 @@ Budget (unchanged, now met with ~150x headroom on the common verbs):
 
 ## 10. Integrations — JankyBorders + sketchybar
 
-**Decision: weft draws nothing.** No borders, no bar, no stack indicators, no overlay windows.
-Drawing means an `NSWindow` per decoration, a compositing pass on every layout change, and a
-whole class of z-order bugs.
+**Decision: weft draws borders, and nothing else.** No bar, no stack indicators, and never a
+window laid over another window's area.
 
-> This was violated between 0.6 and 0.7.3 by an in-process border renderer
-> (`WeftPlatform/BorderRenderer.swift`), and the violation cost exactly what this
-> paragraph predicted. Measured on an M4, five interleaved cycles per condition,
-> paired per cycle against weft-off: the native renderer cost **+15.8pp of GPU
-> utilisation (t=4.17)** and kept the GPU off idle entirely (median 21% against
-> 2%), while JankyBorders over the same harness cost **+5.1pp (t=1.02, not
-> significant)**. weftd also carried one full-window RGBA backing store per
-> visible window — 59.5MB of 80MB total footprint — to paint a few px of ring.
-> The renderer was removed in 0.7.4 and this decision stands as written.
-borders already does borders better, and sketchybar already does bars better. weft's job is to
-be the *authoritative, cheap, complete* source of state for both.
+> Between 0.6 and 0.7.3 weft drew borders with one full-window transparent overlay per window.
+> Measured on an M4, five interleaved cycles per condition, paired per cycle against weft-off,
+> it cost **+15.8pp of GPU utilisation (t=4.17)**, and weftd carried one full-window RGBA
+> backing store per visible window — 59.5MB of 80MB. It was removed in 0.7.4 for JankyBorders.
+>
+> The bisect then showed where the cost was: an overlay ordered in but never painted cost the
+> whole amount. It was the overlay's *area*, not drawing. So weft draws again, with no area to
+> speak of: a border is four strips and four corner pieces covering only the ring
+> (`WeftCore/BorderGeometry.swift`), opaque where the colour allows, moved by transaction and
+> repainted only when colour or size changes (`WeftPlatform/BorderRenderer.swift`).
+>
+> Measured on macOS 27.0 (M4, two windows, 5 paired cycles, `spikes/bordercost.swift`):
+> full-window overlay **+24.2pp** (t=3.29, +154MB); one window shaped to the ring **+13.1pp**
+> (t=3.28, +154MB) — the compositor and the backing store follow a window's bounds, not its
+> shape, so shaping does not help; JankyBorders **+14.2pp** (t=3.86); strips and corners
+> **+4.8pp** (t=0.82, not significant, +4.9MB). A second run of the shipped renderer put it at
+> +4 to +8pp against JankyBorders' +14 to +22pp whenever the apps underneath were drawing, and
+> both at zero when nothing was. The runs are noisy; the order is consistent across both.
+
+sketchybar already does bars better. weft's job is to be the *authoritative, cheap, complete*
+source of state for it, and for JankyBorders when `backend = "janky"`.
 
 That only works if the state weft publishes is rich enough that neither tool ever has to ask a
 follow-up question. Today your sketchybar plugins would have to shell out to `yabai -m query`
