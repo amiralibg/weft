@@ -216,6 +216,101 @@ one after another.
 
 ---
 
+## S8 — moving a window to another desktop with SIP on: **the API refuses, the user gesture works**
+
+Measured 2026-09-15, macOS 27.0 (26A428), arm64. Single display, 7 desktops, current 5.
+Harness: `spacesip.swift` (16 probes, one subprocess each) and `dragmove.swift`.
+
+S3 concluded weft needed a scripting addition from two probes. This asked the same
+question sixteen more ways before accepting the answer.
+
+### Every SkyLight route refuses an ordinary connection
+
+Each probe acted on a window belonging to a disposable helper *process* — another
+connection, another PSN, exactly as Safari's window is — and was verified by
+re-reading `SLSCopySpacesForWindows`, never by return code.
+
+| Family | Calls tried | Result |
+| --- | --- | --- |
+| Direct | `SLSMoveWindowsToManagedSpace`, `SLSAddWindowsToSpaces`+`SLSRemoveWindowsFromSpaces`, `SLSSpaceAddWindowsAndRemoveFromSpaces`, `SLSReassociateWindowsSpacesByGeometry` | no movement |
+| Owner connection | the same, passing `SLSGetWindowOwner`'s cid instead of ours | no movement |
+| Transactions | `SLSTransactionMoveWindowsToManagedSpace`, `…AddWindowToSpaceAndRemoveFromSpaces`, `…BatchReassociateWindowsToSpace` | no movement |
+| Space ownership | `SLSSpaceAddOwner` + `SLSSpaceSetOwners`, then move | no movement |
+| Drag pipeline | `SLSPackagesAddWindowToDraggingSpace` → `…AssignDraggedWindowToDestinationSpace` → `…Remove…` | no movement |
+| Per-process | `SLSProcessAssignToSpace`, `SLSProcessAssignToAllSpaces` | no movement |
+| Sticky | `SLSSetWindowTags`, `SLSTransactionSetWindowTags`, `SLSAddWindowsToSpaces` over every desktop | tag never set |
+
+Three results worth more than the verdict:
+
+1. **`rc = 0` is a lie in this area.** `SLSSetWindowTags` and both `SLSProcessAssignTo…`
+   calls return `kCGErrorSuccess` and do nothing. `SLSDesktopTagBitModificationIsSupported`
+   returns **true** while the tag is dropped — it reports the feature existing, not the
+   caller being allowed. Verify by re-reading; never by rc. (Same lesson as S6 finding 2.)
+2. **`SLSSetWindowListWorkspace` returns 1006, `kCGErrorNotImplemented`.** The pre-Spaces
+   workspace API is a dead stub on 27, not a permission refusal. It is exported and gone.
+3. **Several of these return void.** A first pass read `rc` from them and got `12255232`,
+   `19857408`, `0xBB0000`-shaped garbage — an uninitialised `x0`, not an error code. Any
+   conclusion drawn from those numbers would have been invented.
+
+### A held mouse blocks a synthetic swipe; a bound shortcut goes through
+
+If macOS will not move a window by API, the remaining SIP-on route is the gesture a
+person uses: hold the window, change desktop, let go.
+
+| Step | Result |
+| --- | --- |
+| Synthetic grab of a title bar actually drags the window | **yes** — window moved (300, 460) → (355, 497), the exact offset requested |
+| Dock swipe with nothing held | **lands in ~20 ms** |
+| Dock swipe while the window is held | **never lands** — with weft's own copy *and* with the shipped `dockswipe` binary, so it is the hold, not the implementation |
+| Space shortcut with nothing held | **switches** |
+| Space shortcut while the window is held | **switches, and the window travels with it** — desktop 5 → 6, window reported on [6] |
+
+So Dock ignores a *gesture* while a drag session owns the event stream, but a bound
+keyboard shortcut still reaches it, and the dragged window follows exactly as it does
+for a human.
+
+**The shortcut cannot be assumed.** "Move left/right a space" are symbolic hotkeys 79
+and 81; on this Mac they are remapped to ⌘⌥H / ⌘⌥L, and a posted ⌃→ did nothing. An
+implementation has to read `com.apple.symbolichotkeys` the way
+`SpaceControl.missionControlSwitchShortcuts()` already does for ⌃1–⌃9 (118–126, all
+`enabled = 0` here) and use whatever is actually bound — or report that none is.
+
+### Sticky has a different SIP-on route
+
+Dock's own per-application assignment is reachable through Accessibility: the Dock item's
+`AXShowMenu` yields an `Options` submenu whose items are exactly
+`Assign To`, `All Desktops`, `This Desktop`, `None`. Per-application rather than
+per-window, and it persists — untested end to end at the time of writing.
+
+### Harness caveats, recorded because they nearly became findings
+
+- The first run judged per-process assignment against a window that already existed.
+  Those calls govern where an application's *next* window opens; the rewrite has the
+  helper open a second window after the call and measures that one.
+- A probe in the ownership or transaction family moved the current desktop from 5 to 6
+  mid-run. Which one is unattributed — re-running to find out costs another desktop
+  switch — so treat `SLSSpaceAddOwner`/`SLSSetOwners` as having side effects.
+- `dockswipe list` read immediately after a swipe reports the pre-commit desktop. Reads
+  need a settle of ~1 s, or a landing wait, before they mean anything.
+
+### Confirmed in weft's own code
+
+`SpaceControl.moveWindowToSpace` → `DragMove`, run against a window the harness created:
+
+```
+window 1223 on [5]; moving to desktop 8
+capability: moveWindowToSpace=true
+returned true; window now on [8]
+user's desktop: started 5, now 5
+```
+
+Three desktops in one call, so the multi-press path works where it counts, and the user
+was left on the desktop they started on without the harness having to correct anything.
+The check ran from a temporary executable target rather than from `weftd`, because
+starting the daemon would have tiled every window on the machine to answer one question.
+
+---
+
 ## Design changes this forces
 
 1. **Discovery moves off AX entirely** (S0). WindowServer for enumeration, AX captured at
@@ -231,3 +326,9 @@ one after another.
    menu-bar popover never gets one, because it was never in a layout.
 7. **Multi-window moves go through one transaction** (S7), so a retile is one
    compositor frame rather than one per window.
+8. **`space move-window` and `sticky` do not need a scripting addition** (S8), and so
+   weft does not need one at all. Moving a window is hold + bound space shortcut +
+   release, read from the user's own symbolic hotkeys; sticky is Dock's per-application
+   "All Desktops" through Accessibility. Both work with SIP on, which retires weft-sa
+   before it was written — along with the Dock byte-pattern table §11 calls the largest
+   ongoing maintenance cost in the project.

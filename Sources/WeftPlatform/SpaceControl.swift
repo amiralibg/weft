@@ -145,12 +145,19 @@ public enum SpaceControl {
         return false
     }
 
-    // MARK: - Mutations (verified; false = needs weft-sa)
+    // MARK: - Mutations (verified by re-reading; false means nothing changed)
 
     /// Move a window to another space WITHOUT following it (S3 semantics).
     /// Verified by re-reading membership. False leaves nothing changed.
+    /// - Parameter allowDrag: whether to fall back to the drag route, which
+    ///   takes the screen over for a moment. True for anything the user just
+    ///   asked for; false for anything weft decided on its own — a rule firing
+    ///   because an app opened must not switch the desktop out from under
+    ///   someone who is typing. See `[general] follow-space-rules`.
     @discardableResult
-    public static func moveWindowToSpace(_ wid: WindowID, _ sid: SpaceID) -> Bool {
+    public static func moveWindowToSpace(
+        _ wid: WindowID, _ sid: SpaceID, allowDrag: Bool = true
+    ) -> Bool {
         if ScriptingAddition.moveWindowToSpace(wid, sid) {
             usleep(60_000)
             if spacesForWindow(wid).contains(sid) {
@@ -160,7 +167,17 @@ public enum SpaceControl {
         let arr = [NSNumber(value: wid)] as CFArray
         SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), arr, sid)
         usleep(150_000)
-        return spacesForWindow(wid).contains(sid)
+        if spacesForWindow(wid).contains(sid) { return true }
+        // Last, because it is the one that works and the one the user sees.
+        //
+        // Nothing above moves a window from an ordinary connection on macOS 27:
+        // sixteen SkyLight routes were tried and refused, three of them by
+        // returning kCGErrorSuccess and doing nothing (spikes/RESULTS.md §S8).
+        // What remains is the gesture a person uses — hold the window, press
+        // the bound "move a space" shortcut, let go — which costs two visible
+        // desktop changes and needs no scripting addition and no SIP change.
+        guard allowDrag else { return false }
+        return DragMove.moveWindow(wid, to: sid)
     }
 
     /// Sticky bit (1 << 11): window appears on every space. Verified by
@@ -338,13 +355,24 @@ public struct PlatformCapability: Codable, Sendable {
                 moveSpaceToDisplayNote: Self.spaceToDisplayNote
             )
         }
+        // Read once: it parses a preferences dictionary, and it is asked about
+        // twice below.
+        let drag = DragMove.isSupported
         return PlatformCapability(
-            moveWindowToSpace: false,
-            moveWindowToSpaceNote: "SLSMoveWindowsToManagedSpace silently ignored (2026-09-04 probe) — needs weft-sa",
+            moveWindowToSpace: drag,
+            moveWindowToSpaceNote: drag
+                ? "enabled with SIP on: weft holds the window and presses the bound 'move a space' "
+                    + "shortcut, so the desktop visibly changes and changes back"
+                : "SLSMoveWindowsToManagedSpace is silently ignored from an ordinary connection, and "
+                    + "no 'Move left/right a space' shortcut is bound to carry a held window instead "
+                    + "(System Settings → Keyboard → Keyboard Shortcuts → Mission Control)",
             sticky: false,
-            stickyNote: "SLSSetWindowTags sticky bit silently ignored (2026-09-04 probe) — needs weft-sa",
+            stickyNote: "SLSSetWindowTags' sticky bit is accepted and dropped (rc=0, tag never set — "
+                + "2026-09-15 probe). Dock's per-application 'All Desktops' is reachable through "
+                + "Accessibility and is the likely route, but it is not verified, so weft does not "
+                + "claim it",
             orderWindow: false,
-            orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe) — needs weft-sa",
+            orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe)",
             focusSpaceKeystroke: focus.available,
             focusSpaceKeystrokeNote: focus.note,
             moveSpaceToDisplay: false,

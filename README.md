@@ -188,23 +188,40 @@ weftctl doctor          # the same checks, in a terminal
 
 ### System Integrity Protection
 
-Weft works with SIP on. Two features don't, and they are the only reason SIP
-ever comes up:
+**Weft never asks you to change it.** Nothing weft does needs SIP off, and weft
+loads no code into any other process.
 
-| Feature | SIP |
+| Feature | With SIP on |
 |---|---|
-| Tiling, focus, shortcuts, rules, stacks, borders, the switcher | On |
-| Switching desktops (`space focus`) | On — weft's own Dock swipe, macOS 26.6 or later |
-| Sending a window to another desktop without following it (`space move-window`, `alt-shift-1…5` in the shipped config, a rule's `space =`) | Partly off, with weft-sa |
-| Keeping a window on every desktop (`sticky`) | Partly off, with weft-sa |
+| Tiling, focus, shortcuts, rules, stacks, borders, the switcher | Yes |
+| Switching desktops (`space focus`) | Yes — instant, weft's own Dock swipe, macOS 26.6 or later |
+| Sending a window to another desktop (`space move-window`, `alt-shift-1…5` in the shipped config) | Yes — see below |
+| A rule's `space = "…"` | Yes, opt-in: `follow-space-rules = true` under `[general]` |
+| Keeping a window on every desktop (`sticky`) | No — unavailable at any SIP setting |
 
-Only Dock can put another app's window on a different desktop. weft-sa is
-weft's own code running inside Dock to ask it to, and macOS will not load code
-into Dock while SIP is fully on.
+This was going to need a scripting addition injected into Dock, the way yabai
+does it: SIP partly off, `sudo`, and a table of Dock byte patterns to re-derive
+on most macOS releases. It turned out not to. macOS 27 refuses every SkyLight
+route for moving another app's window between desktops — sixteen were tried,
+and three of them return success while doing nothing — but it does not refuse
+the gesture a person uses. Weft holds the window by its title bar, presses your
+"move a space" shortcut once per desktop of travel, and lets go. Accessibility,
+which weft already needs, is the only requirement.
 
-**weft-sa is not released yet.** Until it is, those two features report that
-they are unavailable, and there is no reason to change SIP for weft. Weft does
-not use yabai's scripting addition, even when one is loaded.
+The cost is that you see it happen: the screen changes desktop and changes back,
+about a second per desktop travelled. That is fine for a command you just typed,
+so `space move-window` always does it. It is not fine unprompted — a rule fires
+when an app opens, which may be while you are typing in something else — so a
+rule's `space =` does nothing until you set `follow-space-rules = true`.
+
+Weft reads whichever keys you have bound to "Move left/right a space" rather
+than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
+reported instead of silently doing nothing. `weftctl doctor` says which.
+
+Sticky has no route at all: the WindowServer takes the "on every desktop" tag
+from an ordinary connection and drops it. Weft reports that rather than
+pretending. Weft does not use yabai's scripting addition, even when one is
+loaded.
 
 ## Default keybindings
 

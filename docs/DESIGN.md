@@ -5,11 +5,14 @@ A tiling window manager for macOS.
 *Weft* is the thread a loom runs horizontally across the vertical warp. Woven cloth is panes
 interlocking by construction.
 
-Binaries: daemon `weftd`, CLI `weftctl`, scripting addition `weft-sa`.
+Binaries: daemon `weftd`, CLI `weftctl`, menu-bar app `WeftBar`. No scripting addition — see §13.4.
 Config `~/.config/weft/weft.toml`. Socket `$TMPDIR/weft-$USER.sock`.
 
-Target: macOS 26.5.2, arm64, Swift 6.2. SIP partially disabled (already configured on this
-machine: Filesystem Protections off, Debugging Restrictions off, NVRAM Protections off).
+Target: macOS 26.5.2, arm64, Swift 6.2. **No SIP change required**, and none is used: weft
+acts on other apps' windows only through Accessibility and through SkyLight calls any process
+may make, and draws only into windows it owns. The development machine happens to have SIP
+partially disabled, which makes it the *worst* place to assume a capability — every privileged
+operation is therefore verified by re-reading state rather than by a return code.
 
 ## 1. Goals
 
@@ -108,7 +111,6 @@ The socket accept loop therefore runs on a background thread and `main` ends in 
 | `WeftIPC` | Swift | unix domain socket server, same command grammar as keybinds |
 | `weftd` | executable | daemon |
 | `weftctl` | executable | CLI |
-| `weft-sa` | C dylib | scripting addition payload injected into Dock |
 
 `WeftCore` is pure: layout is a function `(Tree, CGRect, Config) -> [WindowID: CGRect]`.
 That makes the entire layout engine unit-testable with no display, no permissions, no macOS
@@ -694,8 +696,10 @@ verifies against `SLSManagedDisplayGetCurrentSpace` and the keystroke fallback c
 reporting an actionable error (Mission Control shortcut disabled / SA not loaded) instead of a
 false success.
 
-Note weft has no `weft-sa` of its own yet; it drives `/tmp/yabai-sa_$USER.socket` when present.
-The opcode table matches yabai 7.1.25 (`SA_OPCODE_*` in `src/osax/common.h`).
+Superseded. weft no longer reads yabai's socket — when macOS 27 broke its Dock patterns, weft
+could do nothing but wait for someone else's release — and weft ships no addition of its own.
+The client remains for a socket that will not normally exist; everything it used to be needed
+for now has a route that works with SIP on (§13.10).
 
 ### 13.5 Space ordinals were sorted space ids
 
@@ -738,9 +742,12 @@ re-registered. Added `forget(keeping:)`, `forgetApp(pid:)` and `forgetWindow(_:)
 
 ### Still open
 
-- **No `weft-sa`.** Instant space switching, move-window-without-following and sticky all depend
-  on yabai's addition being loaded. Without it `space focus` degrades to the ctrl+N keystroke,
-  which covers desktops 1–9 only.
+- **Sticky.** The only gap left, and the only one with no known route: the WindowServer accepts
+  the "on every desktop" tag from an ordinary connection and drops it. Dock's per-application
+  "All Desktops" is reachable through Accessibility and the menu item does register as ticked,
+  but it is a policy rather than a retag and no behavioural check has confirmed it, so weft
+  reports sticky as unavailable instead of claiming it.
+  (Space switching and moving a window between desktops are both solved with SIP on — §13.10.)
 
 ---
 

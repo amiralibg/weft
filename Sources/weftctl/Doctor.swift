@@ -245,18 +245,30 @@ public enum Doctor {
             allOk = false
         }
 
-        // 3. weft-sa, weft's own scripting addition. Optional: it is what
-        // moves a window to another desktop without following it, and sticky.
-        if let (ver, attrib) = ScriptingAddition.handshake() {
-            print("[\u{2713}] weft-sa: loaded (version \(ver), attrib 0x\(String(attrib, radix: 16)))")
-            if !ScriptingAddition.supportsSpaceFocus() {
-                print("    Its Dock hooks did not resolve on this macOS build: it answers and does nothing.")
-            }
+        // 3. Moving a window to another desktop. No scripting addition, no SIP
+        // change: weft holds the window and presses the desktop shortcut, which
+        // is the only route macOS 27 still allows an ordinary process.
+        if DragMove.isSupported {
+            print("[\u{2713}] Moving a window to another desktop: available, with SIP on")
+            print("    weft holds the window and presses your 'move a space' shortcut, so the")
+            print("    screen changes desktop and changes back. A rule's `space =` does this only")
+            print("    with `follow-space-rules = true` under [general].")
+        } else if !AXIsProcessTrusted() {
+            print("[\u{2717}] Moving a window to another desktop: needs Accessibility")
+            allOk = false
         } else {
-            print("[\u{25CB}] weft-sa: not loaded — moving windows to other desktops and sticky are unavailable")
-            print("    weft-sa needs System Integrity Protection partly off, and is not released yet.")
-            print("    Everything else works with SIP on; there is no reason to change it for weft.")
+            print("[\u{2717}] Moving a window to another desktop: no 'move a space' shortcut is bound.")
+            print("    System Settings \u{2192} Keyboard \u{2192} Keyboard Shortcuts \u{2192} Mission Control")
+            print("    \u{2192} 'Move left a space' / 'Move right a space'. weft uses whichever keys")
+            print("    you have set there, so they do not have to be the defaults.")
+            allOk = false
         }
+
+        // Sticky: no verified route. Said plainly rather than blamed on a
+        // missing scripting addition, because weft is not going to ship one.
+        print("[\u{25CB}] Keeping a window on every desktop (sticky): unavailable")
+        print("    The SkyLight sticky tag is accepted and dropped from an ordinary connection.")
+        print("    Dock's per-application 'All Desktops' may be the route; it is not confirmed.")
 
         // Switching desktops: weft-sa when loaded, otherwise weft's own Dock
         // swipe, otherwise a ⌃N that reaches nothing unless the Mission

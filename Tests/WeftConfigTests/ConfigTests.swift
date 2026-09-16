@@ -338,6 +338,18 @@ import Testing
     #expect(throws: ConfigError.self) { try loadConfig("[integrations.borders]\nbackend = \"quartz\"") }
 }
 
+/// Honouring a rule's `space = "…"` means holding the window and switching
+/// desktops, which takes the screen over while the user is doing something
+/// else. It is the one option whose default is deliberately not the useful
+/// behaviour, so the default is pinned here.
+@Test func followSpaceRulesIsOffUntilAskedFor() throws {
+    #expect(try loadConfig("[general]\ninner-gap = 8").general.followSpaceRules == false)
+    #expect(try loadConfig("[general]\nfollow-space-rules = true").general.followSpaceRules)
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nfollow-space-rules = \"yes\"")
+    }
+}
+
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
 /// a fully transparent inactive colour rather than silently ignored.
 @Test func hidingInactiveBordersMakesThemTransparent() throws {

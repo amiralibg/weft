@@ -168,7 +168,26 @@ internals by byte-pattern scan and must be re-derived on most macOS releases.
         sending a window to another desktop without following it, and sticky.
         It needs SIP partly off, and the README and Settings say exactly that.
       - yabai's socket is no longer read, even when its addition is loaded.
-- [ ] Build weft-sa: loader, arm64e payload, Dock pattern table for 26 and 27.
+- [x] **Superseded (2026-09-16): weft-sa is not being built.** Before writing the
+      loader, the premise was retested — sixteen SkyLight routes for moving a
+      window and for sticky, all refused from an ordinary connection, three of
+      them returning `kCGErrorSuccess` and doing nothing (spikes/RESULTS.md §S8).
+      But the *user gesture* is not refused: hold the window, press the bound
+      "move a space" shortcut, let go, and the window travels. That is
+      `WeftPlatform/DragMove.swift`, it needs Accessibility and nothing else, and
+      it is verified moving a window three desktops and returning the user to
+      where they started. So the Dock byte-pattern table — named in §11 as the
+      largest ongoing maintenance cost in the project — is never written.
+      - Cost: the screen visibly changes desktop twice per move. For
+        `space move-window` that is the user's own command. For a rule's
+        `space =`, which fires unprompted when an app opens, it is opt-in behind
+        `[general] follow-space-rules`, off by default.
+- [ ] Sticky still has no verified route. Dock's per-application
+      "Options → Assign To → All Desktops" is reachable through Accessibility and
+      the menu item does register as checked, but it is a *policy*: it does not
+      retag an existing window, and no behavioural check has confirmed it yet.
+      `weftctl doctor` and the capability report say it is unavailable rather
+      than claiming it.
 
 ## Suggested order
 

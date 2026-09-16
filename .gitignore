@@ -7,8 +7,13 @@ build/
 *.dSYM/
 *.o
 
-# Compiled spike binaries (the .swift sources are the point, not the output)
-spikes/spike
+# Compiled spike binaries (the .swift sources are the point, not the output).
+# Listed as "everything except the sources", because each spike builds to a
+# binary named after its file and the list was already one name out of date.
+spikes/*
+!spikes/*.swift
+!spikes/*.md
+!spikes/build.sh
 
 # Xcode, if anyone opens the package in it
 DerivedData/

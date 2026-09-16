@@ -195,8 +195,10 @@ reserve = 0
 # regular expressions, so "Foo|Bar" matches either.
 #
 #   manage = false   leave the window completely alone — never tiled, never moved
-#   space = "..."    move it there when it opens (needs weft-sa for an
-#                    instant move; without it, it lands on next focus)
+#   space = "..."    move it there when it opens. Off unless you set
+#                    follow-space-rules = true under [general]: weft moves a
+#                    window by holding it and switching desktops, and doing
+#                    that unprompted takes the screen over while you type.
 #
 # Weft already floats anything that is not a real window on its own: a dialog
 # or popover (its AX subrole is not a standard window), a window the app

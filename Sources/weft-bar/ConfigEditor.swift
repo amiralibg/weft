@@ -1399,7 +1399,7 @@ private struct AdvancedPane: View {
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("Switching desktops works with System Integrity Protection on. Sending a window to another desktop without following it, and keeping a window on every desktop, need weft-sa, which only loads with SIP partly off. weft-sa isn't released yet, so there's no reason to change SIP for weft.")
+                Text("Weft never asks you to change System Integrity Protection. Switching desktops is instant. Sending a window to another desktop works by holding the window and pressing your “move a space” shortcut, so the screen changes desktop and changes back — bind that shortcut under Mission Control above. Keeping a window on every desktop isn’t available: macOS accepts the request from an ordinary app and ignores it.")
             }
 
             Section("Border drawing") {

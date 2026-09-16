@@ -11,7 +11,8 @@ public struct Rule: Sendable, Equatable {
     public var app: String?
     /// Regex on the window title, e.g. "Picture.in.Picture".
     public var title: String?
-    /// Target space label (move on creation; needs weft-sa until then).
+    /// Target space label, applied when the window opens. Honoured only with
+    /// `[general] follow-space-rules`, because the move takes the screen over.
     public var space: String?
     /// False = leave alone entirely (floats free, never tiled).
     public var manage: Bool?

@@ -51,6 +51,19 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
+    /// Whether a rule's `space = "…"` may take the screen over to place a
+    /// window.
+    ///
+    /// Off, and this is the one option where the default is not the useful
+    /// behaviour. Moving a window to another desktop means holding it and
+    /// pressing the desktop shortcut — the gesture a person uses — because
+    /// macOS 27 refuses every API for it from an ordinary connection
+    /// (spikes/RESULTS.md §S8). That is fine for `space move-window`, which you
+    /// just asked for and are watching. A rule fires when an app opens, which
+    /// can be while you are typing in something else, and having the desktop
+    /// switch twice underneath you is worse than the window landing in the
+    /// wrong place. Turn this on if you would rather have the placement.
+    public var followSpaceRules: Bool
     /// Bundle ids whose `AXEnhancedUserInterface` weft must leave alone.
     ///
     /// Chromium and Electron apps switch that attribute on the moment any
@@ -72,6 +85,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
+        followSpaceRules: Bool = false,
         enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
     ) {
@@ -85,6 +99,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
+        self.followSpaceRules = followSpaceRules
         self.enhancedUIExempt = enhancedUIExempt
         self.reserve = reserve
     }
@@ -431,6 +446,9 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "mouse-border-resize":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.mouseBorderResize = b
+            case "follow-space-rules":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                general.followSpaceRules = b
             case "mouse-follows-focus":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.mouseFollowsFocus = b

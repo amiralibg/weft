@@ -12,9 +12,11 @@ killall yabai skhd 2>/dev/null; sleep 1
 pgrep -fl "yabai|skhd"  # should print nothing
 ```
 
-If Dock was injected with yabai's scripting addition, log out/in once after
-`--uninstall-sa`. Weft works without SA (ctrl-number fallback); with SA
-(`weft-sa` / `yabai.osax` in Dock) you get instant space switches.
+Weft needs no scripting addition and no SIP change. Space switching is instant
+on its own (a synthetic Dock swipe), and moving a window to another desktop
+works by holding the window and pressing your "move a space" shortcut. If Dock
+still has yabai's addition injected from an earlier setup, log out/in once
+after `yabai --uninstall-sa`; weft will not use it either way.
 
 ## B. Build + install
 
@@ -218,7 +220,7 @@ weftctl query trace
 
 ```bash
 weftctl doctor
-grep -E "frame-set failed|auto-floating|rule cannot|needs weft-sa" /tmp/weftd.err.log | tail -n 30
+grep -E "frame-set failed|auto-floating|rule cannot|did not land" /tmp/weftd.err.log | tail -n 30
 weftctl query state > /tmp/weft-state.json  # attach
 ```
 

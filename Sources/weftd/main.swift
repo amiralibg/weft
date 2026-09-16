@@ -2317,14 +2317,26 @@ final class Daemon: @unchecked Sendable {
         // refused the move on a desktop the window was already on. Ask the
         // WindowServer where the window is; only fall back to the layout when
         // it has nothing to say.
-        if !currentLayout().windows.contains(wid), !ScriptingAddition.isAvailable() {
+        // A window on another desktop used to be refused outright: nothing
+        // could move it without a scripting addition. The drag route can — it
+        // goes to the window's desktop, carries it, and comes back — so the
+        // refusal now applies only when that route is unavailable too.
+        if !currentLayout().windows.contains(wid), !DragMove.isSupported {
             let onCurrent = currentSID().map { SpaceControl.spacesForWindow(wid).contains($0) } ?? false
             if !onCurrent {
-                return IPCResponse(ok: false, error: "wid \(wid) is not on the current space (needs weft-sa to move background windows)")
+                return IPCResponse(
+                    ok: false,
+                    error: "wid \(wid) is not on the current space, and weft has no way to move a "
+                        + "background window: bind 'Move left/right a space' in System Settings → "
+                        + "Keyboard → Keyboard Shortcuts → Mission Control")
             }
         }
         guard SpaceControl.moveWindowToSpace(wid, sid) else {
-            return IPCResponse(ok: false, error: "WindowServer ignored the move (needs weft-sa) — nothing changed")
+            return IPCResponse(
+                ok: false,
+                error: "the move did not land — nothing changed. weft moves a window by holding it "
+                    + "and pressing your 'move a space' shortcut; check it is bound in System "
+                    + "Settings → Keyboard → Keyboard Shortcuts → Mission Control")
         }
         // Re-read display geometry before sizing anything against it. macOS
         // puts the menu bar on whichever display has focus, so the other
@@ -2459,7 +2471,10 @@ final class Daemon: @unchecked Sendable {
         case .toggle: on = SpaceControl.spacesForWindow(wid).count <= 1
         }
         guard SpaceControl.setSticky(wid, on) else {
-            return IPCResponse(ok: false, error: "WindowServer ignored sticky (needs weft-sa) — nothing changed")
+            return IPCResponse(
+                ok: false,
+                error: "sticky is unavailable: the WindowServer accepts the sticky tag from an "
+                    + "ordinary connection and drops it. Nothing changed.")
         }
         syncFromSnapshot()  // reconciles membership on every space
         return IPCResponse(ok: true, output: "sticky \(on ? "on" : "off") for \(wid)")
@@ -3397,11 +3412,24 @@ final class Daemon: @unchecked Sendable {
     private func attemptRuleMoveToSid(
         wid: WindowID, app: String, sid: SpaceID, label: String
     ) -> Bool {
-        if SpaceControl.moveWindowToSpace(wid, sid) {
+        // `allowDrag` is the whole difference between a rule and a command.
+        // The only route that actually moves a window on macOS 27 holds it and
+        // presses the desktop shortcut, so honouring a rule means the screen
+        // changes desktop twice — unprompted, because an app opened. That is
+        // opt-in; without it the rule reports honestly and leaves the window be.
+        let mayTakeOverTheScreen = currentConfig().general.followSpaceRules
+        if SpaceControl.moveWindowToSpace(wid, sid, allowDrag: mayTakeOverTheScreen) {
             fputs("weftd: rule moved \(app) (\(wid)) to \(label)\n", stderr)
             return true
         }
-        fputs("weftd: rule cannot place \(app) (\(wid)) on \(label) (needs weft-sa)\n", stderr)
+        fputs(
+            "weftd: rule cannot place \(app) (\(wid)) on \(label)"
+                + (mayTakeOverTheScreen
+                    ? "\n"
+                    : " — set follow-space-rules = true under [general] to let weft"
+                        + " hold the window and switch desktops to do it\n"),
+            stderr
+        )
         return false
     }
 
