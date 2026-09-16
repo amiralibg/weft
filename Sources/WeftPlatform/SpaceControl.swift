@@ -5,16 +5,28 @@ import Foundation
 import SkyLightShim
 import WeftCore
 
-/// M4: privileged window/space operations from a REGULAR connection.
+/// Privileged-looking window/space operations from an ORDINARY connection.
 ///
-/// Probe results (2026-09-04, macOS 26.5.2 — see M4 notes):
-/// - SLSMoveWindowsToManagedSpace: silently ignored (spacesFor unchanged).
-/// - SLSSetWindowTags sticky bit: silently ignored (rc=0, no effect).
+/// The WindowServer refuses all three, and two of them refuse dishonestly:
+/// - SLSMoveWindowsToManagedSpace: silently ignored (membership unchanged).
+/// - SLSSetWindowTags sticky bit: returns rc=0 and drops the tag.
 /// - SLSOrderWindow: rc=1000 (see AXApply).
-/// All three need a Dock-injected connection (weft-sa, M4-SA slice). Every
-/// mutating call below therefore VERIFIES via re-read and returns Bool —
-/// callers only change state on verified success, and report
-/// "needs weft-sa" otherwise. No silent no-ops, ever.
+///
+/// That used to read "all three need a Dock-injected connection". They do not,
+/// and weft ships no scripting addition:
+/// - Moving a window to another desktop is done by holding it and pressing the
+///   bound "move a space" shortcut (`DragMove`), which needs only
+///   Accessibility. Sixteen SkyLight routes were tried first and every one was
+///   refused — spikes/RESULTS.md §S8.
+/// - Sticky is macOS's own per-application setting (Dock → Options → All
+///   Desktops). weft does not implement a per-window version because there
+///   isn't one to implement.
+/// - Ordering another app's window remains unavailable.
+///
+/// Every mutating call below VERIFIES via re-read and returns Bool. That is not
+/// belt-and-braces: three APIs in this area return kCGErrorSuccess while doing
+/// nothing, and one predicate answers "supported" about a tag it then drops, so
+/// a return code here is evidence of nothing. No silent no-ops, ever.
 public enum SpaceControl {
     // MARK: - Reads (unprivileged, always work)
 

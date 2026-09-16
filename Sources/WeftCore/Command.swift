@@ -79,7 +79,9 @@ public enum SpaceCommand: Sendable, Equatable {
     /// Focus a space by label, sid, or 1-based ordinal.
     case focus(String)
     /// Move a window (default: focused) to a space without following it.
-    /// Verified; reports needs-weft-sa when the SLS call is ignored.
+    /// Verified by re-reading membership. Moves by holding the window and
+    /// pressing the bound "move a space" shortcut, so the screen visibly
+    /// changes desktop and changes back; fails honestly when none is bound.
     case moveWindow(String, WindowID?)
     /// Rename the current space (persists by ordinal).
     case label(String)
