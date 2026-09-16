@@ -24,6 +24,34 @@ public enum BorderGeometry {
         }
     }
 
+    /// How far a window may settle from the frame it was asked for and still
+    /// count as having honoured it. Two character cells of a large font.
+    public static let settleTolerance: Double = 40
+
+    /// Whether `actual` is `target` with a settle, or a different frame.
+    ///
+    /// An app can land a few points off what weft asked for — a terminal rounds
+    /// to whole character cells — and a border drawn around the request then
+    /// stands off the window by that much, so the renderer follows the window.
+    /// It must not follow a frame from *mid-flight*: a resize reports the old
+    /// size until it finishes, and accepting that recorded the survivor of a
+    /// closed split at its old half width against its new full-width target.
+    /// Because the recorded target is the current one, the substitution then
+    /// matched on every later pass and the border stayed half the width of its
+    /// window forever; arriving early instead, it drew one ring across two
+    /// windows. Both were the same bug, and both were reported as "the border
+    /// is around the wrong thing".
+    ///
+    /// Hundreds of points is not a rounding. It is a window that has not
+    /// finished moving, and the next layout pass is a better answer than a
+    /// guess at where it went.
+    public static func settles(_ actual: Frame, against target: Frame) -> Bool {
+        abs(actual.x - target.x) <= settleTolerance
+            && abs(actual.y - target.y) <= settleTolerance
+            && abs(actual.width - target.width) <= settleTolerance
+            && abs(actual.height - target.height) <= settleTolerance
+    }
+
     /// The rectangle the ring's outer edge follows: `width` points outside
     /// the window on every side, so the border never covers the window.
     public static func outer(of target: Frame, width: Double) -> Frame {

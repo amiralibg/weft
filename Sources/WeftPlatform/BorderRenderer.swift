@@ -157,7 +157,24 @@ public final class BorderRenderer: @unchecked Sendable {
     public func observe(_ wid: WindowID, actual: Frame) {
         let changed: Bool = lock.withLock {
             guard let current = wantedFrames[wid], !Self.close(current, actual) else { return false }
-            observed[wid] = (actual, lastTargets[wid] ?? current)
+            let target = lastTargets[wid] ?? current
+            // Only a settle, never a frame from mid-flight.
+            //
+            // This accepted anything the WindowServer reported, and a resize
+            // reports the window's *old* size until it finishes. So closing one
+            // of two tiled windows recorded the survivor at its old half-width
+            // against its new full-width target — and because the recorded
+            // target is the current one, `close(o.target, target)` then matched
+            // on every later pass and re-substituted the stale size forever.
+            // The border stayed half the width of its window and never
+            // recovered. The same read arriving early, before the layout
+            // caught up, drew one ring across two windows.
+            //
+            // A character cell is a few points. Hundreds is not a rounding, it
+            // is a window that has not finished moving, and the next layout
+            // pass is a better answer than a guess.
+            guard BorderGeometry.settles(actual, against: target) else { return false }
+            observed[wid] = (actual, target)
             wantedFrames[wid] = actual
             return true
         }
