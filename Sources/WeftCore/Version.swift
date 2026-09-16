@@ -11,7 +11,7 @@ import Foundation
 /// `.github/workflows/release.yml` refuses to publish a tag whose version does
 /// not match this constant, so the two cannot silently drift.
 public enum WeftVersion {
-    public static let current = "0.9.1"
+    public static let current = "0.9.2"
 
     /// Order two version strings the way a release feed means them.
     ///
