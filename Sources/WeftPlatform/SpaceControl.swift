@@ -367,10 +367,10 @@ public struct PlatformCapability: Codable, Sendable {
                     + "no 'Move left/right a space' shortcut is bound to carry a held window instead "
                     + "(System Settings → Keyboard → Keyboard Shortcuts → Mission Control)",
             sticky: false,
-            stickyNote: "SLSSetWindowTags' sticky bit is accepted and dropped (rc=0, tag never set — "
-                + "2026-09-15 probe). Dock's per-application 'All Desktops' is reachable through "
-                + "Accessibility and is the likely route, but it is not verified, so weft does not "
-                + "claim it",
+            stickyNote: "SLSSetWindowTags' sticky bit is accepted and dropped (rc=0, tag never "
+                + "set). Dock's per-application 'All Desktops' does work — confirmed taking a "
+                + "window from 1 desktop to 5 — but it is per application, needs the app to have "
+                + "a bundle identifier, and weft does not drive it yet",
             orderWindow: false,
             orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe)",
             focusSpaceKeystroke: focus.available,

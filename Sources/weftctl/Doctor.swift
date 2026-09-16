@@ -264,11 +264,12 @@ public enum Doctor {
             allOk = false
         }
 
-        // Sticky: no verified route. Said plainly rather than blamed on a
-        // missing scripting addition, because weft is not going to ship one.
-        print("[\u{25CB}] Keeping a window on every desktop (sticky): unavailable")
+        // Sticky: weft does not do this, and the reason is not a missing
+        // scripting addition — weft is not going to ship one.
+        print("[\u{25CB}] Keeping a window on every desktop (sticky): not implemented")
         print("    The SkyLight sticky tag is accepted and dropped from an ordinary connection.")
-        print("    Dock's per-application 'All Desktops' may be the route; it is not confirmed.")
+        print("    macOS does it per application: right-click the app's Dock icon \u{2192} Options")
+        print("    \u{2192} All Desktops. That works today and persists; weft does not drive it.")
 
         // Switching desktops: weft-sa when loaded, otherwise weft's own Dock
         // swipe, otherwise a ⌃N that reaches nothing unless the Mission

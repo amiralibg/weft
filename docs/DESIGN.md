@@ -742,11 +742,12 @@ re-registered. Added `forget(keeping:)`, `forgetApp(pid:)` and `forgetWindow(_:)
 
 ### Still open
 
-- **Sticky.** The only gap left, and the only one with no known route: the WindowServer accepts
-  the "on every desktop" tag from an ordinary connection and drops it. Dock's per-application
-  "All Desktops" is reachable through Accessibility and the menu item does register as ticked,
-  but it is a policy rather than a retag and no behavioural check has confirmed it, so weft
-  reports sticky as unavailable instead of claiming it.
+- **Sticky, per window.** The WindowServer accepts the "on every desktop" tag from an ordinary
+  connection and drops it, so weft cannot mark one window. macOS *can* do it per application —
+  Dock → Options → All Desktops — and that is confirmed working with SIP on, taking a window
+  from 1 desktop to 5 (spikes/RESULTS.md §S8). weft does not drive it: it is a synthetic click
+  into another process's menu, and per-application is a different shape from the per-window verb
+  `sticky` implies. `doctor` points at the Dock menu rather than reporting a dead end.
   (Space switching and moving a window between desktops are both solved with SIP on — §13.10.)
 
 ---

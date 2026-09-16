@@ -197,7 +197,7 @@ loads no code into any other process.
 | Switching desktops (`space focus`) | Yes — instant, weft's own Dock swipe, macOS 26.6 or later |
 | Sending a window to another desktop (`space move-window`, `alt-shift-1…5` in the shipped config) | Yes — see below |
 | A rule's `space = "…"` | Yes, opt-in: `follow-space-rules = true` under `[general]` |
-| Keeping a window on every desktop (`sticky`) | No — unavailable at any SIP setting |
+| Keeping a window on every desktop (`sticky`) | macOS can, per application; weft does not drive it — see below |
 
 This was going to need a scripting addition injected into Dock, the way yabai
 does it: SIP partly off, `sudo`, and a table of Dock byte patterns to re-derive
@@ -218,10 +218,13 @@ Weft reads whichever keys you have bound to "Move left/right a space" rather
 than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
 reported instead of silently doing nothing. `weftctl doctor` says which.
 
-Sticky has no route at all: the WindowServer takes the "on every desktop" tag
-from an ordinary connection and drops it. Weft reports that rather than
-pretending. Weft does not use yabai's scripting addition, even when one is
-loaded.
+Sticky is the one verb weft does not implement. The WindowServer takes the "on
+every desktop" tag from an ordinary connection and silently drops it, so weft
+cannot do it per window. macOS itself can do it per *application*, and that does
+work with SIP on: right-click the app's icon in the Dock → Options → All
+Desktops. It persists, and it is one click, which is why weft does not wrap it.
+
+Weft does not use yabai's scripting addition, even when one is loaded.
 
 ## Default keybindings
 

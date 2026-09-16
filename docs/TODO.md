@@ -182,12 +182,16 @@ internals by byte-pattern scan and must be re-derived on most macOS releases.
         `space move-window` that is the user's own command. For a rule's
         `space =`, which fires unprompted when an app opens, it is opt-in behind
         `[general] follow-space-rules`, off by default.
-- [ ] Sticky still has no verified route. Dock's per-application
-      "Options → Assign To → All Desktops" is reachable through Accessibility and
-      the menu item does register as checked, but it is a *policy*: it does not
-      retag an existing window, and no behavioural check has confirmed it yet.
-      `weftctl doctor` and the capability report say it is unavailable rather
-      than claiming it.
+- [x] **Sticky: resolved as "macOS already does it" (2026-09-16).** Per window is
+      impossible — the WindowServer takes the tag from an ordinary connection and
+      drops it. Per *application* works with SIP on and persists: Dock → Options →
+      All Desktops, confirmed taking a window from 1 desktop to 5. weft points at
+      it rather than wrapping it, because driving another process's menu with
+      synthetic clicks is a fragile way to deliver a one-click feature that
+      already exists, and per-application is not what the `sticky` verb promises.
+      Two earlier "it does not work" readings were both instrument error: a
+      predicate that fails its own control, and an unbundled probe app that Dock
+      had no bundle id to key the setting to.
 
 ## Suggested order
 

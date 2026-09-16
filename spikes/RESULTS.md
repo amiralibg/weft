@@ -279,8 +279,30 @@ implementation has to read `com.apple.symbolichotkeys` the way
 
 Dock's own per-application assignment is reachable through Accessibility: the Dock item's
 `AXShowMenu` yields an `Options` submenu whose items are exactly
-`Assign To`, `All Desktops`, `This Desktop`, `None`. Per-application rather than
-per-window, and it persists — untested end to end at the time of writing.
+`Assign To`, `All Desktops`, `This Desktop`, `None`. Per-application rather than per-window.
+
+**It works**, and it does retag the windows:
+
+```
+before assignment:  window 1250 on [5]              (1 desktop)
+after assignment:   window 1250 on [8, 7, 6, 4, 5]  (5 desktops)
+```
+
+It took three attempts to establish, and the first two failures were both instrument
+error rather than mechanism failure — which is the running theme of this section:
+
+1. Judged by `SLSCopySpacesForWindows` against a window that already existed, then by
+   `SLSWindowIsOnCurrentSpace`, which returns false for a window provably on the current
+   desktop. It fails its own control; whatever it means, it is not its name. Presence is
+   read from `CGWindowListCopyWindowInfo(.optionOnScreenOnly)` instead — public, and it
+   passes the control.
+2. The probe app was an unbundled process. Dock keys this assignment to a bundle
+   identifier, so there was nothing to key it to and the menu item ticked against
+   nothing. A minimal `.app` with a `CFBundleIdentifier` behaves completely differently.
+
+So sticky is available on macOS 27 with SIP on, per application, and persists. weft does
+not drive it: the menu is a synthetic click into another process's UI, and per-application
+is a different shape from the per-window verb `sticky` implies.
 
 ### Harness caveats, recorded because they nearly became findings
 
