@@ -76,13 +76,34 @@ public enum DragMove {
     /// Returns true only once the WindowServer agrees the window is on `sid`.
     @discardableResult
     public static func moveWindow(_ wid: WindowID, to sid: SpaceID) -> Bool {
-        guard AXIsProcessTrusted() else { return false }
+        // Every exit below used to be a bare `return false`, so a failed move
+        // said only "nothing changed" — true, and useless. Each one now names
+        // itself under WEFT_TRACE.
+        func no(_ why: String) -> Bool {
+            if Trace.logging { fputs("weftd: carry \(wid) -> \(sid) refused: \(why)\n", stderr) }
+            return false
+        }
+        guard AXIsProcessTrusted() else { return no("not trusted for Accessibility") }
         let keys = shortcuts
-        guard let right = keys.right, let left = keys.left else { return false }
-        guard let windowSpace = SpaceControl.spacesForWindow(wid).first else { return false }
+        guard let right = keys.right, let left = keys.left else {
+            return no("no 'move a space' shortcut bound (left=\(String(describing: keys.left)) right=\(String(describing: keys.right)))")
+        }
+        guard let windowSpace = SpaceControl.spacesForWindow(wid).first else {
+            return no("the WindowServer places it on no space")
+        }
         guard let display = DockSwipe.managedDisplays().first(where: { $0.ids.contains(sid) }),
               display.ids.contains(windowSpace)
-        else { return false }
+        else {
+            return no("target \(sid) and window space \(windowSpace) are not on one display")
+        }
+        if Trace.logging {
+            fputs(
+                "weftd: carry \(wid) from \(windowSpace) to \(sid) on \(display.uuid.prefix(8)) "
+                    + "showing \(display.current); keys L=\(left.keyCode)/\(left.modifiers) "
+                    + "R=\(right.keyCode)/\(right.modifiers); order=\(display.ids)\n",
+                stderr
+            )
+        }
 
         let userStartedOn = display.current
         // Held for the whole operation, including the desktop changes at either
@@ -124,12 +145,34 @@ public enum DragMove {
             mouse(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + dy))
             usleep(12_000)
         }
+        // The one observation that separates "the grab missed" from "the
+        // keystroke did not land": a window that has not moved under the nudge
+        // was never held, and every press after this carries nothing.
+        if Trace.logging {
+            let moved = WorldReader.frame(of: wid).map {
+                abs($0.x - frame.x) > 0.5 || abs($0.y - frame.y) > 0.5
+            } ?? false
+            fputs(
+                "weftd: carry grab at \(Int(grab.x)),\(Int(grab.y)) — "
+                    + "\(moved ? "window moved, held" : "window did not move, NOT held")\n",
+                stderr
+            )
+        }
 
         var landed = true
-        for _ in 0..<abs(steps) {
+        for i in 0..<abs(steps) {
             let before = current(of: uuid)
             press(key)
-            if !waitForChange(on: uuid, from: before) {
+            let ok = waitForChange(on: uuid, from: before)
+            if Trace.logging {
+                fputs(
+                    "weftd: carry press \(i + 1)/\(abs(steps)) key=\(key.keyCode) "
+                        + "desktop \(before ?? 0) -> \(current(of: uuid) ?? 0) "
+                        + "\(ok ? "landed" : "DID NOT LAND in \(settle)s")\n",
+                    stderr
+                )
+            }
+            if !ok {
                 landed = false
                 break
             }

@@ -238,6 +238,23 @@ public final class BorderRenderer: @unchecked Sendable {
         }
         for wid in Array(borders.keys) where wanted[wid] == nil { destroy(wid) }
 
+        // What the borders actually cost, in the only unit that matters to the
+        // compositor: how many windows exist, and how many were built this
+        // pass. `clear()` on a desktop switch releases every piece, so rapid
+        // space switching rebuilds all of them repeatedly — which is the first
+        // thing to check when borders are blamed for GPU load.
+        let existedBefore = borders.count
+        defer {
+            if Trace.logging {
+                let pieces = borders.values.reduce(0) { $0 + $1.pieces.count }
+                fputs(
+                    "weftd: borders \(borders.count) window(s), \(pieces) piece(s); "
+                        + "\(borders.count - existedBefore) built this pass\n",
+                    stderr
+                )
+            }
+        }
+
         // Made on the first move, if there is one: most passes move nothing.
         var transaction: CFTypeRef?
         for (wid, target) in wanted {
