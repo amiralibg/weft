@@ -45,6 +45,24 @@ public enum DragMove {
         return SpaceShortcuts.read(from: hotkeys)
     }
 
+    private static let carryLock = NSLock()
+    private nonisolated(unsafe) static var carrying = false
+
+    /// True while a window is being held and carried to another desktop.
+    ///
+    /// The carry looks exactly like a user dragging a window and changing
+    /// desktop, because that is what it is — so weft's own reactions fire:
+    /// `scheduleDragSettleApply` re-applies the layout 150ms after a move
+    /// notification, and each desktop change during the carry schedules a
+    /// sweep. Either one writes an AX frame to the window being dragged, and an
+    /// AX move mid-drag ends the drag session — the window is dropped where it
+    /// stands and the remaining keypresses change desktop carrying nothing.
+    ///
+    /// That is why this works from a standalone harness and failed in a running
+    /// daemon: nothing was there to fight it. Callers that re-apply layouts
+    /// check this and stand down until the carry finishes.
+    public static var isCarrying: Bool { carryLock.withLock { carrying } }
+
     /// Whether this Mac has what the move needs: Accessibility, and a bound
     /// shortcut in each direction.
     public static var isSupported: Bool {
@@ -67,6 +85,12 @@ public enum DragMove {
         else { return false }
 
         let userStartedOn = display.current
+        // Held for the whole operation, including the desktop changes at either
+        // end: every one of them would otherwise trigger a sweep that re-applies
+        // frames to the window being dragged.
+        carryLock.withLock { carrying = true }
+        defer { carryLock.withLock { carrying = false } }
+
         // Only a window on screen can be grabbed, so go to its desktop first.
         if windowSpace != display.current, !DockSwipe.focusSpace(windowSpace) { return false }
 

@@ -331,6 +331,59 @@ was left on the desktop they started on without the harness having to correct an
 The check ran from a temporary executable target rather than from `weftd`, because
 starting the daemon would have tiled every window on the machine to answer one question.
 
+### …and then it failed in the shipped daemon (2026-09-16)
+
+Reported after installing 0.9.1: `space move-window` "just switches to the new space
+slowly with animation, it is not moving the window there". The animation is the tell —
+that is the Mission Control shortcut firing with **nothing held**.
+
+Two hypotheses, the first wrong:
+
+1. *The grab misses a title bar.* Testable, and false. `spikes/dragmove keywindow <wid>`
+   grabs a real window and reports whether it moved under the opening nudge, before any
+   keystroke goes out. Against Mattermost (an Electron window, 1710×1074): `window MOVED
+   — held`, the window travelled 7 → 5, was carried back, and the desktop was restored.
+   The mechanism is fine on real windows.
+2. *weft fights its own drag.* The difference between that run and the user's is that
+   **weftd was running for theirs**. A carry produces exactly the notifications a user
+   drag does, so weft reacts to it:
+   - `.windowMoved` → `applier.isEcho` is false (a dragged frame never matches the one
+     weft last asked for) → `scheduleDragSettleApply()`, which re-applies the layout
+     **150 ms** later;
+   - each desktop change during the carry → `checkSpaceChanged()` → sweep and re-apply.
+
+   Either one writes an AX frame to the window being held, and an AX move during a drag
+   ends the drag session: the window is dropped where it stands and the remaining
+   keypresses change desktop carrying nothing. Exactly the report.
+
+Fix: `DragMove.isCarrying`, held for the whole operation including the desktop changes at
+both ends, checked by `scheduleDragSettleApply`, `checkSpaceChanged` and
+`applyCurrentSpace` — the last as the funnel, because the path that has not been traced
+yet is the one that would drop the window.
+
+### Border theories that were wrong, recorded so they are not re-run
+
+The same report said borders were visibly broken — a ring around no window at all. Two
+confident explanations were produced and both were refuted by measurement:
+
+- *A fullscreen window with a monstrous frame.* A Zen window measured 3824×2130 at
+  (−1055, −2130), which looks absurd until the displays are read: the second display is
+  **3840×2160 at (−1063, −2160)**, a 4K monitor above and left of the built-in. The
+  window is an ordinary maximised window on it. `spikes/spacetype.swift` also reports no
+  window larger than every display.
+- *A fullscreen space weft fails to filter.* `isFullscreen` is `type == 4`, and the space
+  reported 0 — but so does **every** space on this machine, and the dict from
+  `SLSCopyManagedDisplaySpaces` agrees with the function everywhere. Nothing is
+  misreported.
+- *Negative-origin display mapping.* `BorderRenderer.readScreens()` converts AppKit's
+  bottom-left frames with `primaryHeight - f.maxY`; for the 4K display that is
+  `1112 − 3272 = −2160`, matching `CGDisplayBounds` exactly. `Frame.contains` handles
+  negative coordinates correctly.
+
+So the border bug is **unexplained**. Diagnosing it needs `weftd` running and
+`weftctl query state` captured while the bad border is on screen: that returns the
+computed frames and the focused window, which is precisely what the renderer is handed.
+
 ---
 
 ## Design changes this forces

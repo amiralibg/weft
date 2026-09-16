@@ -930,6 +930,11 @@ final class Daemon: @unchecked Sendable {
     /// Sweep only if the WindowServer is showing a different space from the
     /// one weft last acted on. On `syncQueue`, like everything that sweeps.
     private func checkSpaceChanged() {
+        // A carry changes desktop once per step, and each change would sweep,
+        // clear the borders and re-apply layouts — on top of the window still
+        // being held. The desktop weft ends on is reconciled once the carry
+        // returns, so there is nothing to do until then.
+        guard !DragMove.isCarrying else { return }
         let now = SpaceControl.currentSpaceByDisplay()
         let acted = actedSpacesLock.withLock { actedSpacesLocked }
         guard !now.isEmpty, now != acted else { return }
@@ -1505,6 +1510,13 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func scheduleDragSettleApply() {
+        // weft's own carry looks exactly like a user dragging a window, because
+        // it is one. Re-applying the layout 150ms in writes an AX frame to the
+        // window being dragged, and an AX move mid-drag ends the drag session:
+        // the window is dropped where it stands and the rest of the keypresses
+        // change desktop carrying nothing. That is the whole "it just switches
+        // spaces and leaves the window behind" report.
+        guard !DragMove.isCarrying else { return }
         pendingDragApply?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -3388,6 +3400,11 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func applyCurrentSpace() {
+        // The funnel every re-apply reaches. Guarded here as well as at the two
+        // callers above, because any path that writes a frame while a window is
+        // held drops it — and a path that has not been traced yet is exactly
+        // the one that would.
+        guard !DragMove.isCarrying else { return }
         if let sid = currentSID() {
             applySpaceLayout(sid)
         }

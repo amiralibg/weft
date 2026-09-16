@@ -427,6 +427,87 @@ if args.first == "keyonly" {
     exit(0)
 }
 
+/// Carry a REAL window with the bound space shortcut — the path weft ships.
+///
+/// `window <wid>` below uses the Dock swipe, which a held mouse blocks, so it
+/// reproduces a failure already understood. This holds the window and presses
+/// the shortcut, and reports the one thing that decides everything: whether the
+/// grab took hold at all. A window that does not move under the opening nudge
+/// was never held, and the keystroke then switches desktops carrying nothing —
+/// which is exactly "it just switches spaces slowly and leaves the window".
+///
+/// It carries the window back afterwards. This runs against a window someone is
+/// using, so leaving it on another desktop is not an acceptable outcome.
+if args.first == "keywindow", args.count >= 2, let wid = UInt32(args[1]) {
+    let steps = max(1, args.count > 2 ? (Int(args[2]) ?? 1) : 1)
+    guard let frame = bounds(of: wid) else {
+        print("no bounds for \(wid)")
+        exit(1)
+    }
+    let before = spaces(of: wid)
+    guard let home = displays().first(where: { $0.ids.contains(before.first ?? 0) }) else {
+        print("window \(wid) is on no managed display (spaces=\(before))")
+        exit(1)
+    }
+    let origin = home.current
+    guard before.first == origin else {
+        print("window is on \(before); that display is showing \(origin).")
+        print("Only a window on the current desktop has a coordinate to grab.")
+        exit(1)
+    }
+
+    /// Hold, press `steps` times, release. Returns whether the grab took.
+    func carry(right: Bool) -> Bool {
+        guard let f = bounds(of: wid) else { return false }
+        let grab = CGPoint(x: f.midX, y: f.minY + 11)
+        post(.leftMouseDown, grab)
+        for dy in stride(from: 2.0, through: 8.0, by: 2.0) {
+            post(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + dy))
+            usleep(12_000)
+        }
+        // The decisive observation, before any keystroke goes out.
+        let nudged = bounds(of: wid)?.origin
+        let held = nudged.map { abs($0.x - f.origin.x) > 0.5 || abs($0.y - f.origin.y) > 0.5 } ?? false
+        print("  grab at \(grab): window \(held ? "MOVED — held" : "did not move — NOT held")")
+        for i in 1...steps {
+            SpaceKey.press(right ? SpaceKey.right : SpaceKey.left)
+            usleep(700_000)
+            print("    press \(i): desktop \(displays().first { $0.uuid == home.uuid }?.current ?? 0)")
+        }
+        post(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + 10))
+        usleep(40_000)
+        post(.leftMouseUp, CGPoint(x: grab.x, y: grab.y + 10))
+        usleep(300_000)
+        return held
+    }
+
+    print("window \(wid) at \(frame.origin) \(frame.size), on \(before), display showing \(origin)")
+    print("carrying right \(steps)...")
+    let held = carry(right: true)
+    let after = spaces(of: wid)
+    print("window now on \(after)")
+
+    if after != before {
+        print("carrying back left \(steps)...")
+        _ = carry(right: false)
+        print("window back on \(spaces(of: wid))")
+    }
+    // Whatever happened to the window, put the desktop back.
+    var guard_ = 0
+    while displays().first(where: { $0.uuid == home.uuid })?.current != origin, guard_ < steps * 2 {
+        SpaceKey.press(SpaceKey.left)
+        usleep(700_000)
+        guard_ += 1
+    }
+    let back = displays().first { $0.uuid == home.uuid }?.current
+    print("desktop \(back ?? 0)\(back == origin ? " (restored)" : "  *** NOT \(origin) ***")")
+    print(
+        held
+            ? (after != before ? "YES — held and travelled" : "held, but the window did not travel")
+            : "no — the grab never took hold, so the keystroke switched desktops alone")
+    exit(0)
+}
+
 if args.first == "window", args.count >= 2, let wid = UInt32(args[1]) {
     let right = args.count < 3 || args[2] != "left"
     print("before: \(spaces(of: wid))")
