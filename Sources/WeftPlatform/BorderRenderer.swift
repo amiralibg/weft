@@ -247,9 +247,21 @@ public final class BorderRenderer: @unchecked Sendable {
         defer {
             if Trace.logging {
                 let pieces = borders.values.reduce(0) { $0 + $1.pieces.count }
+                // Which window is painted which colour, and where its ring
+                // actually is. "The yellow is round the wrong window" and "the
+                // yellow is the wrong shape" look identical on a screenshot and
+                // are different bugs; this separates them without anyone having
+                // to interpret a picture.
+                let drawn = borders.sorted { $0.key < $1.key }.map {
+                    String(
+                        format: "%u:%08x@%.0f,%.0f %.0fx%.0f", $0.key, $0.value.color,
+                        $0.value.target.x, $0.value.target.y,
+                        $0.value.target.width, $0.value.target.height)
+                }
                 fputs(
                     "weftd: borders \(borders.count) window(s), \(pieces) piece(s); "
-                        + "\(borders.count - existedBefore) built this pass\n",
+                        + "\(borders.count - existedBefore) built this pass; "
+                        + "drawn=[\(drawn.joined(separator: "  "))]\n",
                     stderr
                 )
             }
