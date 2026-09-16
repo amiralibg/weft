@@ -1396,10 +1396,14 @@ private struct AdvancedPane: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Toggle(
+                    "Let a rule send a window to its desktop when it opens",
+                    isOn: store.bind(\.followSpaceRules)
+                )
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("Weft never asks you to change System Integrity Protection. Switching desktops is instant. Sending a window to another desktop works by holding the window and pressing your “move a space” shortcut, so the screen changes desktop and changes back — bind that shortcut under Mission Control above. Keeping a window on every desktop isn’t available: macOS accepts the request from an ordinary app and ignores it.")
+                Text("Weft never asks you to change System Integrity Protection. Switching desktops is instant. Sending a window to another desktop works by holding the window and pressing your “move a space” shortcut, so the screen changes desktop and changes back — bind that shortcut under Mission Control above.\n\nThat visible movement is why the rule setting is off by default: you asked for it when you press a shortcut, but a rule fires whenever a matching app opens, which may be while you are typing somewhere else.\n\nKeeping a window on every desktop is macOS’s own setting rather than weft’s: right-click the app in the Dock → Options → All Desktops.")
             }
 
             Section("Border drawing") {

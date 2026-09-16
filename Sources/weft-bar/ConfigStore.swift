@@ -87,6 +87,9 @@ final class ConfigStore: ObservableObject {
     @Published var mouseBorderResize = true
     @Published var mouseFollowsFocus = true
     @Published var focusFollowsMouse = false
+    /// Whether a rule's `space = "…"` may take the screen over to place a
+    /// window. Off by default — see the Desktops section for why.
+    @Published var followSpaceRules = false
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
 
@@ -190,6 +193,7 @@ final class ConfigStore: ObservableObject {
         mouseBorderResize = g?.bool("mouse-border-resize") ?? true
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
+        followSpaceRules = g?.bool("follow-space-rules") ?? false
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
     }
@@ -377,6 +381,7 @@ final class ConfigStore: ObservableObject {
         s.set("mouse-border-resize", bool: mouseBorderResize)
         s.set("mouse-follows-focus", bool: mouseFollowsFocus)
         s.set("focus-follows-mouse", bool: focusFollowsMouse)
+        s.set("follow-space-rules", bool: followSpaceRules)
         s.set("manage-menubar-apps", bool: manageMenubarApps)
         s.set("check-for-updates", bool: checkForUpdates)
         s.setRaw("reserve", TomlValue.sidesLiteral(
