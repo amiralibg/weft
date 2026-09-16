@@ -324,7 +324,17 @@ public enum Migrate {
         toml += "default-layout = \"\(defaultLayout)\"\n"
         let effectiveMouseMod = mouseModifier.isEmpty ? "alt" : mouseModifier
         toml += "mouse-modifier = \"\(effectiveMouseMod)\"\n"
-        toml += "mouse-follows-focus = \(mouseFollowsFocus)\n\n"
+        toml += "mouse-follows-focus = \(mouseFollowsFocus)\n"
+        // Written out commented rather than set: yabai has no equivalent to
+        // migrate from, and the default is deliberately not the useful
+        // behaviour. A migrated config is read by someone who had `rule
+        // --add ... space=`, so the key they will go looking for should be in
+        // the file with the reason attached, not only in the README.
+        toml += "# Let a rule's `space = \"...\"` move a window when it opens. Off because\n"
+        toml += "# weft moves a window by holding it and switching desktops, so the screen\n"
+        toml += "# changes and changes back — fine when you type `space move-window`,\n"
+        toml += "# surprising when an app merely opened.\n"
+        toml += "# follow-space-rules = true\n\n"
 
         // Both integrations stay OFF. Migration reads a yabai config, not a
         // permission to start two more processes: turning them on here meant a

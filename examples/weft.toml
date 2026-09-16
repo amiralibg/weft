@@ -42,6 +42,20 @@ stack-offset = 8
 # app as an agent and want its windows tiled.
 manage-menubar-apps = false
 
+# Whether a rule's `space = "..."` may take the screen over to place a window.
+#
+# Off, and this is the one setting whose default is deliberately not the useful
+# behaviour. macOS refuses every API for moving another app's window to another
+# desktop, so weft does it the way you would: it holds the window by the title
+# bar and presses your "move a space" shortcut, which means the screen visibly
+# changes desktop and changes back, about a second per desktop travelled.
+#
+# That is fine for `space move-window`, which you just typed and are watching.
+# A rule fires when an app opens — possibly while you are typing in something
+# else — and having the desktop switch underneath you is worse than the window
+# landing on the wrong one. Turn this on if you would rather have the placement.
+follow-space-rules = false
+
 # Ask GitHub once a day whether a newer weft has been released, and show a
 # menu-bar item when there is one. weft installs from a script or a clone, so
 # nothing else would ever tell you a fix exists. It downloads and installs
