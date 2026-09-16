@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import WeftCore
 import WeftPlatform
 
 /// Updating weft in place, from the Settings window or the menu bar.
@@ -28,6 +29,27 @@ final class Updater: ObservableObject {
 
     private var poll: Timer?
     private var process: Process?
+
+    /// The version an update was started for, kept across the app dying.
+    ///
+    /// The installer quits WeftBar before it replaces the bundle, so this
+    /// process is killed half way through every successful update. Nothing in
+    /// memory survives that — including `failure`, which meant an update that
+    /// broke *after* the app was killed told the user nothing at all: weft
+    /// simply did not update, silently, and the Settings window looked the same
+    /// as before. Recording the attempt is what makes the next launch able to
+    /// say so.
+    private static let pendingKey = "weft.update.pending"
+
+    init() {
+        guard let target = UserDefaults.standard.string(forKey: Self.pendingKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.pendingKey)
+        // Running the version we were installing, or newer: it worked, and
+        // saying so after the fact would only be noise.
+        guard WeftVersion.isNewer(target, than: WeftVersion.current) else { return }
+        failure = "The update to \(target) did not complete — weft is still "
+            + "\(WeftVersion.current). See \(logURL.path)."
+    }
 
     private var logURL: URL {
         EngineInstaller.logURL.deletingLastPathComponent()
@@ -109,6 +131,10 @@ final class Updater: ObservableObject {
             return
         }
         process = p
+        // Before any of it can go wrong, and deliberately not cleared on the
+        // way out: this process does not live to see the end of a successful
+        // update, so the next launch clears it by comparing versions.
+        UserDefaults.standard.set(update.latest, forKey: Self.pendingKey)
         step = "Starting…"
         startPolling()
     }
@@ -128,9 +154,15 @@ final class Updater: ObservableObject {
     /// crash, and the last step shown before it happens says so.
     private func startPolling() {
         poll?.invalidate()
-        poll = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.readProgress() }
         }
+        // `.common`, not the default mode. A timer scheduled the ordinary way
+        // stops firing the moment the run loop enters tracking — scrolling the
+        // Settings list, or holding a menu open — so progress froze exactly
+        // when someone was looking at it and moving the pointer.
+        RunLoop.main.add(timer, forMode: .common)
+        poll = timer
     }
 
     private func readProgress() {

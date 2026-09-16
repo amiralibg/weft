@@ -163,6 +163,12 @@ say "stopping any running weft"
 if [ -x "$BINDIR/weftctl" ]; then
     "$BINDIR/weftctl" service stop >/dev/null 2>&1 || true
 fi
+# Said before it happens, because when the update was started from Settings this
+# is the line the user is left looking at: WeftBar is about to be killed, and
+# every stage after this one goes to the log with nobody watching. Without it
+# the window simply vanished mid-progress, which reads as a crash rather than as
+# the update doing what it said.
+say "quitting WeftBar — it reopens when the update finishes"
 pkill -x WeftBar >/dev/null 2>&1 || true
 
 say "installing binaries to $BINDIR"
