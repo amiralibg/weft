@@ -683,6 +683,21 @@ final class Daemon: @unchecked Sendable {
             let system = systemFocusLock.withLock { systemFocusLocked }
             let focus = system.map { borderFrames[$0] != nil ? $0 : nil }
                 ?? sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
+            // Exactly what the renderer is handed. A border that rings no window
+            // is either drawn wrong from a right frame, or drawn right from a
+            // wrong one, and nothing short of this distinguishes the two.
+            if Trace.logging {
+                let list = borderFrames.sorted { $0.key < $1.key }.map {
+                    String(
+                        format: "%u@%.0f,%.0f %.0fx%.0f", $0.key,
+                        $0.value.x, $0.value.y, $0.value.width, $0.value.height)
+                }
+                fputs(
+                    "weftd: borders focus=\(focus.map(String.init) ?? "none") "
+                        + "frames=[\(list.joined(separator: "  "))]\n",
+                    stderr
+                )
+            }
             bordersBridge.renderer.update(frames: borderFrames, focused: focus)
         }
     }
@@ -779,10 +794,25 @@ final class Daemon: @unchecked Sendable {
         // — a bar height taken off only the main display is `external_bar
         // main`, which is a config question, not a geometry one.
         let res = currentConfig().general.reserve
-        let raw: Frame = screensLock.withLock {
-            if let uuid, let f = screensByUUID[uuid] { return f }
-            return displayOrder.first.flatMap { screensByUUID[$0] }
-                ?? Frame(x: 0, y: 0, width: 1, height: 1)
+        // The fallback is silent, and silence is the problem: a space whose
+        // display does not resolve gets laid out into the *first* display's
+        // rect, so its windows stay where they are and its borders are drawn
+        // around a slot on another screen — a ring around nothing. Whether that
+        // ever actually happens is exactly what a border bug report needs to
+        // answer, so it says so instead of guessing later.
+        let (raw, fellBackTo): (Frame, String?) = screensLock.withLock {
+            if let uuid, let f = screensByUUID[uuid] { return (f, nil) }
+            let first = displayOrder.first
+            let frame = first.flatMap { screensByUUID[$0] } ?? Frame(x: 0, y: 0, width: 1, height: 1)
+            return (frame, first ?? "none")
+        }
+        if let fellBackTo, Trace.logging {
+            fputs(
+                "weftd: no screen for display \(uuid ?? "nil") — laying out against \(fellBackTo) "
+                    + "instead. Frames computed against the wrong display look exactly like a "
+                    + "border around nothing.\n",
+                stderr
+            )
         }
         return Frame(
             x: raw.x + res.left,
