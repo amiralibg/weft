@@ -134,29 +134,65 @@ public enum DragMove {
         _ wid: WindowID, steps: Int, on uuid: String, right: SpaceShortcut, left: SpaceShortcut
     ) -> Bool {
         guard let frame = WorldReader.frame(of: wid) else { return false }
-        // Below the top edge, mid-width: clear of the traffic lights on the
-        // left and of any toolbar control on the right.
-        let grab = CGPoint(x: frame.x + frame.width / 2, y: frame.y + 11)
         let key = steps > 0 ? right : left
 
-        mouse(.leftMouseDown, grab)
-        // macOS starts a window drag on movement, not on the press alone.
-        for dy in stride(from: 2.0, through: 8.0, by: 2.0) {
-            mouse(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + dy))
-            usleep(12_000)
-        }
-        // The one observation that separates "the grab missed" from "the
-        // keystroke did not land": a window that has not moved under the nudge
-        // was never held, and every press after this carries nothing.
-        if Trace.logging {
-            let moved = WorldReader.frame(of: wid).map {
+        /// Has the window left where it started? The only proof a drag began.
+        func moved() -> Bool {
+            WorldReader.frame(of: wid).map {
                 abs($0.x - frame.x) > 0.5 || abs($0.y - frame.y) > 0.5
             } ?? false
-            fputs(
-                "weftd: carry grab at \(Int(grab.x)),\(Int(grab.y)) — "
-                    + "\(moved ? "window moved, held" : "window did not move, NOT held")\n",
-                stderr
-            )
+        }
+
+        // Where a window can be picked up.
+        //
+        // A title bar is the obvious answer, and the only one that works for a
+        // standard window. Borderless windows have none — on a terminal, 11pt
+        // below the top edge is content, where a drag selects text and moves
+        // nothing. Measured: an Electron window with a real title bar held on
+        // the first point; a borderless terminal held on none of them, and the
+        // keystroke then switched the desktop carrying nothing. That was the
+        // whole bug, and it is why every point is verified before any key is
+        // sent: a window that cannot be picked up must not cost the user a
+        // desktop switch.
+        //
+        // The second point is the empty strip a tabbed window leaves to the
+        // right of its tabs, which is draggable where the middle is not.
+        let candidates = [
+            CGPoint(x: frame.x + frame.width / 2, y: frame.y + 11),
+            CGPoint(x: frame.x + frame.width - 50, y: frame.y + 11),
+            CGPoint(x: frame.x + 80, y: frame.y + 11),
+            CGPoint(x: frame.x + frame.width / 2, y: frame.y + 24),
+        ]
+        var held: CGPoint?
+        for point in candidates {
+            mouse(.leftMouseDown, point)
+            // macOS starts a window drag on movement, not on the press alone.
+            for dy in stride(from: 2.0, through: 8.0, by: 2.0) {
+                mouse(.leftMouseDragged, CGPoint(x: point.x, y: point.y + dy))
+                usleep(12_000)
+            }
+            let ok = moved()
+            if Trace.logging {
+                fputs(
+                    "weftd: carry grab at \(Int(point.x)),\(Int(point.y)) — "
+                        + "\(ok ? "held" : "not held")\n", stderr)
+            }
+            if ok {
+                held = point
+                break
+            }
+            // Let go before trying elsewhere. Released as a drag rather than a
+            // click, so a control under the pointer is not activated.
+            mouse(.leftMouseUp, CGPoint(x: point.x, y: point.y + 8))
+            usleep(60_000)
+        }
+        guard let grab = held else {
+            if Trace.logging {
+                fputs(
+                    "weftd: carry \(wid) — nothing draggable in its top edge; "
+                        + "not sending the shortcut\n", stderr)
+            }
+            return false
         }
 
         var landed = true

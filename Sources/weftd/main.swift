@@ -2377,8 +2377,10 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(
                 ok: false,
                 error: "the move did not land — nothing changed. weft moves a window by holding it "
-                    + "and pressing your 'move a space' shortcut; check it is bound in System "
-                    + "Settings → Keyboard → Keyboard Shortcuts → Mission Control")
+                    + "and pressing your 'move a space' shortcut. Either that shortcut is not "
+                    + "bound (System Settings → Keyboard → Keyboard Shortcuts → Mission Control → "
+                    + "Move left/right a space), or this window has nothing draggable along its "
+                    + "top edge — WEFT_TRACE=1 says which.")
         }
         // Re-read display geometry before sizing anything against it. macOS
         // puts the menu bar on whichever display has focus, so the other
