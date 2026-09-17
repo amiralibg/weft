@@ -623,6 +623,127 @@ extension Tree {
         return tree.focusing(focused)
     }
 
+    /// Move a window one step in a direction, restructuring the tree — i3's
+    /// `move`, AeroSpace's `move`, yabai's `window --warp`.
+    ///
+    /// This is what `move <dir>` means, and it is **not** a swap of two
+    /// windows. Swapping leaves is right only when both windows own equivalent
+    /// slots, and in a bsp tree they usually do not. Given
+    ///
+    /// ```
+    ///   +-------+-------+        splitV[A, splitH[B, C]]
+    ///   |       |   B   |
+    ///   |   A   +-------+        A owns half the screen;
+    ///   |       |   C   |        B owns a quarter.
+    ///   +-------+-------+
+    /// ```
+    ///
+    /// `move east` on A used to swap the leaves A and B, so A came back as a
+    /// quarter in the top right and B grew to half the screen. The window
+    /// obeyed the direction and changed size doing it, which is the part that
+    /// reads as a bug. Exchanging at the level where the axis matches — A with
+    /// the *whole* B/C subtree — gives `splitH[B, C] | A`: A is on the right,
+    /// still half the screen.
+    ///
+    /// The rule, in full. Walk up from the window looking for the nearest
+    /// ancestor that both runs along `dir`'s axis and has somewhere to go in
+    /// that direction:
+    ///
+    /// - **A direct child of that ancestor** exchanges places with its
+    ///   neighbour there, ratios included, so both windows keep their size.
+    /// - **Nested deeper** is lifted out of the subtree it is in and dropped
+    ///   beside it at that level: B in the picture above, moved west, leaves
+    ///   the B/C column and lands between A and C — three columns. That is one
+    ///   step west, which is what was asked for.
+    /// - **A stack** matches no axis, so a stacked window walks straight out of
+    ///   the stack. `stack move <dir>` is the verb for putting one in.
+    /// - **No such ancestor** — the window is already against that edge of the
+    ///   tree — does nothing, deliberately. yabai fails here too, and it is
+    ///   what lets `{ move east } || { … }` in a keybind fall through instead
+    ///   of quietly rearranging something.
+    ///
+    /// `swapping(_:_:)` is still there, behind `swap <dir>`, for anyone who
+    /// wants the literal exchange.
+    public func moving(_ id: WindowID, towards dir: Direction) -> Tree {
+        guard let root, root.windows.contains(id), fullscreen == nil else { return self }
+        guard let path = pathTo(root, target: id), !path.isEmpty else { return self }
+        let axis: ContainerLayout = (dir == .west || dir == .east) ? .splitV : .splitH
+        let forward = (dir == .east || dir == .south)
+
+        // Deepest first: the nearest ancestor that can take the step is the
+        // one that makes it a *step* rather than a leap across the layout.
+        for depth in stride(from: path.count - 1, through: 0, by: -1) {
+            guard case .container(let parent)? = nodeAt(root, path: Array(path.prefix(depth))),
+                  parent.layout == axis
+            else { continue }
+            let idx = path[depth]
+            let target = idx + (forward ? 1 : -1)
+            // Off the end of this container: the window is against its edge,
+            // so keep climbing. That climb is exactly what "move out of the
+            // container you are in" means.
+            guard parent.children.indices.contains(target) else { continue }
+            if depth == path.count - 1 {
+                return exchanging(at: Array(path.prefix(depth)), idx, target).focusing(id)
+            }
+            return lifting(id, toLevel: Array(path.prefix(depth)), beside: idx, forward: forward)
+                .focusing(id)
+        }
+        return self
+    }
+
+    /// Trade two children of one container, carrying their ratios with them —
+    /// so the pair swap sides *and* sizes, and neither is resized by having
+    /// moved.
+    private func exchanging(at containerPath: [Int], _ i: Int, _ j: Int) -> Tree {
+        guard let root, case .container(var c)? = nodeAt(root, path: containerPath),
+              c.children.indices.contains(i), c.children.indices.contains(j)
+        else { return self }
+        c.children.swapAt(i, j)
+        if c.ratios.indices.contains(i), c.ratios.indices.contains(j) { c.ratios.swapAt(i, j) }
+        var copy = self
+        copy.root = replacing(root, at: containerPath, with: .container(c))
+        return copy
+    }
+
+    /// Pull `id` out of wherever it is and insert it as a child of the
+    /// container at `levelPath`, immediately beside the child it came from.
+    ///
+    /// Removal happens first and can collapse containers under it — a
+    /// two-member column becomes a bare window — so the insertion index is
+    /// resolved against the tree *after* the removal, never before. Working
+    /// from the pre-removal indices is how this kind of edit puts the window
+    /// one slot off, or off the end.
+    private func lifting(
+        _ id: WindowID, toLevel levelPath: [Int], beside child: Int, forward: Bool
+    ) -> Tree {
+        guard let root else { return self }
+        // What sits at that level's `child` slot right now. After the removal
+        // it may have collapsed into something else, so it is found again by
+        // identity rather than by index.
+        guard case .container(let before)? = nodeAt(root, path: levelPath),
+              before.children.indices.contains(child)
+        else { return self }
+        let cameFrom = before.children[child].windows.filter { $0 != id }
+        let (pruned, _) = removeNode(root, id: id)
+        guard let pruned else { return self }
+        guard case .container(var c)? = nodeAt(pruned, path: levelPath) else {
+            // The level itself collapsed — the window being moved was all that
+            // kept it a container. There is nothing left to move it beside.
+            return self
+        }
+        // The slot it left, wherever it ended up after the collapse.
+        let landing = c.children.firstIndex { node in
+            !Set(node.windows).isDisjoint(with: cameFrom)
+        } ?? min(child, c.children.count)
+        let at = forward ? landing + 1 : landing
+        c.children.insert(.window(id), at: min(max(at, 0), c.children.count))
+        c.ratios = Array(repeating: 1.0 / Double(c.children.count), count: c.children.count)
+        c.active = min(c.active, max(c.children.count - 1, 0))
+        var copy = self
+        copy.root = replacing(pruned, at: levelPath, with: .container(c))
+        return copy
+    }
+
     /// Resize the focused window along an axis by points (positive grows).
     /// Finds the nearest ancestor container on that axis and shifts the ratio
     /// between the focused child and its neighbour. Clamped to [0.1, 0.9].

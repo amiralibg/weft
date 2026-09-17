@@ -13,9 +13,15 @@ public enum ResizeDirection: String, Sendable, Equatable {
 }
 
 public enum Command: Sendable, Equatable {
-    // Focus / warp (swap with neighbour)
     case focus(Direction)
+    /// Move the focused window one step, restructuring the tree — i3's `move`,
+    /// yabai's `window --warp`. See `Tree.moving(_:towards:)`.
     case move(Direction)
+    /// Trade places with the window in that direction, leaving the tree's
+    /// shape alone — yabai's `window --swap`. The two windows take each
+    /// other's slots, so a window swapped into a smaller slot gets smaller.
+    /// `move` is what a keybind usually wants; this is the literal version.
+    case swap(Direction)
     // Resize focused window; delta in points along the direction.
     case resize(ResizeDirection, Double)
     // Orientation for the next bsp insertion.
@@ -38,6 +44,10 @@ public enum Command: Sendable, Equatable {
     // App launcher/focus/hide (M6): not running → open; running, not
     // frontmost → focus it (space switch + raise); frontmost → hide.
     case appToggle(String)
+    /// Run a shell command. The payload is the rest of the line, verbatim —
+    /// weft does not tokenise it, because `/bin/sh -c` is the point: a config
+    /// migrated from skhd is full of lines that are not window-manager verbs.
+    case exec(String)
     // Window toggles
     case toggleFullscreen
     case toggleSplit
@@ -78,11 +88,18 @@ public enum QueryKind: String, Sendable, Equatable {
 public enum SpaceCommand: Sendable, Equatable {
     /// Focus a space by label, sid, or 1-based ordinal.
     case focus(String)
-    /// Move a window (default: focused) to a space without following it.
-    /// Verified by re-reading membership. Moves by holding the window and
-    /// pressing the bound "move a space" shortcut, so the screen visibly
-    /// changes desktop and changes back; fails honestly when none is bound.
-    case moveWindow(String, WindowID?)
+    /// Move a window (default: focused) to a space, and by default go with it.
+    ///
+    /// Verified by re-reading membership. The move works by holding the window
+    /// and pressing the bound "move a space" shortcut — the only route macOS 27
+    /// leaves open from an ordinary process (spikes/RESULTS.md §S8) — so the
+    /// screen visibly changes desktop on the way. **That is why following is
+    /// the default.** Not following means changing desktop and changing back,
+    /// which costs an extra switch to end up where a user who just sent a
+    /// window somewhere usually did not want to be, and reads as a bug rather
+    /// than as the deliberate "do not follow" it is. `--no-follow` is still
+    /// there for scripts and for anyone who means it.
+    case moveWindow(String, WindowID?, follow: Bool)
     /// Rename the current space (persists by ordinal).
     case label(String)
     /// Switch the current space's layout, preserving membership.
@@ -134,6 +151,16 @@ extension Command {
     public static func parse(_ input: String) throws -> Command {
         let parts = input.split(separator: " ").map(String.init)
         guard let head = parts.first else { throw CommandParseError.empty }
+        // Before the split-on-spaces grammar below, and from the raw string:
+        // everything else here is a fixed set of words, and this is the one
+        // verb whose argument is arbitrary text. Rejoining `parts` would
+        // collapse runs of spaces and silently rewrite `sed 's/a  b/c/'`.
+        if head == "exec" {
+            let body = input.drop(while: { $0 == " " }).dropFirst("exec".count)
+            let command = String(body).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty else { throw CommandParseError.badArgs(input) }
+            return .exec(command)
+        }
         switch head {
         case "fullscreen", "zoom-fullscreen":
             return .toggleFullscreen
@@ -200,6 +227,11 @@ extension Command {
                 throw CommandParseError.badArgs(input)
             }
             return .move(dir)
+        case "swap":
+            guard parts.count == 2, let dir = Direction(rawValue: parts[1]) else {
+                throw CommandParseError.badArgs(input)
+            }
+            return .swap(dir)
         case "resize":
             guard parts.count == 3,
                   let dir = ResizeDirection(rawValue: parts[1]),
@@ -229,9 +261,23 @@ extension Command {
             case "focus":
                 return .space(.focus(parts[2...].joined(separator: " ")))
             case "move-window":
-                let wid: WindowID? = parts.count > 3 ? UInt32(parts[3]) : nil
-                if parts.count > 3, wid == nil { throw CommandParseError.badArgs(input) }
-                return .space(.moveWindow(parts[2], wid))
+                // `space move-window <target> [wid] [--follow|--no-follow]`,
+                // flags in any trailing position so neither ordering surprises
+                // anyone.
+                var wid: WindowID?
+                var follow = true
+                for token in parts.dropFirst(3) {
+                    switch token {
+                    case "--follow", "follow": follow = true
+                    case "--no-follow", "no-follow": follow = false
+                    default:
+                        guard wid == nil, let id = UInt32(token) else {
+                            throw CommandParseError.badArgs(input)
+                        }
+                        wid = id
+                    }
+                }
+                return .space(.moveWindow(parts[2], wid, follow: follow))
             case "label":
                 return .space(.label(parts[2...].joined(separator: " ")))
             case "layout":

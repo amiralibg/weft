@@ -110,6 +110,26 @@ let screen = Frame(x: 0, y: 0, width: 1000, height: 800)
     #expect(try Command.parse("query windows") == .query(.windows))
 }
 
+@Test func execTakesTheRestOfTheLineVerbatim() throws {
+    #expect(try Command.parse("exec open -a Ghostty") == .exec("open -a Ghostty"))
+    // The whole point of the verb: shell syntax reaches the shell. None of
+    // this survives being tokenised and rejoined, and every one of them is
+    // ordinary in a config migrated from skhd.
+    #expect(
+        try Command.parse("exec echo \"a  b\" | tr a-z A-Z")
+            == .exec("echo \"a  b\" | tr a-z A-Z"))
+    #expect(try Command.parse("exec sed 's/a  b/c/'") == .exec("sed 's/a  b/c/'"))
+    #expect(try Command.parse("exec  pmset displaysleepnow ") == .exec("pmset displaysleepnow"))
+    // Runs of spaces *inside* the command are load-bearing and kept; the ones
+    // around it are not.
+    #expect(try Command.parse("exec a   b") == .exec("a   b"))
+    // A verb with no command is a typo, not an empty shell invocation.
+    #expect(throws: CommandParseError.self) { try Command.parse("exec") }
+    #expect(throws: CommandParseError.self) { try Command.parse("exec    ") }
+    // Not a prefix match: `execute` is not `exec`.
+    #expect(throws: CommandParseError.self) { try Command.parse("execute something") }
+}
+
 @Test func spiralFiveWindows() {
     // Fibonacci spiral on 1000x800, no gaps: master left, then top-right,
     // bottom-right, right-of-that, below-again.

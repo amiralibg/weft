@@ -71,6 +71,16 @@ public enum Reducer {
             return (State(tree: cycled, screen: state.screen, config: state.config),
                     [.focusWindow(member), .raise(member)])
         case .move(let dir):
+            // Structural, and deliberately not geometric: the step is taken in
+            // the tree, so the window keeps the size of the slot it lands in
+            // rather than inheriting whatever the nearest neighbour happened
+            // to own. `swap` below is the geometric one.
+            guard let focused = tree.focus else { return (state, []) }
+            tree = tree.moving(focused, towards: dir)
+            guard tree != state.tree else { return (state, []) }
+            let newState = State(tree: tree, screen: state.screen, config: state.config)
+            return (newState, relayoutMutations(state: newState, previous: state0))
+        case .swap(let dir):
             let frames = layout(tree, in: state.screen, config: state.config)
             guard let focused = tree.focus,
                   let next = neighbour(of: focused, in: frames, towards: dir)
@@ -104,7 +114,7 @@ public enum Reducer {
             // every layout kind, not a tree edit.
             return (state, [])
         case .space, .sticky, .focusDisplay, .moveWindowToDisplay, .moveSpaceToDisplay,
-             .appToggle:
+             .appToggle, .exec:
             // Daemon-level verbs: multi-space topology and privileged calls.
             // The daemon intercepts them before reduce; reaching here is a
             // programming error, and no-op is the safe response.
@@ -180,9 +190,9 @@ public enum Reducer {
                 ?? nearestByCentre(from: from, in: frames, excluding: focused, towards: dir)
             guard let id else { return (fl, []) }
             next = fl.focusing(id)
-        case .move, .resize, .split, .insertion, .balance,
+        case .move, .swap, .resize, .split, .insertion, .balance,
              .stack, .space, .sticky, .focusDisplay, .moveWindowToDisplay,
-             .moveSpaceToDisplay, .appToggle, .query,
+             .moveSpaceToDisplay, .appToggle, .exec, .query,
              .toggleFullscreen, .toggleSplit, .float:
             return (fl, [])
         }
