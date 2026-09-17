@@ -638,9 +638,19 @@ final class Daemon: @unchecked Sendable {
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
         let sp = readSpaces()
-        for sid in Set(sp.currentByDisplay.values) {
+        // Which desktops are showing, asked of the WindowServer rather than of
+        // weft's cache of it. The two disagree for as long as it takes weft to
+        // notice a switch it did not perform — a trackpad swipe, Mission
+        // Control, an app activating elsewhere — and `space focus` already
+        // refuses to trust the cache for exactly that reason. Grab zones and
+        // borders describe what is *on screen*, and the border pieces are
+        // sticky so they render on whatever desktop is showing: believing the
+        // cache here paints the previous desktop's layout over the new one.
+        // One call, ~40 µs, no window list.
+        let showing = WorldReader.currentSpaces()
+        for (uuid, sid) in showing {
             guard let layout = sp.layouts[sid] else { continue }
-            let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
+            let screen = usableScreen(onDisplay: sp.displayBySpace[sid] ?? uuid)
             let frames: [WindowID: Frame]
             var grabbable = true
             switch layout {
@@ -675,17 +685,37 @@ final class Daemon: @unchecked Sendable {
         input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
         input.updateStackZones(clickablePeeks.map(\.rect))
         if wantBorders {
+            // Drop the windows that are in a layout but not on screen.
+            //
+            // Closing a window does not always destroy it — Ghostty and most
+            // Electron apps order it out and keep it — and minimising does not
+            // either. Neither produces a destroy notification, so the layout
+            // goes on holding the window and, before this, went on drawing a
+            // border around the place it used to be. `evictOrderedOut` finds
+            // them, but only on the next focus change, and closing a window
+            // with the mouse need not move focus at all.
+            let onScreen = WorldReader.onScreenWindowIDs()
+            borderFrames = borderFrames.filter { onScreen.contains($0.key) }
             // Only windows in a layout, which is what keeps popovers,
             // Spotlight and every other transient panel border-free with no
             // heuristic at all. The active border goes where macOS says focus
             // is: a float no layout owns gets none, rather than the last tile
             // keeping a highlight it no longer has.
-            let system = systemFocusLock.withLock { systemFocusLocked }
-            let focus = system.map { borderFrames[$0] != nil ? $0 : nil }
+            //
+            // Passed through as the system reports it, *not* pre-resolved to
+            // nil for a window with no border. `noteFocusedWindow` pushes the
+            // raw value straight to the renderer on every focus change, so
+            // filtering it only here meant the two writers disagreed and
+            // whichever ran last won — with `show-inactive = false` that flips
+            // between "no highlight" and "no borders at all". The renderer
+            // holds the one rule: a focused window with no border makes no
+            // border active.
+            let focus = systemFocusLock.withLock { systemFocusLocked }
                 ?? sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
-            // Exactly what the renderer is handed. A border that rings no window
-            // is either drawn wrong from a right frame, or drawn right from a
-            // wrong one, and nothing short of this distinguishes the two.
+            // Membership and targets — what the renderer is asked for. Its own
+            // trace line prints what it actually drew, read from the
+            // WindowServer. Comparing the two is how you tell a window weft
+            // should not be bordering from a window that has not moved yet.
             if Trace.logging {
                 let list = borderFrames.sorted { $0.key < $1.key }.map {
                     String(
@@ -1686,11 +1716,12 @@ final class Daemon: @unchecked Sendable {
             // drag settles first and THEN retiles once (trailing edge), so we
             // never fight the hand mid-drag.
             let actual = WorldReader.frame(of: wid)
-            // Before the echo check: an echo that landed a few points off its
-            // target (a terminal rounding to cells) is where the window is.
-            if let actual, bordersBridge.drawsBorders {
-                bordersBridge.renderer.observe(wid, actual: actual)
-            }
+            // Before the echo check, and regardless of it: an echo is weft's
+            // own write *landing*, which is the moment the border most needs
+            // to move. The renderer is told that the geometry changed and
+            // reads it itself — passing this frame on would be handing it a
+            // number that is already one notification out of date.
+            if bordersBridge.drawsBorders { bordersBridge.renderer.windowMoved(wid) }
             if let actual, applier.isEcho(wid: wid, frame: actual) {
                 return
             }
@@ -2095,6 +2126,18 @@ final class Daemon: @unchecked Sendable {
         if case .appToggle(let bundleID) = command {
             return handleAppToggle(bundleID)
         }
+        if case .exec(let shell) = command {
+            // The state the command runs against is the state it was bound to
+            // react to, so a bind can be `exec notify-send "$WEFT_SPACE_LABEL"`
+            // with nothing to query. Same variables the sketchybar bridge
+            // publishes, from the same place.
+            guard Exec.run(shell, env: currentStateSummary().environment) else {
+                return IPCResponse(
+                    ok: false,
+                    error: "exec refused: \(Exec.maxConcurrent) commands are already running")
+            }
+            return IPCResponse(ok: true, output: "exec \(shell)")
+        }
         if case .float(let mode) = command {
             return handleFloat(mode)
         }
@@ -2270,7 +2313,7 @@ final class Daemon: @unchecked Sendable {
                 error: "ctrl+\(number) did not switch to '\(label)'. Enable System Settings → Keyboard → "
                     + "Shortcuts → Mission Control → 'Switch to Desktop \(number)'."
             )
-        case .moveWindow(let target, let widOpt):
+        case .moveWindow(let target, let widOpt, let follow):
             guard let sid = sp.resolveSpace(target) else {
                 return IPCResponse(ok: false, error: "unknown space '\(target)'")
             }
@@ -2289,7 +2332,8 @@ final class Daemon: @unchecked Sendable {
             } else {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
-            return moveWindow(wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)")
+            return moveWindow(
+                wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)", follow: follow)
         case .label(let name):
             guard !name.isEmpty else {
                 return IPCResponse(ok: false, error: "usage: space label <name>")
@@ -2352,7 +2396,9 @@ final class Daemon: @unchecked Sendable {
     /// The target space's layout is applied too — on multi-display it is
     /// very often visible on the other monitor right now, so leaving it for
     /// the next sweep showed the window at its old size for a beat.
-    private func moveWindow(_ wid: WindowID, toSpace sid: SpaceID, label: String) -> IPCResponse {
+    private func moveWindow(
+        _ wid: WindowID, toSpace sid: SpaceID, label: String, follow: Bool = false
+    ) -> IPCResponse {
         // Layout membership is not the same question as "is it here". An
         // unmanaged window sits on the current space in no layout at all, and
         // testing the layout sent it down the background-window path and
@@ -2373,7 +2419,8 @@ final class Daemon: @unchecked Sendable {
                         + "Keyboard → Keyboard Shortcuts → Mission Control")
             }
         }
-        guard SpaceControl.moveWindowToSpace(wid, sid) else {
+        let startedOn = currentSID()
+        guard SpaceControl.moveWindowToSpace(wid, sid, follow: follow) else {
             return IPCResponse(
                 ok: false,
                 error: "the move did not land — nothing changed. weft moves a window by holding it "
@@ -2381,6 +2428,21 @@ final class Daemon: @unchecked Sendable {
                     + "bound (System Settings → Keyboard → Keyboard Shortcuts → Mission Control → "
                     + "Move left/right a space), or this window has nothing draggable along its "
                     + "top edge — WEFT_TRACE=1 says which.")
+        }
+        // Record the desktop the carry left us on before anything reads it.
+        // `applySpaceLayout` below asks `visibleSpaces` which space to raise
+        // into, and every later command resolves `recent` against this — so a
+        // follow that updated nothing would tile the destination as a
+        // background space and leave `⌥Tab` pointing at the desktop the user
+        // is standing on.
+        if follow {
+            let live = WorldReader.currentSpaces()
+            updateSpaces { s in
+                for (uuid, current) in live { s.currentByDisplay[uuid] = current }
+                if let startedOn, startedOn != sid { s.recentSpace = startedOn }
+                s.focusedDisplay = s.displayBySpace[sid] ?? s.focusedDisplay
+            }
+            actedSpacesLock.withLock { actedSpacesLocked = live }
         }
         // Re-read display geometry before sizing anything against it. macOS
         // puts the menu bar on whichever display has focus, so the other
@@ -2407,18 +2469,28 @@ final class Daemon: @unchecked Sendable {
                 // on a 3840-wide monitor should split it side by side even
                 // though it came from a 1710-wide one.
                 if !t.windows.contains(wid) { t = t.inserting(wid, in: targetScreen, config: tile) }
+                // Arriving with the window means arriving *on* it. Without
+                // this the destination raises whichever tile it last focused,
+                // so the window the user just sent lands behind one they were
+                // not thinking about.
+                if follow { t = t.focusing(wid) }
                 sp.layouts[sid] = .tiling(t)
             case .float(var f):
                 if !f.windows.contains(wid) { f = f.inserting(wid) }
+                if follow { f = f.focusing(wid) }
                 sp.layouts[sid] = .float(f)
             }
         }
-        if let cur = currentSID() {
+        if let cur = currentSID(), cur != sid {
             applySpaceLayout(cur)
         }
         if readSpaces().visibleSpaces.contains(sid) {
             applier.bind(windows: pid(of: wid).map { [(wid: wid, pid: $0)] } ?? [])
-            applySpaceLayout(sid, raiseFocus: false)
+            // Following means the destination is the space the user is looking
+            // at, so it gets the raise and the window gets focus. Not
+            // following, it is a background space and raising there would hand
+            // its display the active menu bar (§14.6).
+            applySpaceLayout(sid, stealFocus: follow, raiseFocus: follow)
         }
         // And once more when the app has finished changing spaces.
         //
@@ -2449,7 +2521,8 @@ final class Daemon: @unchecked Sendable {
             self.syncQueue.asyncAfter(deadline: .now() + 0.25, execute: settle)
         }
         bus.emit(stateChangedEvent())
-        return IPCResponse(ok: true, output: "moved \(wid) to \(label)")
+        return IPCResponse(
+            ok: true, output: "moved \(wid) to \(label)\(follow ? " and followed" : "")")
     }
 
     private func handleAppToggle(_ bundleID: String) -> IPCResponse {

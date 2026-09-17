@@ -6,12 +6,33 @@ import WeftCore
 
 /// Weft's own window borders.
 ///
-/// Drawn from the frames weft is applying, so a border never trails its
-/// window the way a separate process's does: that process learns a window
-/// moved by being told afterwards and reading the geometry back. And weft
-/// already knows which windows are windows — a border exists exactly when a
-/// window is in a layout — so popovers, Spotlight and screenshot overlays
-/// never get one.
+/// Two questions, answered by two different authorities, and keeping them
+/// apart is the whole design:
+///
+/// - **Which windows get one** — weft's layouts. weft already knows which
+///   windows are windows, so popovers, Spotlight and screenshot overlays never
+///   get a border and no heuristic is needed to keep them out.
+/// - **Where each one goes** — the WindowServer, re-read on every pass.
+///   *Never* the frame weft asked the window for.
+///
+/// The second used to come from the layout too, and that was the "borders are
+/// around the wrong windows" bug. A frame weft has written is where a window
+/// will be, not where it is: a native app takes single-digit milliseconds to
+/// get there, Electron and JetBrains take far longer, and a window with no AX
+/// element yet (§5.0) or one that has refused the frame never gets there at
+/// all. Drawing the intent put a ring in the empty space a window was heading
+/// for — most visibly when windows opened and closed, which is exactly when
+/// every survivor is asked to move at once.
+///
+/// Reading instead of predicting costs one `SLSGetWindowBounds` per bordered
+/// window per pass: WindowServer-local, 0.03 ms, no app IPC. In exchange the
+/// border cannot be anywhere its window is not, and the heuristic that used to
+/// arbitrate between the two — which latched a half-width ring around a
+/// full-width window when it guessed wrong — is gone rather than improved.
+///
+/// Following a window that is still moving needs no polling: each pass asks
+/// whether anything has yet to reach its target, and arms one short, decaying
+/// ladder of re-reads if so. Nothing is scheduled once everything has arrived.
 ///
 /// Built to cost as little as possible, in this order:
 /// - **Area.** Each border is a handful of windows covering only the ring
@@ -71,7 +92,11 @@ public final class BorderRenderer: @unchecked Sendable {
     }
 
     private struct Border {
-        var target: Frame
+        /// The window's frame as the WindowServer last reported it — where this
+        /// ring is actually drawn. Not the frame weft asked the window for;
+        /// that is `BorderRenderer.targets`, and the two differ for as long
+        /// as the app takes to honour a write.
+        var around: Frame
         var color: UInt32
         var radius: Double
         var scale: Double
@@ -84,14 +109,20 @@ public final class BorderRenderer: @unchecked Sendable {
     // Wanted state: written from any thread, under `lock`.
     private let lock = NSLock()
     private var wantedStyle: Style?
-    private var wantedFrames: [WindowID: Frame] = [:]
+    /// Which windows get a border, and the frame weft last asked each for.
+    ///
+    /// The target is **not** where the border is drawn — `drain` reads that
+    /// from the WindowServer every pass. It is kept only to answer "has this
+    /// window finished arriving", which is what stops the settle ladder.
+    private var targets: [WindowID: Frame] = [:]
     private var wantedFocus: WindowID?
-    /// The frame weft last asked each window for.
-    private var lastTargets: [WindowID: Frame] = [:]
-    /// Where a window settled instead, and the target it settled against.
-    private var observed: [WindowID: (actual: Frame, target: Frame)] = [:]
     private var scheduled = false
     private var screensStale = true
+    /// How far down `settleLadderMs` the current convergence watch is. Reset
+    /// by any new intent, advanced by each pass that finds a window still in
+    /// flight, and stopped when the ladder runs out.
+    private var settleStep = 0
+    private var settleGeneration = 0
 
     // Drawn state: touched only on `queue`.
     private var borders: [WindowID: Border] = [:]
@@ -121,16 +152,23 @@ public final class BorderRenderer: @unchecked Sendable {
 
     /// Borders around exactly these windows — the visible layouts — and no
     /// others. `frames` are the ones weft is applying.
+    ///
+    /// They decide *membership*, not geometry. A border is drawn where the
+    /// WindowServer says its window is, read fresh on every pass, because the
+    /// two are not the same thing for as long as it takes the app to honour
+    /// the write — single-digit milliseconds for a native app, far longer for
+    /// Electron or a JetBrains IDE, and *never* for a window with no AX
+    /// element yet (§5.0) or one that refused the frame. Drawing the intent
+    /// put a ring where a window was about to be, which is a ring around
+    /// nothing until it gets there, and around nothing for good when it does
+    /// not. That is the whole of the "borders are on the wrong windows" bug:
+    /// it showed up most when windows opened and closed, because that is when
+    /// every survivor is asked to move at once.
     public func update(frames: [WindowID: Frame], focused: WindowID?) {
         lock.withLock {
-            var resolved = frames
-            for (wid, target) in frames {
-                if let o = observed[wid], Self.close(o.target, target) { resolved[wid] = o.actual }
-            }
-            observed = observed.filter { frames[$0.key] != nil }
-            lastTargets = frames
-            wantedFrames = resolved
+            targets = frames
             wantedFocus = focused
+            settleStep = 0
         }
         schedule()
     }
@@ -139,51 +177,29 @@ public final class BorderRenderer: @unchecked Sendable {
     /// `moved` keep theirs.
     public func move(_ moved: [WindowID: Frame]) {
         lock.withLock {
-            for (wid, frame) in moved where wantedFrames[wid] != nil {
-                lastTargets[wid] = frame
-                observed.removeValue(forKey: wid)
-                wantedFrames[wid] = frame
-            }
+            for (wid, frame) in moved where targets[wid] != nil { targets[wid] = frame }
+            settleStep = 0
         }
         schedule()
     }
 
-    /// Where the WindowServer says a bordered window actually is.
+    /// A bordered window moved or resized under us — a user drag, an app
+    /// resizing itself, or weft's own write landing. Re-read and redraw.
     ///
-    /// An app can settle a few points off the frame weft asked for — a
-    /// terminal rounding to whole character cells — and a border drawn around
-    /// the target then stands off the window by that much. So the border
-    /// follows the window, until weft asks that window for a different frame.
-    public func observe(_ wid: WindowID, actual: Frame) {
-        let changed: Bool = lock.withLock {
-            guard let current = wantedFrames[wid], !Self.close(current, actual) else { return false }
-            let target = lastTargets[wid] ?? current
-            // Only a settle, never a frame from mid-flight.
-            //
-            // This accepted anything the WindowServer reported, and a resize
-            // reports the window's *old* size until it finishes. So closing one
-            // of two tiled windows recorded the survivor at its old half-width
-            // against its new full-width target — and because the recorded
-            // target is the current one, `close(o.target, target)` then matched
-            // on every later pass and re-substituted the stale size forever.
-            // The border stayed half the width of its window and never
-            // recovered. The same read arriving early, before the layout
-            // caught up, drew one ring across two windows.
-            //
-            // A character cell is a few points. Hundreds is not a rounding, it
-            // is a window that has not finished moving, and the next layout
-            // pass is a better answer than a guess.
-            guard BorderGeometry.settles(actual, against: target) else { return false }
-            observed[wid] = (actual, target)
-            wantedFrames[wid] = actual
+    /// No frame is passed because none is trusted: this is a signal that the
+    /// geometry changed, and `drain` asks the WindowServer what it changed to.
+    /// The predecessor took the reported frame and had to judge whether it was
+    /// a settle or a read from mid-flight, because it was being used as the
+    /// border's position; getting that judgement wrong latched a half-width
+    /// ring around a full-width window permanently. Nothing has to judge
+    /// anything now.
+    public func windowMoved(_ wid: WindowID) {
+        let bordered: Bool = lock.withLock {
+            guard targets[wid] != nil else { return false }
+            settleStep = 0
             return true
         }
-        if changed { schedule() }
-    }
-
-    private static func close(_ a: Frame, _ b: Frame) -> Bool {
-        abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5
-            && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
+        if bordered { schedule() }
     }
 
     public func setFocus(_ wid: WindowID?) {
@@ -200,9 +216,8 @@ public final class BorderRenderer: @unchecked Sendable {
     /// they have to go now rather than at the next layout pass.
     public func clear() {
         lock.withLock {
-            wantedFrames = [:]
-            lastTargets = [:]
-            observed = [:]
+            targets = [:]
+            settleStep = 0
         }
         schedule()
     }
@@ -224,10 +239,10 @@ public final class BorderRenderer: @unchecked Sendable {
     // MARK: - Drawing (on `queue`)
 
     private func drain() {
-        let (style, frames, focus, refreshScreens) = lock.withLock {
+        let (style, wantedTargets, focus, refreshScreens) = lock.withLock {
             scheduled = false
             defer { screensStale = false }
-            return (wantedStyle, wantedFrames, wantedFocus, screensStale)
+            return (wantedStyle, targets, wantedFocus, screensStale)
         }
         if refreshScreens { screens = Self.readScreens() }
         guard let style, style.width > 0 else {
@@ -235,6 +250,23 @@ public final class BorderRenderer: @unchecked Sendable {
             drawnStyle = nil
             return
         }
+        // Where the windows *are*, asked one by one. `SLSGetWindowBounds` is
+        // WindowServer-local — 0.03 ms p50, no app IPC — so the whole resolve
+        // costs a fraction of a millisecond for a screenful of windows, and
+        // paying it on every pass is what makes a border incapable of being
+        // somewhere its window is not. A window the WindowServer has nothing
+        // to say about is gone; it loses its border rather than keeping one
+        // over its last known position.
+        var frames: [WindowID: Frame] = [:]
+        frames.reserveCapacity(wantedTargets.count)
+        for wid in wantedTargets.keys {
+            guard let actual = bounds(of: wid) else { continue }
+            frames[wid] = actual
+        }
+        // Anything still in flight gets looked at again shortly. The ladder is
+        // armed by a change and always terminates, so there is still no timer
+        // running when nothing is moving — the 0% idle invariant survives.
+        armSettleWatchIfNeeded(targets: wantedTargets, actual: frames)
         if let drawn = drawnStyle, !drawn.sameGeometry(as: style) {
             for wid in Array(borders.keys) { destroy(wid) }
         }
@@ -272,8 +304,8 @@ public final class BorderRenderer: @unchecked Sendable {
                 let drawn = borders.sorted { $0.key < $1.key }.map {
                     String(
                         format: "%u:%08x@%.0f,%.0f %.0fx%.0f", $0.key, $0.value.color,
-                        $0.value.target.x, $0.value.target.y,
-                        $0.value.target.width, $0.value.target.height)
+                        $0.value.around.x, $0.value.around.y,
+                        $0.value.around.width, $0.value.around.height)
                 }
                 fputs(
                     "weftd: borders \(borders.count) window(s), \(pieces) piece(s); "
@@ -286,9 +318,9 @@ public final class BorderRenderer: @unchecked Sendable {
 
         // Made on the first move, if there is one: most passes move nothing.
         var transaction: CFTypeRef?
-        for (wid, target) in wanted {
+        for (wid, frame) in wanted {
             let color = wid == focus ? style.activeColor : style.inactiveColor
-            place(wid, target: target, color: color, style: style, transaction: &transaction)
+            place(wid, around: frame, color: color, style: style, transaction: &transaction)
         }
         if let transaction { SLSTransactionCommit(transaction, 0) }
 
@@ -301,34 +333,85 @@ public final class BorderRenderer: @unchecked Sendable {
         }
     }
 
+    /// Where the WindowServer says a window is, or nil if it has nothing to
+    /// say about it any more.
+    private func bounds(of wid: WindowID) -> Frame? {
+        var rect = CGRect.zero
+        guard SLSGetWindowBounds(cid, SLWindowID(wid), &rect) == 0 else { return nil }
+        guard rect.width > 1, rect.height > 1 else { return nil }
+        return Frame(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
+    }
+
+    /// Delays, in milliseconds, at which a window that has not reached its
+    /// target yet is looked at again. Front-loaded because most writes land in
+    /// single-digit milliseconds, and it runs out after about a second —
+    /// long enough for a slow Electron relayout, short enough that a window
+    /// which is never going to arrive costs eight reads and then nothing.
+    ///
+    /// An AX move or resize notification re-arms it (`windowMoved`), so an app
+    /// slower than the ladder is still followed; the ladder is what covers the
+    /// windows that send no notification at all, which is every window with no
+    /// AX element yet.
+    private static let settleLadderMs = [8, 16, 32, 64, 128, 256, 512]
+
+    private func armSettleWatchIfNeeded(targets: [WindowID: Frame], actual: [WindowID: Frame]) {
+        // "Arrived" is the same generous test the border used to apply before
+        // it would follow a window: a terminal that rounds to whole character
+        // cells has arrived, a window hundreds of points away has not.
+        let inFlight = targets.contains { wid, target in
+            guard let a = actual[wid] else { return false }
+            return !BorderGeometry.settles(a, against: target)
+        }
+        // Delay and generation come out of one critical section: read
+        // separately, a newer intent landing between them would hand this
+        // wake-up the newer generation and make it look current.
+        let armed: (delay: Int, generation: Int)? = lock.withLock {
+            guard inFlight, settleStep < Self.settleLadderMs.count else {
+                if !inFlight { settleStep = 0 }
+                return nil
+            }
+            let ms = Self.settleLadderMs[settleStep]
+            settleStep += 1
+            settleGeneration &+= 1
+            return (ms, settleGeneration)
+        }
+        guard let (delay, generation) = armed else { return }
+        queue.asyncAfter(deadline: .now() + .milliseconds(delay)) { [weak self] in
+            guard let self else { return }
+            // A newer intent has its own ladder; this one is stale.
+            guard self.lock.withLock({ self.settleGeneration }) == generation else { return }
+            self.schedule()
+        }
+    }
+
     private func queueMove(_ piece: SLWindowID, to frame: Frame, in transaction: inout CFTypeRef?) {
         if transaction == nil { transaction = SLSTransactionCreate(cid) }
         SLSTransactionMoveWindowWithGroup(transaction, piece, CGPoint(x: frame.x, y: frame.y))
     }
 
     private func place(
-        _ wid: WindowID, target: Frame, color: UInt32, style: Style, transaction: inout CFTypeRef?
+        _ wid: WindowID, around: Frame, color: UInt32, style: Style, transaction: inout CFTypeRef?
     ) {
-        let scale = scaleFactor(for: target)
+        let scale = scaleFactor(for: around)
         guard var border = borders[wid], abs(border.scale - scale) < 0.01 else {
             // New, or on a display of another resolution: its backing stores
             // are the wrong size, so it is built again rather than repainted.
             destroy(wid)
-            create(wid, target: target, color: color, style: style, scale: scale)
+            create(wid, around: around, color: color, style: style, scale: scale)
             return
         }
-        let sameSize = abs(border.target.width - target.width) < 0.5
-            && abs(border.target.height - target.height) < 0.5
-        let samePlace = abs(border.target.x - target.x) < 0.5 && abs(border.target.y - target.y) < 0.5
+        let sameSize = abs(border.around.width - around.width) < 0.5
+            && abs(border.around.height - around.height) < 0.5
+        let samePlace = abs(border.around.x - around.x) < 0.5 && abs(border.around.y - around.y) < 0.5
         if sameSize && samePlace && border.color == color { return }
 
         var repaint = Set<Int>()
         if !sameSize {
             let radius = resolveRadius(wid, style: style)
-            let layout = BorderGeometry.pieces(around: target, width: style.width, radius: radius)
+            let layout = BorderGeometry.pieces(around: around, width: style.width, radius: radius)
             guard layout.count == border.pieces.count else {
                 destroy(wid)
-                create(wid, target: target, color: color, style: style, scale: scale)
+                create(wid, around: around, color: color, style: style, scale: scale)
                 return
             }
             for i in layout.indices {
@@ -352,8 +435,8 @@ public final class BorderRenderer: @unchecked Sendable {
             if abs(radius - border.radius) > 0.01 { repaint.formUnion(border.pieces.indices) }
             border.radius = radius
         } else if !samePlace {
-            let dx = target.x - border.target.x
-            let dy = target.y - border.target.y
+            let dx = around.x - border.around.x
+            let dy = around.y - border.around.y
             for i in border.pieces.indices {
                 border.pieces[i].frame.x += dx
                 border.pieces[i].frame.y += dy
@@ -361,18 +444,18 @@ public final class BorderRenderer: @unchecked Sendable {
             }
         }
         if border.color != color { repaint.formUnion(border.pieces.indices) }
-        border.target = target
+        border.around = around
         border.color = color
-        for i in repaint { paint(&border.pieces[i], target: target, color: color, style: style, radius: border.radius) }
+        for i in repaint { paint(&border.pieces[i], around: around, color: color, style: style, radius: border.radius) }
         borders[wid] = border
     }
 
-    private func create(_ wid: WindowID, target: Frame, color: UInt32, style: Style, scale: Double) {
+    private func create(_ wid: WindowID, around: Frame, color: UInt32, style: Style, scale: Double) {
         let radius = resolveRadius(wid, style: style)
         var level: Int32 = 0
         _ = SLSGetWindowLevel(cid, SLWindowID(wid), &level)
         var pieces: [Piece] = []
-        for layout in BorderGeometry.pieces(around: target, width: style.width, radius: radius) {
+        for layout in BorderGeometry.pieces(around: around, width: style.width, radius: radius) {
             let f = layout.frame
             var rect = [CGRect(x: 0, y: 0, width: f.width, height: f.height)]
             var pieceWID: SLWindowID = 0
@@ -391,11 +474,11 @@ public final class BorderRenderer: @unchecked Sendable {
             var piece = Piece(wid: pieceWID, frame: f, isStrip: layout.isStrip, opaque: false, context: nil)
             // Painted before it is ordered in: an unpainted window on screen
             // is a solid rectangle belonging to nothing.
-            paint(&piece, target: target, color: color, style: style, radius: radius)
+            paint(&piece, around: around, color: color, style: style, radius: radius)
             pieces.append(piece)
         }
         for piece in pieces { order(piece.wid, above: wid) }
-        borders[wid] = Border(target: target, color: color, radius: radius, scale: scale, pieces: pieces)
+        borders[wid] = Border(around: around, color: color, radius: radius, scale: scale, pieces: pieces)
         if wid == raisedFocus { raisedFocus = nil }
     }
 
@@ -408,7 +491,7 @@ public final class BorderRenderer: @unchecked Sendable {
         if raisedFocus == wid { raisedFocus = nil }
     }
 
-    private func paint(_ piece: inout Piece, target: Frame, color: UInt32, style: Style, radius: Double) {
+    private func paint(_ piece: inout Piece, around: Frame, color: UInt32, style: Style, radius: Double) {
         // A strip is a straight run of one colour: opaque when the colour is,
         // so the compositor copies it instead of blending it.
         let opaque = piece.isStrip && (color >> 24) == 0xff
@@ -432,7 +515,7 @@ public final class BorderRenderer: @unchecked Sendable {
             ctx.saveGState()
             // The ring is stroked as a whole and each corner window shows its
             // part of it. Quartz is bottom-left, SLS is top-left.
-            let outer = BorderGeometry.outer(of: target, width: style.width)
+            let outer = BorderGeometry.outer(of: around, width: style.width)
             ctx.translateBy(
                 x: -(piece.frame.x - outer.x),
                 y: -(outer.height - (piece.frame.y - outer.y) - piece.frame.height)

@@ -28,23 +28,28 @@ public enum BorderGeometry {
     /// count as having honoured it. Two character cells of a large font.
     public static let settleTolerance: Double = 40
 
-    /// Whether `actual` is `target` with a settle, or a different frame.
+    /// Whether a window has arrived at the frame it was asked for.
     ///
-    /// An app can land a few points off what weft asked for — a terminal rounds
-    /// to whole character cells — and a border drawn around the request then
-    /// stands off the window by that much, so the renderer follows the window.
-    /// It must not follow a frame from *mid-flight*: a resize reports the old
-    /// size until it finishes, and accepting that recorded the survivor of a
-    /// closed split at its old half width against its new full-width target.
-    /// Because the recorded target is the current one, the substitution then
-    /// matched on every later pass and the border stayed half the width of its
-    /// window forever; arriving early instead, it drew one ring across two
-    /// windows. Both were the same bug, and both were reported as "the border
-    /// is around the wrong thing".
+    /// An app can land a few points off what weft asked for and be finished —
+    /// a terminal rounds to whole character cells — so "arrived" cannot mean
+    /// "equal". Hundreds of points is not a rounding: it is a window that has
+    /// not finished moving, because a resize reports the old size until it
+    /// completes.
     ///
-    /// Hundreds of points is not a rounding. It is a window that has not
-    /// finished moving, and the next layout pass is a better answer than a
-    /// guess at where it went.
+    /// The border renderer uses this to decide when to **stop looking**. It
+    /// draws every border where the WindowServer says the window is, and after
+    /// each pass it asks whether anything is still in flight; while something
+    /// is, it re-reads on a short decaying ladder, and when nothing is, it
+    /// stops and no timer runs.
+    ///
+    /// It used to be asked a different question — *may the border follow this
+    /// frame* — because the border was drawn around the frame weft had asked
+    /// for and this decided whether to substitute the observed one. Getting
+    /// that judgement wrong was unrecoverable in both directions: a survivor
+    /// of a closed split latched at its old half width around a full-width
+    /// window, permanently; the same read arriving early drew one ring across
+    /// two windows. Nothing substitutes anything now, so a wrong answer here
+    /// costs at most a few extra reads or a slightly early stop.
     public static func settles(_ actual: Frame, against target: Frame) -> Bool {
         abs(actual.x - target.x) <= settleTolerance
             && abs(actual.y - target.y) <= settleTolerance

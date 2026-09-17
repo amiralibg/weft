@@ -380,9 +380,14 @@ confident explanations were produced and both were refuted by measurement:
   `1112 − 3272 = −2160`, matching `CGDisplayBounds` exactly. `Frame.contains` handles
   negative coordinates correctly.
 
-So the border bug is **unexplained**. Diagnosing it needs `weftd` running and
-`weftctl query state` captured while the bad border is on screen: that returns the
-computed frames and the focused window, which is precisely what the renderer is handed.
+**Resolved 2026-09-17 — DESIGN §22.** It was none of these, and the tell was in a
+later report: it happened while *staying on one desktop*, opening and closing windows.
+The renderer was drawing each ring around the frame weft had **asked** the window for,
+and `applyFrames` is fire-and-forget — so every ring was around a rectangle its window
+had not reached yet, for anywhere from half a millisecond to never. Opening or closing
+a window re-slots every sibling at once, which is why those were the moments it showed.
+Geometry now comes from `SLSGetWindowBounds` on every pass; the layout only says which
+windows get a border.
 
 ---
 

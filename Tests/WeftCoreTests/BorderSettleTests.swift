@@ -2,13 +2,14 @@ import Testing
 
 @testable import WeftCore
 
-/// The predicate that decides whether a border follows a window or ignores
-/// where it currently is.
+/// The predicate that decides whether a window has arrived at the frame it was
+/// asked for — which is what stops the border renderer's settle ladder.
 ///
-/// Every case here is taken from a real failure. The renderer used to accept
-/// any frame the WindowServer reported, which made the border follow a window
-/// mid-resize and then latch there: correct frames went in and a ring half the
-/// width of its window came out, on every pass, permanently.
+/// Every case here is taken from a real failure. The numbers are from the days
+/// when this decided where a *border* went rather than when to stop looking
+/// for one, so they are exactly the frames that produced a ring around the
+/// wrong thing; they are kept because the boundary between "rounded to
+/// character cells" and "still moving" is the same boundary either way.
 private func frame(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> Frame {
     Frame(x: x, y: y, width: w, height: h)
 }
