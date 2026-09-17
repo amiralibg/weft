@@ -1930,3 +1930,88 @@ answer as pressing Check Now, so `start()` now calls `refreshIfNeeded` when the
 cached answer is stale or missing. It still honours the daily throttle and
 `check-for-updates`, so this is at most one request a day and none at all when
 updates are off.
+
+---
+
+## 27. Moving a window there, then back — 2026-09-17
+
+Reported against 0.9.6: moving Zen from one desktop to another "worked, it was
+so laggy and delayed but it worked", and then moving it back "did not work at
+all". The asymmetry is the whole clue — the second move is the one the first
+move breaks.
+
+### 27.1 The grab probe believed weft's own writes
+
+`carry` picks a point on the window's top edge, presses, nudges the pointer
+down a few points, and asks whether the window moved. If it did, it is held and
+the desktop shortcut can go out.
+
+"Did it move" was the wrong question, because **weft writes frames to that same
+window**. `space move-window` schedules a trailing `applySpaceLayout` 250 ms
+after it finishes (§20.6), and any sweep can retile. Land one of those during
+the next move's grab probe and it reads as a successful grab — so the shortcut
+went out with *nothing held*. The desktop changed, the window stayed, the
+verification correctly failed, and the user was switched back. Two visible
+desktop changes, no move, and a first move that had itself worked.
+
+The probe now asks whether the window is **following the pointer**: down by
+something, by no more than the pointer travelled, with no sideways movement and
+no resize. Not `≈ dy` exactly — macOS needs a few points before it starts a
+window drag, so a window picked up on the third nudge has travelled less than
+the pointer and an exact match would reject it. The upper bound is what keeps a
+retile out: those move a window by a slot and change x or the size doing it.
+
+### 27.2 The carry guard was not on the funnel
+
+`DragMove.isCarrying` existed for exactly this and was checked in three places,
+one of them `applyCurrentSpace`, described as "the funnel every re-apply
+reaches". It is not: the trailing pass above calls `applySpaceLayout` directly.
+The guard moved onto `applySpaceLayout`, which is where frames are actually
+written, so every path in is covered including the one that caused this.
+
+Two fixes for one bug on purpose. Either alone leaves the failure reachable —
+the probe can be fooled by a sweep weft did not schedule, and a write during
+the hold ends the drag session whether or not the probe was fooled.
+
+### 27.3 The lag, itemised
+
+Per move, before this:
+
+| | cost |
+| --- | --- |
+| `SLSMoveWindowsToManagedSpace` + its settle | **150 ms, every move, always wasted** |
+| grab probe, per missed candidate | ~110 ms, up to 4 |
+| per desktop of travel | 40 ms of keypress + the macOS animation |
+| drop settle | flat 150 ms |
+
+Three of those four are now paid only when they buy something:
+
+- **The dead API call is probed once per daemon, not once per move.** S8 proved
+  it is refused on macOS 27, but "never" is a fact about today's macOS and the
+  probe is what survives the next release — so it is kept and its answer cached.
+- **The working grab point is remembered per app.** An app's title bar is in the
+  same place every time; the second move of the same app costs one attempt
+  instead of four. A remembered point that stops working is forgotten rather
+  than tried first forever.
+- **The drop settle polls** for the membership change instead of sleeping 150 ms
+  to cover the slowest case.
+- A move to the desktop the window is already on now returns immediately
+  instead of carrying it in a circle.
+
+What remains is the **macOS space-switch animation**, one per desktop of travel,
+and it cannot be removed. The fast synthetic Dock swipe weft uses for
+`space focus` is *refused while a drag is in flight* (§S8) — a held window is
+precisely the case it does not serve — so the carry must use the bound keyboard
+shortcut, which triggers the real animated transition. System Settings →
+Accessibility → Display → **Reduce motion** turns that animation into a
+crossfade, and it is the only lever there is.
+
+### 27.4 A failure now says which failure
+
+Every refusal in `DragMove` named itself, under `WEFT_TRACE` only, and the
+socket reply listed the things it might have been. A keybind that does nothing
+is exactly the case where nobody is watching stderr, and telling someone to
+re-run under a trace is asking them to reproduce a bug to find out what it was.
+`DragMove.failureReason` carries the actual one out to the reply, including two
+that had no message at all: a desktop list that does not contain both spaces,
+and a carry whose keys went out but left the window where it was.

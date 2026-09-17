@@ -2421,13 +2421,17 @@ final class Daemon: @unchecked Sendable {
         }
         let startedOn = currentSID()
         guard SpaceControl.moveWindowToSpace(wid, sid, follow: follow) else {
-            return IPCResponse(
-                ok: false,
-                error: "the move did not land — nothing changed. weft moves a window by holding it "
-                    + "and pressing your 'move a space' shortcut. Either that shortcut is not "
-                    + "bound (System Settings → Keyboard → Keyboard Shortcuts → Mission Control → "
-                    + "Move left/right a space), or this window has nothing draggable along its "
-                    + "top edge — WEFT_TRACE=1 says which.")
+            // The actual reason, not a list of the things it might have been.
+            // weft moves a window by holding it and pressing the bound "move a
+            // space" shortcut, and there are several ways that does not
+            // happen; naming all of them and asking the user to re-run under
+            // WEFT_TRACE is asking them to reproduce the bug to learn what it
+            // was. DragMove records which one it hit.
+            let why = DragMove.failureReason
+                ?? "weft moves a window by holding it and pressing your 'move a space' "
+                    + "shortcut, and it did not take. Check System Settings → Keyboard → "
+                    + "Keyboard Shortcuts → Mission Control → Move left/right a space."
+            return IPCResponse(ok: false, error: "the move did not land: \(why)")
         }
         // Record the desktop the carry left us on before anything reads it.
         // `applySpaceLayout` below asks `visibleSpaces` which space to raise
@@ -3467,6 +3471,19 @@ final class Daemon: @unchecked Sendable {
     private func applySpaceLayout(
         _ sid: SpaceID, stealFocus: Bool = false, raiseFocus: Bool = true, force: Bool = false
     ) {
+        // The real funnel for frame writes, and therefore where the carry
+        // guard belongs.
+        //
+        // `applyCurrentSpace` carried it and was described as the funnel, but
+        // it is not the only way in: the trailing pass a *previous*
+        // `space move-window` schedules calls this directly, 250 ms after the
+        // move. Land that during the next carry and it writes an AX frame to
+        // the window being held, which ends the drag — the window is dropped
+        // where it stands and the remaining keypresses change desktop carrying
+        // nothing. That is why moving a window somewhere and then moving it
+        // straight back failed: the first move scheduled the write that broke
+        // the second.
+        guard !DragMove.isCarrying else { return }
         let screen = self.usableScreen(for: sid)
         let config = currentConfig().general.asTilingConfig()
         guard let spaceLayout = readSpaces().layouts[sid] else { return }

@@ -28,6 +28,11 @@ import WeftCore
 /// nothing, and one predicate answers "supported" about a tag it then drops, so
 /// a return code here is evidence of nothing. No silent no-ops, ever.
 public enum SpaceControl {
+    /// Whether `SLSMoveWindowsToManagedSpace` moves a window on this machine.
+    /// Nil until it has been tried once; false on every macOS weft has met.
+    private static let probeLock = NSLock()
+    private nonisolated(unsafe) static var slsMoveWorks: Bool?
+
     // MARK: - Reads (unprivileged, always work)
 
     public static func spacesForWindow(_ wid: WindowID) -> [SpaceID] {
@@ -181,6 +186,12 @@ public enum SpaceControl {
             guard follow else { return true }
             return focusSpace(sid)
         }
+        // Already there — and worth asking before anything else, because the
+        // work below is a synthetic drag across desktops.
+        if spacesForWindow(wid).contains(sid) {
+            _ = followIfAsked()
+            return true
+        }
         if ScriptingAddition.moveWindowToSpace(wid, sid) {
             usleep(60_000)
             if spacesForWindow(wid).contains(sid) {
@@ -188,12 +199,25 @@ public enum SpaceControl {
                 return true
             }
         }
-        let arr = [NSNumber(value: wid)] as CFArray
-        SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), arr, sid)
-        usleep(150_000)
-        if spacesForWindow(wid).contains(sid) {
-            _ = followIfAsked()
-            return true
+        // Tried once per daemon, not once per move.
+        //
+        // This call is refused on macOS 27 and returns void, so the only way
+        // to know is to make it and re-read — which costs a 150 ms settle. S8
+        // established it never works here, but "never" is a fact about today's
+        // macOS and the probe is what survives the next release, so it is kept
+        // and *cached*: one 150 ms answer for the life of the daemon instead
+        // of 150 ms on every single move, in front of a gesture that is
+        // already slow enough to be complained about.
+        if probeLock.withLock({ slsMoveWorks }) != false {
+            let arr = [NSNumber(value: wid)] as CFArray
+            SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), arr, sid)
+            usleep(150_000)
+            let landed = spacesForWindow(wid).contains(sid)
+            probeLock.withLock { slsMoveWorks = landed }
+            if landed {
+                _ = followIfAsked()
+                return true
+            }
         }
         // Last, because it is the one that works and the one the user sees.
         //

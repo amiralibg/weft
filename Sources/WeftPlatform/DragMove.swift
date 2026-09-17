@@ -48,6 +48,47 @@ public enum DragMove {
     private static let carryLock = NSLock()
     private nonisolated(unsafe) static var carrying = false
 
+    /// Where each app's windows can actually be picked up, as an offset from
+    /// the window's top-left.
+    ///
+    /// Keyed by pid, so it is per application rather than per window: a
+    /// browser's title bar is in the same place in every window it opens, and
+    /// the point of this is that the *second* move of an app costs one attempt
+    /// instead of four. A miss is about 110 ms, so a window whose chrome only
+    /// yields on the last candidate paid a third of a second before any key
+    /// went out, every single time.
+    private nonisolated(unsafe) static var grabOffsets: [Int32: CGPoint] = [:]
+
+    private static func grabOffset(for wid: WindowID) -> CGPoint? {
+        guard let pid = WorldReader.pid(of: wid) else { return nil }
+        return carryLock.withLock { grabOffsets[pid] }
+    }
+
+    private static func rememberGrab(_ offset: CGPoint, for wid: WindowID) {
+        guard let pid = WorldReader.pid(of: wid) else { return }
+        carryLock.withLock {
+            // Bounded: a long-lived daemon must not accumulate an entry per
+            // process it has ever carried a window for.
+            if grabOffsets.count > 128 { grabOffsets.removeAll() }
+            grabOffsets[pid] = offset
+        }
+    }
+
+    /// Drop a remembered point that stopped working — the app changed its
+    /// chrome, or the window is a different kind from the one that taught us.
+    /// Keeping it would put the same failed attempt first forever.
+    private static func forgetGrab(for wid: WindowID) {
+        guard let pid = WorldReader.pid(of: wid) else { return }
+        carryLock.withLock { _ = grabOffsets.removeValue(forKey: pid) }
+    }
+
+    private static let reasonLock = NSLock()
+    private nonisolated(unsafe) static var lastFailure: String?
+
+    /// Why the last carry did not happen, in words worth putting in front of
+    /// someone. Nil after one that worked.
+    public static var failureReason: String? { reasonLock.withLock { lastFailure } }
+
     /// True while a window is being held and carried to another desktop.
     ///
     /// The carry looks exactly like a user dragging a window and changing
@@ -87,12 +128,18 @@ public enum DragMove {
         _ wid: WindowID, to sid: SpaceID, stayOnDestination: Bool = false
     ) -> Bool {
         // Every exit below used to be a bare `return false`, so a failed move
-        // said only "nothing changed" — true, and useless. Each one now names
-        // itself under WEFT_TRACE.
+        // said only "nothing changed" — true, and useless. Each one names
+        // itself, and the reason is kept for the caller rather than only
+        // logged: a keybind that does nothing is exactly the case where the
+        // person affected is not watching stderr, and telling them to re-run
+        // with WEFT_TRACE is asking them to reproduce a bug to find out what
+        // it was.
         func no(_ why: String) -> Bool {
+            reasonLock.withLock { lastFailure = why }
             if Trace.logging { fputs("weftd: carry \(wid) -> \(sid) refused: \(why)\n", stderr) }
             return false
         }
+        reasonLock.withLock { lastFailure = nil }
         guard AXIsProcessTrusted() else { return no("not trusted for Accessibility") }
         let keys = shortcuts
         guard let right = keys.right, let left = keys.left else {
@@ -123,14 +170,25 @@ public enum DragMove {
         defer { carryLock.withLock { carrying = false } }
 
         // Only a window on screen can be grabbed, so go to its desktop first.
-        if windowSpace != display.current, !DockSwipe.focusSpace(windowSpace) { return false }
-
-        var moved = false
-        if let count = SpaceShortcuts.steps(from: windowSpace, to: sid, in: display.ids), count != 0 {
-            moved = carry(wid, steps: count, on: display.uuid, right: right, left: left)
+        if windowSpace != display.current, !DockSwipe.focusSpace(windowSpace) {
+            return no("could not switch to desktop \(windowSpace), where the window is")
         }
 
+        var moved = false
+        guard let count = SpaceShortcuts.steps(from: windowSpace, to: sid, in: display.ids) else {
+            return no("desktop \(windowSpace) or \(sid) is not in this display's list \(display.ids)")
+        }
+        if count == 0 {
+            // Already there. Not a failure, and not work either.
+            return true
+        }
+        moved = carry(wid, steps: count, to: sid, on: display.uuid, right: right, left: left)
+
         let landed = moved && SpaceControl.spacesForWindow(wid).contains(sid)
+        if moved && !landed {
+            _ = no("the drag and the keypresses went out, but the WindowServer still "
+                + "puts the window on \(SpaceControl.spacesForWindow(wid))")
+        }
         // Stay only on a move that actually worked. A failed carry leaves the
         // user on a desktop they did not ask for, with the window still where
         // it was — the worst of both, and the one case where going back is
@@ -148,16 +206,44 @@ public enum DragMove {
     // MARK: - The drag
 
     private static func carry(
-        _ wid: WindowID, steps: Int, on uuid: String, right: SpaceShortcut, left: SpaceShortcut
+        _ wid: WindowID, steps: Int, to target: SpaceID, on uuid: String,
+        right: SpaceShortcut, left: SpaceShortcut
     ) -> Bool {
         guard let frame = WorldReader.frame(of: wid) else { return false }
         let key = steps > 0 ? right : left
 
-        /// Has the window left where it started? The only proof a drag began.
-        func moved() -> Bool {
-            WorldReader.frame(of: wid).map {
-                abs($0.x - frame.x) > 0.5 || abs($0.y - frame.y) > 0.5
-            } ?? false
+        /// Is the window following the pointer — by exactly the amount the
+        /// pointer has moved, and in no other way?
+        ///
+        /// "Did it move at all" is not the same question and answering that one
+        /// was a bug with teeth. weft writes frames to this very window: the
+        /// trailing pass after the *previous* move lands 250 ms later, and any
+        /// sweep can retile it. A probe that accepts any movement reads one of
+        /// those writes as a successful grab, and then the desktop shortcut
+        /// goes out with nothing held — the desktop changes, the window stays,
+        /// and the move fails after costing two visible switches. It showed up
+        /// as "moved it there, then moving it back did nothing at all",
+        /// because the first move is what schedules the write that fools the
+        /// second.
+        ///
+        /// A held window tracks the pointer exactly: down by `dy`, no sideways
+        /// travel, no resize. A retile changes x or the size, or moves y by
+        /// something other than `dy`. Nothing weft writes can satisfy this by
+        /// accident.
+        func following(_ dy: Double) -> Bool {
+            guard let now = WorldReader.frame(of: wid) else { return false }
+            let down = now.y - frame.y
+            // Down by *something*, and by no more than the pointer travelled.
+            // Not `≈ dy`: macOS needs a few points of movement before it
+            // starts a window drag, so a window that was picked up on the
+            // third nudge has travelled less than the pointer and an exact
+            // match would reject it. The upper bound is what keeps a retile
+            // out — those move a window by a slot, not by eight points, and
+            // they change x or the size while they do it.
+            return abs(now.x - frame.x) < 1.5
+                && abs(now.width - frame.width) < 1.5
+                && abs(now.height - frame.height) < 1.5
+                && down > 0.5 && down <= dy + 3
         }
 
         // Where a window can be picked up.
@@ -174,21 +260,33 @@ public enum DragMove {
         //
         // The second point is the empty strip a tabbed window leaves to the
         // right of its tabs, which is draggable where the middle is not.
-        let candidates = [
-            CGPoint(x: frame.x + frame.width / 2, y: frame.y + 11),
-            CGPoint(x: frame.x + frame.width - 50, y: frame.y + 11),
-            CGPoint(x: frame.x + 80, y: frame.y + 11),
-            CGPoint(x: frame.x + frame.width / 2, y: frame.y + 24),
+        // Offsets from the window's top-left, so a remembered one still lands
+        // on the same part of the chrome when the window is a different size.
+        // The one that worked for this app last time goes first: probing costs
+        // about 110 ms per miss, and an app's title bar is in the same place
+        // every time.
+        var offsets: [CGPoint] = [
+            CGPoint(x: frame.width / 2, y: 11),
+            CGPoint(x: frame.width - 50, y: 11),
+            CGPoint(x: 80, y: 11),
+            CGPoint(x: frame.width / 2, y: 24),
         ]
+        if let remembered = grabOffset(for: wid) {
+            offsets.removeAll { abs($0.x - remembered.x) < 1 && abs($0.y - remembered.y) < 1 }
+            offsets.insert(remembered, at: 0)
+        }
         var held: CGPoint?
-        for point in candidates {
+        for offset in offsets {
+            let point = CGPoint(x: frame.x + offset.x, y: frame.y + offset.y)
             mouse(.leftMouseDown, point)
             // macOS starts a window drag on movement, not on the press alone.
+            var travelled = 0.0
             for dy in stride(from: 2.0, through: 8.0, by: 2.0) {
                 mouse(.leftMouseDragged, CGPoint(x: point.x, y: point.y + dy))
                 usleep(12_000)
+                travelled = dy
             }
-            let ok = moved()
+            let ok = following(travelled)
             if Trace.logging {
                 fputs(
                     "weftd: carry grab at \(Int(point.x)),\(Int(point.y)) — "
@@ -196,14 +294,25 @@ public enum DragMove {
             }
             if ok {
                 held = point
+                rememberGrab(offset, for: wid)
                 break
             }
-            // Let go before trying elsewhere. Released as a drag rather than a
-            // click, so a control under the pointer is not activated.
-            mouse(.leftMouseUp, CGPoint(x: point.x, y: point.y + 8))
+            // Let go before trying elsewhere. Released where it was pressed,
+            // not 8pt below: a release that has travelled is a *drag* to
+            // whatever is under it, and on a tab strip that tears the tab out
+            // into its own window. Back at the press point it is a click on
+            // something that was never activated, because the press and the
+            // release cancel out.
+            mouse(.leftMouseUp, point)
             usleep(60_000)
         }
         guard let grab = held else {
+            forgetGrab(for: wid)
+            reasonLock.withLock {
+                lastFailure = "nothing along this window's top edge picks it up, so weft "
+                    + "cannot carry it. Apps that draw their own title bar sometimes leave "
+                    + "no draggable strip at all."
+            }
             if Trace.logging {
                 fputs(
                     "weftd: carry \(wid) — nothing draggable in its top edge; "
@@ -236,7 +345,16 @@ public enum DragMove {
         mouse(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + 10))
         usleep(40_000)
         mouse(.leftMouseUp, CGPoint(x: grab.x, y: grab.y + 10))
-        usleep(150_000)
+        // Polled, not slept. The drop commits in a few milliseconds and the
+        // caller re-reads membership immediately afterwards, so a flat 150 ms
+        // was 150 ms added to every move to cover the slowest case. Give up at
+        // the same deadline, because a drop that has not registered by then is
+        // a failure the caller should see rather than wait longer for.
+        let deadline = Date().addingTimeInterval(0.15)
+        repeat {
+            if SpaceControl.spacesForWindow(wid).contains(target) { break }
+            usleep(5_000)
+        } while Date() < deadline
         return landed
     }
 

@@ -248,6 +248,14 @@ Weft reads whichever keys you have bound to "Move left/right a space" rather
 than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
 reported instead of silently doing nothing. `weftctl doctor` says which.
 
+**If this feels slow**, what you are waiting for is macOS's own space-switch
+animation — one per desktop the window travels. Weft's fast Dock swipe, the one
+`space focus` uses, is refused while a window is being held, so the carry has to
+use the keyboard shortcut and that plays the full transition. System Settings ›
+Accessibility › Display › **Reduce motion** turns it into a crossfade, which is
+the only lever there is. Everything else weft used to spend on a move — a dead
+API call, a grab it re-guessed every time, a fixed settle — is gone.
+
 Sticky is the one verb weft does not implement. The WindowServer takes the "on
 every desktop" tag from an ordinary connection and silently drops it, so weft
 cannot do it per window. macOS itself can do it per *application*, and that does

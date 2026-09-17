@@ -265,6 +265,20 @@ public enum WorldReader {
         return out
     }
 
+    /// Which process owns a window. One window-list read, no app IPC.
+    ///
+    /// For callers that need the owner without holding the daemon's `pids`
+    /// map — `DragMove` runs in the platform layer and has no view of core
+    /// state.
+    public static func pid(of wid: WindowID) -> Int32? {
+        guard let info = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements], CGWindowID(wid)
+        ) as? [[String: Any]], let first = info.first,
+            let owner = first[kCGWindowOwnerPID as String] as? Int
+        else { return nil }
+        return Int32(owner)
+    }
+
     /// Single-window SLS frame read for echo-suppression checks (µs, no app IPC).
     public static func frame(of wid: WindowID) -> Frame? {
         guard let r = windowBounds(cid: cid, wid: wid) else { return nil }
