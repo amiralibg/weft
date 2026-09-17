@@ -1202,6 +1202,43 @@ private struct DesktopRow: View {
     }
 }
 
+/// The bar under the update's current stage.
+///
+/// Determinate while the download reports a percentage, indeterminate for the
+/// stages that cannot — and the elapsed clock runs either way. That clock is
+/// the part that matters: a determinate bar creeping and a stalled one look
+/// identical over four seconds, and the complaint this answers was about
+/// minutes. A number that is visibly counting says "slow", where a still
+/// sentence says "broken".
+private struct UpdateProgressRow: View {
+    let fraction: Double?
+    let elapsed: TimeInterval
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let fraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 160)
+                Text("\(Int((fraction * 100).rounded()))%")
+                    .monospacedDigit()
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 160)
+            }
+            Text(Self.clock(elapsed))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    static func clock(_ seconds: TimeInterval) -> String {
+        let whole = max(Int(seconds.rounded()), 0)
+        return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+}
+
 // MARK: - Advanced
 
 private struct AdvancedPane: View {
@@ -1265,12 +1302,16 @@ private struct AdvancedPane: View {
                         .disabled(updater.isRunning)
                     } label: {
                         Text("A newer weft is out")
-                        // What the installer is doing, while it is doing it.
-                        // Pressing Update used to change nothing on screen for
-                        // the half minute it takes, which reads as a button
-                        // that did not work.
+                        // What the installer is doing, while it is doing it —
+                        // with the download's own percentage, which is nearly
+                        // all of the wall clock. A single unchanging sentence
+                        // is what "it showed no progress" was: on a slow link
+                        // to GitHub's CDN the download alone runs for minutes,
+                        // measured at 45% after two and a half.
                         if let step = updater.step {
                             Text(step)
+                            UpdateProgressRow(
+                                fraction: updater.fraction, elapsed: updater.elapsed)
                             Text("weft quits and reopens on its own when this finishes.")
                         } else {
                             Text("Downloads the release, checks it, and restarts. "
@@ -1912,6 +1953,10 @@ enum CommandCatalog {
         ]),
         Group(name: "Move", commands: [
             "move west", "move east", "move north", "move south",
+            // The literal exchange. `move` restructures and keeps the window's
+            // size; `swap` trades slots, so the window takes the size of the
+            // one it traded with.
+            "swap west", "swap east", "swap north", "swap south",
             "move display west --follow", "move display east --follow",
             "move display next --follow", "move display cycle --follow",
         ]),
@@ -1929,6 +1974,9 @@ enum CommandCatalog {
             "space focus 1", "space focus 2", "space focus 3", "space focus 4", "space focus 5",
             "space focus recent",
             "space move-window 1", "space move-window 2", "space move-window 3",
+            // The screen changes desktop either way, so the plain form follows
+            // the window; this is for a bind that means to stay put.
+            "space move-window 1 --no-follow", "space move-window 2 --no-follow",
             "space layout bsp", "space layout float", "space layout toggle",
         ]),
         Group(name: "Resize", commands: [
@@ -1936,6 +1984,14 @@ enum CommandCatalog {
             "resize left 120", "resize right 120", "resize up 120", "resize down 120",
         ]),
         Group(name: "Modes", commands: ["mode default", "mode resize"]),
+        // Starting points, not a menu: the argument is a shell command, so
+        // these are meant to be picked and then edited.
+        Group(name: "Run a command", commands: [
+            "exec open -a Terminal",
+            "exec open ~/Downloads",
+            "exec pmset displaysleepnow",
+            "exec screencapture -i -c",
+        ]),
     ]
 
     static func contains(_ command: String) -> Bool {
@@ -2005,6 +2061,28 @@ final class EngineHealth: ObservableObject {
 
     func start() {
         refresh()
+        // Ask GitHub if nobody has this launch, or if the cached answer has
+        // aged out.
+        //
+        // Everything here used to read the cache and only the cache, so a
+        // Settings window opened before the background check had landed — or on
+        // a machine where it had never run — showed the running version with
+        // nothing beside it and no Update button, which is indistinguishable
+        // from "you are up to date". Opening the one window that displays
+        // update state is as clear a signal that someone wants the answer as
+        // pressing Check Now, and `refreshIfNeeded` still honours the daily
+        // throttle and the config switch, so this is at most one request per
+        // day and none at all when updates are turned off.
+        if UpdateCheck.isStale(UpdateCheck.cached()) {
+            let enabled = ConfigStore.readCheckForUpdates()
+            UpdateCheck.refreshIfNeeded(enabled: enabled) { [weak self] result in
+                guard let result else { return }
+                Task { @MainActor in
+                    guard let self, !self.checkingForUpdate else { return }
+                    self.update = result
+                }
+            }
+        }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }

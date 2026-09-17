@@ -13,6 +13,7 @@ func usage() -> Never {
           weftctl sticky [wid] [on|off]             # toggle sticky window
           weftctl focus display <next|prev|N>
           weftctl app toggle <bundle-id>            # launch/focus/hide
+          weftctl exec '<shell command>'            # run it through /bin/sh
           weftctl subscribe [--all]    # live event stream (Ctrl-C to exit)
           weftctl doctor               # diagnostic health check
           weftctl logs [-n N] [-f]     # the daemon's log, for a bug report
@@ -123,7 +124,16 @@ if args[0] == "bench" {
     exit(0)
 }
 
-let text = args.joined(separator: " ")
+// Every other verb is a fixed set of words, so rejoining what the shell split
+// reconstructs it exactly. `exec` is the one whose argument is arbitrary text:
+// `weftctl exec 'sed s/a  b/c/'` arrives as one argument that the shell has
+// already unquoted, and joining it back with single spaces would rewrite it.
+// One argument is passed through untouched; several are joined, which is what
+// `weftctl exec echo hi` means anyway.
+let text: String = {
+    guard args[0] == "exec", args.count == 2 else { return args.joined(separator: " ") }
+    return "exec " + args[1]
+}()
 let path = IPCPaths.socketPath()
 
 // Streaming mode: hold the connection open, print each event line.

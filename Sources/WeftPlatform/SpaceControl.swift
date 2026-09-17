@@ -159,27 +159,42 @@ public enum SpaceControl {
 
     // MARK: - Mutations (verified by re-reading; false means nothing changed)
 
-    /// Move a window to another space WITHOUT following it (S3 semantics).
-    /// Verified by re-reading membership. False leaves nothing changed.
+    /// Move a window to another space. Verified by re-reading membership;
+    /// false leaves nothing changed.
     /// - Parameter allowDrag: whether to fall back to the drag route, which
     ///   takes the screen over for a moment. True for anything the user just
     ///   asked for; false for anything weft decided on its own — a rule firing
     ///   because an app opened must not switch the desktop out from under
     ///   someone who is typing. See `[general] follow-space-rules`.
+    /// - Parameter follow: leave the user on the destination. Costs one
+    ///   desktop change *fewer* than not following, because the drag route
+    ///   ends there and has to switch back to undo it.
     @discardableResult
     public static func moveWindowToSpace(
-        _ wid: WindowID, _ sid: SpaceID, allowDrag: Bool = true
+        _ wid: WindowID, _ sid: SpaceID, allowDrag: Bool = true, follow: Bool = false
     ) -> Bool {
+        // The two silent routes move the window without moving the screen, so
+        // following them is a separate switch. They are also refused on
+        // macOS 27, so in practice this is dead weight kept for a machine with
+        // an addition loaded.
+        func followIfAsked() -> Bool {
+            guard follow else { return true }
+            return focusSpace(sid)
+        }
         if ScriptingAddition.moveWindowToSpace(wid, sid) {
             usleep(60_000)
             if spacesForWindow(wid).contains(sid) {
+                _ = followIfAsked()
                 return true
             }
         }
         let arr = [NSNumber(value: wid)] as CFArray
         SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), arr, sid)
         usleep(150_000)
-        if spacesForWindow(wid).contains(sid) { return true }
+        if spacesForWindow(wid).contains(sid) {
+            _ = followIfAsked()
+            return true
+        }
         // Last, because it is the one that works and the one the user sees.
         //
         // Nothing above moves a window from an ordinary connection on macOS 27:
@@ -189,7 +204,7 @@ public enum SpaceControl {
         // the bound "move a space" shortcut, let go — which costs two visible
         // desktop changes and needs no scripting addition and no SIP change.
         guard allowDrag else { return false }
-        return DragMove.moveWindow(wid, to: sid)
+        return DragMove.moveWindow(wid, to: sid, stayOnDestination: follow)
     }
 
     /// Sticky bit (1 << 11): window appears on every space. Verified by

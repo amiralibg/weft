@@ -71,11 +71,21 @@ public enum DragMove {
         return s.left != nil && s.right != nil
     }
 
-    /// Move `wid` to desktop `sid` without leaving the user there.
+    /// Move `wid` to desktop `sid`.
+    ///
+    /// - Parameter stayOnDestination: leave the user on `sid` instead of
+    ///   returning them. The carry *ends* on `sid`, so this is the cheaper of
+    ///   the two — going back is an extra visible desktop change, and it is
+    ///   only ever undone on the way to somewhere the user probably wanted to
+    ///   be anyway. A failed carry still returns them, whichever is asked for:
+    ///   the destination is not where they meant to end up if the window did
+    ///   not get there.
     ///
     /// Returns true only once the WindowServer agrees the window is on `sid`.
     @discardableResult
-    public static func moveWindow(_ wid: WindowID, to sid: SpaceID) -> Bool {
+    public static func moveWindow(
+        _ wid: WindowID, to sid: SpaceID, stayOnDestination: Bool = false
+    ) -> Bool {
         // Every exit below used to be a bare `return false`, so a failed move
         // said only "nothing changed" — true, and useless. Each one now names
         // itself under WEFT_TRACE.
@@ -120,12 +130,19 @@ public enum DragMove {
             moved = carry(wid, steps: count, on: display.uuid, right: right, left: left)
         }
 
-        // Back to where the user was, whatever happened above. Leaving them on
-        // another desktop is a worse failure than the move not working.
-        if let now = current(of: display.uuid), now != userStartedOn {
-            DockSwipe.focusSpace(userStartedOn)
+        let landed = moved && SpaceControl.spacesForWindow(wid).contains(sid)
+        // Stay only on a move that actually worked. A failed carry leaves the
+        // user on a desktop they did not ask for, with the window still where
+        // it was — the worst of both, and the one case where going back is
+        // unambiguously right.
+        if landed && stayOnDestination {
+            // The carry ends on `sid` already; this only corrects a carry that
+            // over- or under-shot.
+            if let now = current(of: display.uuid), now != sid { _ = DockSwipe.focusSpace(sid) }
+        } else if let now = current(of: display.uuid), now != userStartedOn {
+            _ = DockSwipe.focusSpace(userStartedOn)
         }
-        return moved && SpaceControl.spacesForWindow(wid).contains(sid)
+        return landed
     }
 
     // MARK: - The drag

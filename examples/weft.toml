@@ -50,7 +50,10 @@ manage-menubar-apps = false
 # bar and presses your "move a space" shortcut, which means the screen visibly
 # changes desktop and changes back, about a second per desktop travelled.
 #
-# That is fine for `space move-window`, which you just typed and are watching.
+# That is fine for `space move-window`, which you just typed and are watching —
+# and because you see it either way, that command follows the window by default
+# (add `--no-follow` to stay where you are).
+#
 # A rule fires when an app opens — possibly while you are typing in something
 # else — and having the desktop switch underneath you is worse than the window
 # landing on the wrong one. Turn this on if you would rather have the placement.
@@ -117,7 +120,12 @@ reserve = 0
 "alt-k" = "focus north"
 "alt-l" = "focus east"
 
-# Swap the focused window with its neighbour.
+# Move the focused window one step that way.
+#
+# This restructures the layout rather than trading two windows, so the window
+# keeps its size: a half-screen window sent east is a half-screen window on the
+# right, not a quarter in whatever slot happened to be over there. `swap west`
+# and friends are the literal trade, if you want that on a separate key.
 "alt-shift-h" = "move west"
 "alt-shift-j" = "move south"
 "alt-shift-k" = "move north"
@@ -161,7 +169,12 @@ reserve = 0
 "alt-4" = "space focus 4"
 "alt-5" = "space focus 5"
 
-# Send the focused window to a space.
+# Send the focused window to a space, and go with it.
+#
+# Moving a window between desktops changes the desktop on the way — macOS
+# leaves weft no quieter route — so going with it is the default: coming back
+# is one more visible switch to end up where you probably did not want to be.
+# Add `--no-follow` to a bind that should send the window and leave you here.
 "alt-shift-1" = "space move-window 1"
 "alt-shift-2" = "space move-window 2"
 "alt-shift-3" = "space move-window 3"
@@ -182,6 +195,23 @@ reserve = 0
 
 # Enter the resize layer defined below. Escape or Return leaves it.
 "alt-shift-r" = "mode resize"
+
+# Run anything. `exec` hands the rest of the line to /bin/sh, so pipes, quotes
+# and $VARIABLES all mean what they mean in a shell — this is the half of skhd
+# that is not about windows. Nothing is bound by default because the right
+# commands are yours; these are the shapes.
+#
+# "alt-return"      = "exec open -a Ghostty"
+# "alt-shift-4"     = "exec screencapture -i -c"
+# "alt-shift-slash" = "exec open 'https://github.com/amiralibg/weft'"
+#
+# Your command also gets weft's state in its environment, so a script never has
+# to ask for it: WEFT_SPACE_ID, WEFT_SPACE_LABEL, WEFT_SPACE_LAYOUT,
+# WEFT_SPACE_WINDOWS, WEFT_DISPLAY_UUID, WEFT_DISPLAY_INDEX, WEFT_FOCUSED_WID,
+# WEFT_FOCUSED_APP, WEFT_FOCUSED_BUNDLE, WEFT_FOCUSED_TITLE, WEFT_STACK_INDEX,
+# WEFT_STACK_COUNT, WEFT_MODE.
+#
+# "alt-shift-n" = "exec osascript -e \"display notification \\\"$WEFT_SPACE_LABEL\\\"\""
 
 # ------------------------------------------------------------------------------
 # Modes

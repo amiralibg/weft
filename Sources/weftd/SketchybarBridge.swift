@@ -57,6 +57,33 @@ public struct StateSummary: Sendable {
         self.focused = focused
         self.mode = mode
     }
+
+    /// The state as environment variables — the same set for every consumer
+    /// that gets one.
+    ///
+    /// A bar plugin and an `exec` keybind want exactly the same answers, and a
+    /// second hand-rolled list of these would drift from this one on the first
+    /// field either gained. Absent rather than empty when there is nothing to
+    /// say: a script can test `[ -n "$WEFT_FOCUSED_APP" ]` and mean it.
+    public var environment: [String: String] {
+        var env: [String: String] = ["WEFT_MODE": mode, "WEFT_SPACE_WINDOWS": "\(windowCount)"]
+        if let spaceID { env["WEFT_SPACE_ID"] = "\(spaceID)" }
+        if let spaceLabel { env["WEFT_SPACE_LABEL"] = spaceLabel }
+        if let layout { env["WEFT_SPACE_LAYOUT"] = layout.rawValue }
+        if let displayUUID { env["WEFT_DISPLAY_UUID"] = displayUUID }
+        if let displayIndex { env["WEFT_DISPLAY_INDEX"] = "\(displayIndex)" }
+        if let f = focused {
+            env["WEFT_FOCUSED_WID"] = "\(f.wid)"
+            if let app = f.app { env["WEFT_FOCUSED_APP"] = app }
+            if let bundle = f.bundleID { env["WEFT_FOCUSED_BUNDLE"] = bundle }
+            if let title = f.title { env["WEFT_FOCUSED_TITLE"] = title }
+            if let idx = f.stackIndex, let count = f.stackCount {
+                env["WEFT_STACK_INDEX"] = "\(idx)"
+                env["WEFT_STACK_COUNT"] = "\(count)"
+            }
+        }
+        return env
+    }
 }
 
 final class SketchybarBridge: @unchecked Sendable {
@@ -91,34 +118,11 @@ final class SketchybarBridge: @unchecked Sendable {
         guard let bin = findSketchybarBinary() else { return }
 
         queue.async { [self] in
-            var args = ["--trigger", event]
-            if let sid = state.spaceID {
-                args.append("WEFT_SPACE_ID=\(sid)")
-            }
-            if let label = state.spaceLabel {
-                args.append("WEFT_SPACE_LABEL=\(label)")
-            }
-            if let layout = state.layout {
-                args.append("WEFT_SPACE_LAYOUT=\(layout.rawValue)")
-            }
-            args.append("WEFT_SPACE_WINDOWS=\(state.windowCount)")
-            if let duuid = state.displayUUID {
-                args.append("WEFT_DISPLAY_UUID=\(duuid)")
-            }
-            if let dindex = state.displayIndex {
-                args.append("WEFT_DISPLAY_INDEX=\(dindex)")
-            }
-            if let f = state.focused {
-                args.append("WEFT_FOCUSED_WID=\(f.wid)")
-                if let app = f.app { args.append("WEFT_FOCUSED_APP=\(app)") }
-                if let bundle = f.bundleID { args.append("WEFT_FOCUSED_BUNDLE=\(bundle)") }
-                if let title = f.title { args.append("WEFT_FOCUSED_TITLE=\(title)") }
-                if let idx = f.stackIndex, let count = f.stackCount {
-                    args.append("WEFT_STACK_INDEX=\(idx)")
-                    args.append("WEFT_STACK_COUNT=\(count)")
-                }
-            }
-            args.append("WEFT_MODE=\(state.mode)")
+            // Sorted, so a trigger's argument list is the same every time for
+            // the same state — which is what makes the dedupe below able to
+            // compare two of them, and what makes a log line diffable.
+            let args = ["--trigger", event]
+                + state.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
 
             // A trigger is a fork + exec of sketchybar, which then runs every
             // item script subscribed to the event. Focus churn repeats the

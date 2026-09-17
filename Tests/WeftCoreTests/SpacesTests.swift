@@ -41,8 +41,23 @@ import Testing
 @Test func spaceGrammar() throws {
     #expect(try Command.parse("space focus code") == .space(.focus("code")))
     #expect(try Command.parse("space focus 2") == .space(.focus("2")))
-    #expect(try Command.parse("space move-window web") == .space(.moveWindow("web", nil)))
-    #expect(try Command.parse("space move-window 5 139") == .space(.moveWindow("5", 139)))
+    // Following is the default: the move is a visible desktop change either
+    // way, and coming back is an extra one to end up where the user who just
+    // sent a window somewhere usually did not want to be.
+    #expect(try Command.parse("space move-window web") == .space(.moveWindow("web", nil, follow: true)))
+    #expect(try Command.parse("space move-window 5 139") == .space(.moveWindow("5", 139, follow: true)))
+    #expect(
+        try Command.parse("space move-window web --no-follow")
+            == .space(.moveWindow("web", nil, follow: false)))
+    // Flags in either position, and alongside an explicit window id.
+    #expect(
+        try Command.parse("space move-window 5 --no-follow 139")
+            == .space(.moveWindow("5", 139, follow: false)))
+    #expect(
+        try Command.parse("space move-window 5 139 --follow")
+            == .space(.moveWindow("5", 139, follow: true)))
+    // Two window ids is a typo, not a second argument.
+    #expect(throws: CommandParseError.self) { try Command.parse("space move-window 5 139 140") }
     #expect(try Command.parse("space label code") == .space(.label("code")))
     #expect(try Command.parse("sticky") == .sticky(nil, .toggle))
     #expect(try Command.parse("sticky 139 off") == .sticky(139, .off))

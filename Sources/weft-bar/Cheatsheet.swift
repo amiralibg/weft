@@ -134,17 +134,34 @@ final class CheatsheetModel: ObservableObject {
             let follow = command.contains("--follow") ? ", and follow it" : ""
             return ("Displays", "Send the window to the display \(direction[words[2]] ?? words[2])\(follow)")
         case "move" where words.count >= 2:
-            return ("Move", "Swap the window \(direction[words[1]] ?? words[1])")
+            return ("Move", "Move the window \(direction[words[1]] ?? words[1])")
+        case "swap" where words.count >= 2:
+            return ("Move", "Trade places with the window \(direction[words[1]] ?? words[1])")
         case "space" where words.count >= 2 && words[1] == "focus":
             return ("Spaces", rest(2) == "recent" ? "Back to the last space" : "Go to space “\(rest(2))”")
         case "space" where words.count >= 2 && words[1] == "move-window":
-            return ("Spaces", "Send the window to space “\(rest(2))”")
+            let stay = command.contains("--no-follow") || command.contains("no-follow")
+            let target = rest(2)
+                .replacingOccurrences(of: "--no-follow", with: "")
+                .replacingOccurrences(of: "no-follow", with: "")
+                .replacingOccurrences(of: "--follow", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            return (
+                "Spaces",
+                "Send the window to space “\(target)”\(stay ? " and stay here" : " and go with it")"
+            )
         case "space" where words.count >= 2 && words[1] == "layout":
             return ("Layout", "Switch this space to the \(rest(2)) layout")
         case "window":
             if command.contains("zoom-fullscreen") { return ("Layout", "Zoom the window to fill the space") }
             if command.contains("split") { return ("Layout", "Flip the split under the window") }
             return ("Layout", command)
+        case "exec":
+            // The command itself, not a description of it. Every other row in
+            // the cheatsheet explains a fixed verb; this one is whatever the
+            // user wrote, and they wrote it because it is what they wanted to
+            // read back.
+            return ("Run", String(command.dropFirst("exec".count)).trimmingCharacters(in: .whitespaces))
         case "float":
             return ("Layout", "Float the window, or put it back in the tiling")
         case "split":

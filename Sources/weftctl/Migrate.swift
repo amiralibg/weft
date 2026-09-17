@@ -208,10 +208,18 @@ public enum Migrate {
                 else if actionRaw.contains("window --focus east") { weftCmd = "focus east" }
                 else if actionRaw.contains("window --focus north") { weftCmd = "focus north" }
                 else if actionRaw.contains("window --focus south") { weftCmd = "focus south" }
-                else if actionRaw.contains("window --swap west") || actionRaw.contains("window --warp west") { weftCmd = "move west" }
-                else if actionRaw.contains("window --swap east") || actionRaw.contains("window --warp east") { weftCmd = "move east" }
-                else if actionRaw.contains("window --swap north") || actionRaw.contains("window --warp north") { weftCmd = "move north" }
-                else if actionRaw.contains("window --swap south") || actionRaw.contains("window --warp south") { weftCmd = "move south" }
+                // yabai's two verbs are two verbs in weft too, and they are
+                // not interchangeable: `--swap` trades slots, so a window
+                // swapped into a smaller one gets smaller, while `--warp`
+                // restructures the tree and the window keeps its size. Both
+                // used to migrate to `move`, which silently changed what half
+                // of these keys did.
+                else if let dir = ["west", "east", "north", "south"].first(
+                    where: { actionRaw.contains("window --swap \($0)") })
+                { weftCmd = "swap \(dir)" }
+                else if let dir = ["west", "east", "north", "south"].first(
+                    where: { actionRaw.contains("window --warp \($0)") })
+                { weftCmd = "move \(dir)" }
                 else if actionRaw.contains("window --toggle zoom-fullscreen") { weftCmd = "window toggle zoom-fullscreen" }
                 else if actionRaw.contains("window --toggle split") { weftCmd = "window toggle split" }
                 // `--toggle float --grid 6:6:1:1:4:4` is the standard yabai
@@ -254,17 +262,29 @@ public enum Migrate {
                         if delta > 0 { weftCmd = "resize \(dir) \(delta)" }
                     }
                 }
+                // Before `space --focus`, for the same reason `window
+                // --display` is checked before `display --focus` (§15.2): the
+                // way you follow a window in yabai is to chain both verbs on
+                // one line, and testing the focus half first matched that line
+                // and silently dropped the move.
+                else if actionRaw.contains("window --space") {
+                    let words = actionRaw.components(separatedBy: .whitespaces)
+                    if let idx = words.firstIndex(of: "--space"), idx + 1 < words.count {
+                        let target = words[idx + 1]
+                        // yabai's `window --space` does not follow, so a bare
+                        // one migrates to `--no-follow` — weft's default is
+                        // the opposite and a migration must not change what a
+                        // key does. A line that chains `space --focus` onto it
+                        // is the follow case, and becomes one command.
+                        let follows = actionRaw.contains("space --focus")
+                        weftCmd = "space move-window \(target)\(follows ? "" : " --no-follow")"
+                    }
+                }
                 else if actionRaw.contains("space --focus recent") { weftCmd = "space focus recent" }
                 else if actionRaw.contains("space --focus") {
                     let words = actionRaw.components(separatedBy: .whitespaces)
                     if let idx = words.firstIndex(of: "--focus"), idx + 1 < words.count {
                         weftCmd = "space focus \(words[idx + 1])"
-                    }
-                }
-                else if actionRaw.contains("window --space") {
-                    let words = actionRaw.components(separatedBy: .whitespaces)
-                    if let idx = words.firstIndex(of: "--space"), idx + 1 < words.count {
-                        weftCmd = "space move-window \(words[idx + 1])"
                     }
                 }
                 else if actionRaw.hasPrefix("open -a") {
@@ -305,6 +325,25 @@ public enum Migrate {
                     }
                 }
 
+                // Anything that was never a yabai verb is a shell command, and
+                // that is most of what skhd is for. These used to be dropped
+                // in silence — a migrated config came back missing the
+                // screenshot bind, the volume keys and every script the user
+                // had, with nothing saying so.
+                //
+                // Guarded on `yabai`: a line that *is* a yabai command and did
+                // not map above must not be handed to a shell, or a verb weft
+                // does not implement silently starts driving yabai instead.
+                if weftCmd == nil, !actionRaw.contains("yabai"), !actionRaw.isEmpty {
+                    weftCmd = "exec \(actionRaw)"
+                }
+                if weftCmd == nil, actionRaw.contains("yabai") {
+                    fputs(
+                        "weftctl: no weft equivalent for '\(actionRaw)' — that bind is not migrated\n",
+                        stderr
+                    )
+                }
+
                 if let cmd = weftCmd {
                     if let mode = owningMode, mode != "default" {
                         modeBindings[mode, default: []].append((chord, cmd))
@@ -332,8 +371,9 @@ public enum Migrate {
         // the file with the reason attached, not only in the README.
         toml += "# Let a rule's `space = \"...\"` move a window when it opens. Off because\n"
         toml += "# weft moves a window by holding it and switching desktops, so the screen\n"
-        toml += "# changes and changes back — fine when you type `space move-window`,\n"
-        toml += "# surprising when an app merely opened.\n"
+        toml += "# changes desktop — fine when you type `space move-window` (which goes\n"
+        toml += "# with the window by default; `--no-follow` stays put), surprising when\n"
+        toml += "# an app merely opened.\n"
         toml += "# follow-space-rules = true\n\n"
 
         // Both integrations stay OFF. Migration reads a yabai config, not a
