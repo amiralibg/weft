@@ -336,7 +336,9 @@ final class Daemon: @unchecked Sendable {
     private func findWindow(at point: CGPoint) -> (wid: WindowID, frame: Frame, isFloating: Bool)? {
         let px = Double(point.x)
         let py = Double(point.y)
-        for wid in manualFloat {
+        // Off-core (this runs on `incoming`), so take the set through core
+        // rather than reading the live one under the frame reads below.
+        for wid in core.sync(execute: { self.manualFloat }) {
             if let f = WorldReader.frame(of: wid), f.contains(x: px, y: py) {
                 return (wid, f, true)
             }
@@ -1895,7 +1897,8 @@ final class Daemon: @unchecked Sendable {
         if let frontApp = NSWorkspace.shared.frontmostApplication {
             let pid = frontApp.processIdentifier
             let world = WorldReader.snapshot()
-            if let w = world.windows.first(where: { $0.pid == pid && self.manualFloat.contains($0.id) }) {
+            let floats = core.sync { self.manualFloat }
+            if let w = world.windows.first(where: { $0.pid == pid && floats.contains($0.id) }) {
                 return w.id
             }
         }
@@ -1906,7 +1909,13 @@ final class Daemon: @unchecked Sendable {
         guard let wid = activeWindowID() else {
             return IPCResponse(ok: false, error: "no focused window to float")
         }
-        let isManual = manualFloat.contains(wid)
+        // `manualFloat`, `unmanaged` and `floatFrames` are core-owned state and
+        // this runs on `incoming`, so every read and write of them below goes
+        // through core. The screen work cannot: `applySpaceLayout`,
+        // `applyFrames`, `raiseFronts` and `focusAndWarp` all assert they are
+        // off core. Hence the shape — decide and mutate inside one `core.sync`,
+        // then do the screen work after it, outside.
+        let isManual = core.sync { self.manualFloat.contains(wid) }
         switch mode {
         case .on where isManual:
             return IPCResponse(ok: true, output: "window \(wid) already floating")
@@ -1926,58 +1935,64 @@ final class Daemon: @unchecked Sendable {
             ?? currentSID()
         if isManual {
             // Snapshot where the user had it before the layout reclaims it,
-            // so floating it again lands back in the same place.
-            if let live = WorldReader.frame(of: wid) { floatFrames[wid] = live }
-            manualFloat.remove(wid)
-            unmanaged.remove(wid)
-            if let sid = home {
-                updateSpaces { sp in
-                    switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
-                    case .tiling(var t):
-                        t = t.inserting(wid)
-                        sp.layouts[sid] = .tiling(t)
-                    case .float(var f):
-                        f = f.inserting(wid)
-                        sp.layouts[sid] = .float(f)
+            // so floating it again lands back in the same place. The AX read
+            // stays off core — only the store goes on it.
+            let live = WorldReader.frame(of: wid)
+            core.sync {
+                if let live { self.floatFrames[wid] = live }
+                self.manualFloat.remove(wid)
+                self.unmanaged.remove(wid)
+                if let sid = home {
+                    self.updateSpaces { sp in
+                        switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
+                        case .tiling(var t):
+                            t = t.inserting(wid)
+                            sp.layouts[sid] = .tiling(t)
+                        case .float(var f):
+                            f = f.inserting(wid)
+                            sp.layouts[sid] = .float(f)
+                        }
                     }
                 }
-                applySpaceLayout(sid)
             }
+            if let sid = home { applySpaceLayout(sid) }
             bus.emit(stateChangedEvent())
             return IPCResponse(ok: true, output: "window \(wid) tiled")
         } else {
-            manualFloat.insert(wid)
-            unmanaged.insert(wid)
-            if let sid = home {
-                updateSpaces { sp in
-                    switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
-                    case .tiling(var t):
-                        t = t.removing(wid)
-                        sp.layouts[sid] = .tiling(t)
-                    case .float(var f):
-                        f = f.removing(wid)
-                        sp.layouts[sid] = .float(f)
-                    }
-                }
-                applySpaceLayout(sid)
-            }
+            let uScreen = usableScreen(for: home)
             // Where the user last left this window floating, if they ever
             // did. Floating a window, moving it, tiling it and floating it
             // again used to snap it back to the centre every time — the
             // second float threw away the whole arrangement the first one
             // was for. Fall back to a centred 70% only the first time.
-            let uScreen = usableScreen(for: home)
-            let target = floatFrames[wid].flatMap { remembered -> Frame? in
-                // Ignore geometry from a screen this window is no longer on.
-                let cx = remembered.x + remembered.width / 2
-                let cy = remembered.y + remembered.height / 2
-                return uScreen.contains(x: cx, y: cy) ? remembered : nil
-            } ?? Frame(
-                x: uScreen.x + uScreen.width * 0.15,
-                y: uScreen.y + uScreen.height * 0.15,
-                width: uScreen.width * 0.70,
-                height: uScreen.height * 0.70
-            )
+            let target: Frame = core.sync {
+                self.manualFloat.insert(wid)
+                self.unmanaged.insert(wid)
+                if let sid = home {
+                    self.updateSpaces { sp in
+                        switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
+                        case .tiling(var t):
+                            t = t.removing(wid)
+                            sp.layouts[sid] = .tiling(t)
+                        case .float(var f):
+                            f = f.removing(wid)
+                            sp.layouts[sid] = .float(f)
+                        }
+                    }
+                }
+                return self.floatFrames[wid].flatMap { remembered -> Frame? in
+                    // Ignore geometry from a screen this window is no longer on.
+                    let cx = remembered.x + remembered.width / 2
+                    let cy = remembered.y + remembered.height / 2
+                    return uScreen.contains(x: cx, y: cy) ? remembered : nil
+                } ?? Frame(
+                    x: uScreen.x + uScreen.width * 0.15,
+                    y: uScreen.y + uScreen.height * 0.15,
+                    width: uScreen.width * 0.70,
+                    height: uScreen.height * 0.70
+                )
+            }
+            if let sid = home { applySpaceLayout(sid) }
             applyFrames([wid: target])
             raiseFronts([wid])
             if let pid = pid(of: wid) {
