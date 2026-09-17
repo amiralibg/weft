@@ -22,6 +22,13 @@ final class Updater: ObservableObject {
     /// What the installer is doing, as its own `==>` lines report it. Nil when
     /// nothing is running.
     @Published private(set) var step: String?
+    /// How far through the current stage, 0…1, when the stage can say — which
+    /// in practice means the download, and the download is nearly all of the
+    /// wall-clock time. Nil for stages that are over in a moment.
+    @Published private(set) var fraction: Double?
+    /// How long the update has been running. Shown beside the stage so a slow
+    /// download is visibly *slow* rather than visibly *stuck*.
+    @Published private(set) var elapsed: TimeInterval = 0
     /// Why the update did not start, in words worth showing.
     @Published private(set) var failure: String?
 
@@ -29,6 +36,7 @@ final class Updater: ObservableObject {
 
     private var poll: Timer?
     private var process: Process?
+    private var startedAt: Date?
 
     /// The version an update was started for, kept across the app dying.
     ///
@@ -135,6 +143,16 @@ final class Updater: ObservableObject {
         // way out: this process does not live to see the end of a successful
         // update, so the next launch clears it by comparing versions.
         UserDefaults.standard.set(update.latest, forKey: Self.pendingKey)
+        // Forced to disk now, not whenever the next flush happens. The
+        // installer sends this process a signal partway through, and an
+        // unflushed default dies with it — so the marker that exists precisely
+        // to survive being killed was the thing most likely not to. An update
+        // that then broke after the app went away reported nothing at all on
+        // the next launch.
+        UserDefaults.standard.synchronize()
+        startedAt = Date()
+        elapsed = 0
+        fraction = nil
         step = "Starting…"
         startPolling()
     }
@@ -166,20 +184,35 @@ final class Updater: ObservableObject {
     }
 
     private func readProgress() {
-        if let text = try? String(contentsOf: logURL, encoding: .utf8) {
-            let stages = text.components(separatedBy: .newlines)
-                .filter { $0.hasPrefix("==> ") }
-                .map { String($0.dropFirst(4)) }
-            if let last = stages.last {
-                step = last.prefix(1).uppercased() + last.dropFirst() + "…"
-            }
-            if let error = text.components(separatedBy: .newlines)
-                .last(where: { $0.hasPrefix("ERROR: ") })
-            {
-                finish(withFailure: String(error.dropFirst(7)))
-                return
-            }
+        if let started = startedAt { elapsed = Date().timeIntervalSince(started) }
+        // Read bytes and decode lossily, never `String(contentsOf:encoding:)`.
+        // curl's progress bar shares this file and writes partial lines with
+        // carriage returns; catching the file mid-write can leave a byte
+        // sequence that is not valid UTF-8, and a strict decode then returns
+        // nil for the whole log. That is not a cosmetic difference — it makes
+        // progress stop dead and stay stopped, with nothing to say why.
+        guard let data = try? Data(contentsOf: logURL) else { return }
+        let text = String(decoding: data, as: UTF8.self)
+        // `.newlines` covers the carriage return curl rewrites its progress
+        // line with, so each redraw of the bar is its own entry and the newest
+        // is the last one.
+        let lines = text.components(separatedBy: .newlines)
+        if let error = lines.last(where: { $0.hasPrefix("ERROR: ") }) {
+            finish(withFailure: String(error.dropFirst(7)))
+            return
         }
+        if let last = lines.last(where: { $0.hasPrefix("==> ") }).map({ String($0.dropFirst(4)) }) {
+            step = last.prefix(1).uppercased() + last.dropFirst() + "…"
+        }
+        // The percentage, if the stage in flight is publishing one.
+        //
+        // Without this the download — which on a slow link to GitHub's CDN is
+        // minutes, and is nearly all of the time an update takes — showed one
+        // unchanging line for the whole of it. Measured on the machine this
+        // was reported from: 45% after two and a half minutes. A static
+        // sentence for that long is indistinguishable from a hang, which is
+        // exactly what it was reported as.
+        fraction = UpdateProgress.percent(in: lines)
         guard let p = process, !p.isRunning else { return }
         // Ran to completion without replacing us: on the happy path the
         // installer quits this app first, so reaching here at all means it
@@ -197,6 +230,16 @@ final class Updater: ObservableObject {
         poll = nil
         process = nil
         step = nil
+        fraction = nil
+        startedAt = nil
+        // A nil message used to mean "say nothing", and that is the one
+        // outcome this window must never produce: on the happy path the
+        // installer *quits this app* before it finishes, so an update that
+        // reaches here has stopped early without replacing anything. Silence
+        // put the Update button back exactly as it was, which is the report —
+        // "it did not work and showed no progress".
         failure = message
+            ?? "The installer finished without replacing weft, which is still "
+                + "\(WeftVersion.current). See \(logURL.path)."
     }
 }
