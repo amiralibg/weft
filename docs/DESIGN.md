@@ -1648,3 +1648,285 @@ keeps a ring of samples per phase of every apply, and `weftctl bench` prints the
 stalls this pivot is aimed at — survivors slow to fill a closed window's slot, and a beat
 before a new window takes its slot — both live in the AX half of the apply path, which the
 trace splits into `ax.position`, `ax.size` and `ax.verify` per app.
+
+---
+
+## 22. Borders draw what is there, not what was asked for — 2026-09-17
+
+§S8's border section ends "**So the border bug is unexplained.**" It is
+explained. The report that closed it was: *staying on one desktop, only opening
+and closing windows, and the borders did not know how to render around the
+windows.* Staying put is the important half — it rules out every theory about
+desktop switching, which is where the previous rounds looked.
+
+### 22.1 A border was drawn around the frame weft had asked for
+
+`refreshDividerZones` computed each visible space's layout and handed those
+frames straight to the renderer, which drew a ring around each one. But
+`applyFrames` is fire-and-forget by design (§13.8): the write is *queued*, and
+the window arrives later. How much later varies by three orders of magnitude:
+
+| window | when it reaches the frame |
+| --- | --- |
+| native app | ~0.5 ms (§S1 p50) |
+| Gecko / Electron mid-relayout | 32 ms p99, and worse under load |
+| no AX element yet (§S0) | not until the space is first visited |
+| refuser, or a window mid-space-transition | never |
+
+So the border was correct only in the steady state it had already reached.
+Opening a window re-slots every sibling at once; closing one does the same to
+every survivor. Those are precisely the two moments the report names, and at
+those moments every ring on screen is around a rectangle its window has not
+got to yet.
+
+The single correction path made it worse rather than better. `observe(wid:actual:)`
+took the frame from an AX move notification and substituted it for the target —
+but only when `BorderGeometry.settles` judged it a *settle* rather than a read
+from mid-flight, because accepting a mid-flight frame had previously latched a
+half-width ring around a full-width window permanently. That gate is correct for
+its own purpose and it is exactly wrong here: the deltas it rejects are the
+large ones, which are the visible ones. A border that was wrong by a whole slot
+could not be corrected by the mechanism built to correct borders.
+
+### 22.2 Membership is weft's question; geometry is the WindowServer's
+
+The renderer now takes the layout's frames as *membership plus a target*, and
+resolves the geometry itself with one `SLSGetWindowBounds` per bordered window
+per pass — WindowServer-local, 0.03 ms, no app IPC, so a screenful costs a
+fraction of a millisecond. A window the WindowServer will not report loses its
+border rather than keeping one over its last known position.
+
+That deletes rather than fixes the arbitration: `observed`, `lastTargets`, the
+substitution and the judgement about which frames may be believed are all gone.
+`observe` became `windowMoved(_:)`, which carries no frame at all — an AX
+notification is a signal that the geometry changed, and the renderer asks what
+it changed to. `BorderGeometry.settles` survives with the same numbers and a
+different job: not *may the border follow this frame* but *has this window
+arrived*, which is what stops the re-read ladder.
+
+Following a window that is still in flight without a polling timer: each pass
+asks whether anything is short of its target and, if so, arms one wake-up from
+a decaying ladder — 8, 16, 32, 64, 128, 256, 512 ms, about a second in total,
+generation-counted so a newer intent cancels it. It is armed by a change and
+always terminates, so the 0%-idle invariant (§1) holds. The ladder covers the
+windows that send no AX notification at all, which is every window with no AX
+element; `windowMoved` covers apps slower than the ladder.
+
+`Border.target` was renamed `Border.around`, because the file now holds two
+things that were both called `target` and mean opposites — where weft asked the
+window to be, and where the ring is drawn. Conflating those two is the bug.
+
+### 22.3 Three smaller ones found in the same path
+
+- **Borders for windows that are not on screen.** A closed-but-kept window
+  (Ghostty, most Electron apps) and a minimised one both stay in the layout with
+  no destroy notification. `evictOrderedOut` finds them — on the next *focus
+  change*, and closing a window with the mouse need not move focus. The border
+  set is now filtered through `WorldReader.onScreenWindowIDs()` on every refresh.
+- **The desktop was read from weft's cache of it.** `refreshDividerZones`
+  iterated `SpaceState.currentByDisplay`, which `space focus` already refuses to
+  trust because it goes stale on every switch weft did not perform (§13.1). The
+  pieces are sticky (tag bit 11) so they show on whatever desktop is on screen —
+  meaning a stale read painted the previous desktop's layout over the new one.
+  It now asks `WorldReader.currentSpaces()`, ~40 µs, no window list.
+- **Two writers disagreed about focus.** `noteFocusedWindow` pushed the raw
+  system-focused window to the renderer on every focus change; `refreshDividerZones`
+  pre-resolved the same value to nil when that window had no border. Last writer
+  won, and the order varied. With `show-inactive = false` the two readings are
+  "no highlight" and "no borders at all". The renderer holds the rule now, and
+  both writers pass the same thing.
+
+## 23. `space move-window` follows by default — 2026-09-17
+
+The move is a held window plus the bound desktop shortcut (§S8), so the screen
+visibly changes desktop on the way. Not following does not avoid that — it adds
+a second switch to get back. The command was paying an extra visible transition
+to end up where someone who just sent a window somewhere usually did not want to
+be, and the whole gesture read as a bug rather than as the deliberate
+"do not follow" it was.
+
+Following is now the default and `--no-follow` is the opt-in. It is the cheaper
+path: the carry already ends on the destination, so following is the branch that
+does nothing. A carry that *failed* still returns the user, whichever was asked
+for — being left on a desktop you did not ask for with the window still behind
+you is the one case where going back is unambiguously right.
+
+`weftctl migrate` emits `--no-follow` for a bare `yabai -m window --space N`,
+which does not follow, so a migrated config keeps doing what it did. A line that
+chains `space --focus` onto it becomes one weft command with the default. That
+branch also had to move above `space --focus` in the matcher — the same ordering
+bug §15.2 fixed for `window --display`, which the chained form hits the same way.
+
+## 24. `exec` — 2026-09-17
+
+weft replaces skhd, and skhd's other job is running commands. There was no way
+to bind a key to one: `weftctl migrate` mapped the yabai lines and dropped the
+rest in silence, so a migrated config came back missing the screenshot bind, the
+volume keys and every script its owner had.
+
+`exec <anything>` hands the rest of the line to `/bin/sh -c`. The rest of the
+line, taken from the raw string rather than from the tokens the rest of the
+grammar splits on — `exec sed 's/a  b/c/'` must not be rewritten by being
+split and rejoined.
+
+Three properties that matter more than the verb:
+
+- **Nothing waits for it.** The event tap has a deadline macOS enforces by
+  *disabling the tap*, and the socket handler is shared with every command. Fork
+  and exec happen on a `.utility` queue and nobody waits for the result.
+- **Children are reaped.** A window manager runs for weeks; an unwaited child is
+  a zombie for all of it.
+- **It cannot run away.** A held key repeats. Past 32 in flight, launches are
+  refused with one line of log — refused, not queued, because queueing turns a
+  fork bomb into one that also fires for the next ten minutes.
+
+The command gets weft's state in its environment — `WEFT_SPACE_LABEL`,
+`WEFT_FOCUSED_APP`, `WEFT_MODE` and the rest — from `StateSummary.environment`,
+the same list the sketchybar bridge publishes. One list, because a second
+hand-rolled one would drift on the first field either gained.
+
+`weftctl migrate` now emits `exec <line>` for any action that was never a yabai
+verb, guarded on the line not mentioning `yabai`: a yabai command that failed to
+map must not be handed to a shell, or a verb weft does not implement silently
+starts driving yabai instead. Those are named on stderr instead.
+
+---
+
+## 25. `move <dir>` restructures instead of swapping — 2026-09-17
+
+`move <dir>` found the geometric neighbour and called `Tree.swapping`, which
+exchanges two **leaves**. That is right only when the two windows own
+equivalent slots, and in a bsp tree they usually do not:
+
+```
+  +-------+-------+        splitV[A, splitH[B, C]]
+  |       |   B   |
+  |   A   +-------+        A owns half the screen, B a quarter.
+  |       |   C   |
+  +-------+-------+
+```
+
+`move east` on A swapped the leaves A and B, so A came back as a quarter in the
+top-right corner and B grew to half the screen. The window obeyed the direction
+and changed size doing it, and the size change is the part that reads as a bug —
+"I asked it to move, not to shrink". i3, AeroSpace and yabai's `window --warp`
+all restructure instead, which is why weft felt different from all three on the
+verb people press most after `focus`.
+
+`Tree.moving(_:towards:)` walks up from the window to the nearest ancestor that
+both runs along the direction's axis and has somewhere to go in that direction:
+
+- **Direct child of that ancestor** — exchange places with the neighbour there,
+  *ratios included*, so both windows keep their size. A is exchanged with the
+  whole B/C subtree, giving `splitH[B, C] | A`: A on the right, still half.
+- **Nested deeper** — lift the window out of the subtree it is in and drop it
+  beside that subtree at the matching level. B moved west leaves the B/C column
+  and lands between A and C: three columns, one step west.
+- **A stack** runs along no axis, so a stacked window walks straight out of the
+  stack. `stack move <dir>` remains the verb for putting one in.
+- **No such ancestor** — already against that edge — does nothing, deliberately.
+  yabai fails here too, and that failure is what lets `{ move east } || { … }`
+  in a keybind fall through instead of quietly rearranging something.
+
+Two details the implementation turns on:
+
+- **The insertion index is resolved after the removal, never before.** Lifting a
+  window out can collapse the container it came from — a two-member column
+  becomes a bare window — so indices taken from the pre-removal tree are off by
+  one or off the end. The slot it left is found again by *identity* (which
+  windows were beside it), not by index.
+- **Ratios travel with the children.** Exchanging positions without exchanging
+  ratios means the window adopts the size of the slot it arrives in, which is
+  the same defect in a smaller form.
+
+`swapping` survives, behind a new `swap <dir>`, because the literal exchange is
+occasionally what someone wants and yabai spells it separately too.
+`weftctl migrate` now maps `window --swap <dir>` → `swap` and
+`window --warp <dir>` → `move`; it used to map both to `move`, which silently
+changed what half of those keys did.
+
+`Tests/WeftCoreTests/MoveTests.swift` pins the shapes, and one test does every
+direction from every window of a four-window tree and checks that all four come
+back, none twice, each with exactly one non-degenerate frame. An edit that
+removes a node and reinserts it is the shape of change that loses a window, and
+a layout engine that loses one is worse than one that arranges badly.
+
+---
+
+## 26. The update that showed no progress — 2026-09-17
+
+Reported as: opening Settings "did not work and update the app, and it did not
+show any progress". Reproduced by running what the Updater runs —
+`WEFT_VERSION=v0.9.5 bash scripts/install-release.sh` with `PREFIX` and
+`WEFT_APP_DIR` pointed at a scratch directory — and sampling the log:
+
+```
+t=2s   ==> downloading weft 0.9.5
+t=12s  ==> downloading weft 0.9.5
+...
+t=150s ==> downloading weft 0.9.5        curl: 44.9%
+```
+
+Every later stage — verify, stop, install, sign, quarantine, seed, service —
+fires within a couple of seconds of each other once the download is done. So
+the update is one long phase and a flurry, and the long phase was publishing
+exactly one line.
+
+### 26.1 The percentage was in the log and thrown away
+
+`install-release.sh` speaks two channels. `==> <stage>` lines, once per stage,
+and curl's `--progress-bar`: hashes and a figure, rewritten in place with a
+carriage return. The poller read only the first. From GitHub's CDN to the
+machine this was reported from that meant a static sentence for **five minutes**
+— indistinguishable from a hang, and reported as one.
+
+`WeftCore/UpdateProgress.percent(in:)` reads the figure. In `WeftCore` rather
+than in WeftBar because an executable target cannot have tests (§17.3) and this
+decides what a progress bar claims: a parser that returns a stale percentage
+shows a bar that sticks or runs backwards, which is worse than showing none. So
+a stage line appearing *after* the bar returns nil rather than the figure behind
+it, and only curl's own line — hashes, spaces, figure — is read, so a message
+that merely contains a percentage cannot drive the bar.
+
+Settings now shows that bar, the percentage, and **an elapsed clock**. The clock
+is the part that matters: over four seconds a creeping bar and a stalled one look
+the same, and the complaint was about minutes. A number visibly counting says
+*slow*; a still sentence says *broken*.
+
+A correction worth recording, because the first draft of the fix asserted the
+opposite in a comment and a test caught it: `CharacterSet.newlines` **includes**
+the carriage return, so splitting the log on `.newlines` already separates each
+redraw of the bar. The original code's failure was never about splitting.
+
+### 26.2 Three ways the update could end without saying anything
+
+- **`String(contentsOf:encoding: .utf8)` on a file curl is mid-write.** A
+  partial byte sequence makes the strict decode return nil for the whole log, so
+  progress stops dead with nothing to say why. Read `Data` and decode lossily.
+- **`finish(withFailure: nil)` was silent.** On the happy path the installer
+  *quits this app* before it finishes, so an update that reaches that line has
+  stopped early without replacing anything — and saying nothing put the Update
+  button back exactly as it was. That is the report, verbatim: it did not work
+  and showed no progress. It now says the installer finished without replacing
+  weft, and where the log is.
+- **The pending marker died with the process.** `UserDefaults.standard.set` is
+  flushed on the system's own schedule, and the installer signals this process
+  partway through — so the marker that exists precisely to survive being killed
+  was the thing least likely to. `synchronize()` before the installer can get
+  there.
+
+### 26.3 Settings read the cache and only the cache
+
+`EngineHealth.refresh` took `UpdateCheck.cached()`, a file read with no network
+by design — the window polls every five seconds and must not turn that into
+traffic. But nothing else ran a check when the window opened, so Settings opened
+before the once-per-launch background check had landed, or on a machine where it
+had never run, showed the running version with nothing beside it and no Update
+button. That is indistinguishable from "you are up to date", and it is the other
+half of "when I open it, it did not work".
+
+Opening the one window that displays update state is as clear a request for the
+answer as pressing Check Now, so `start()` now calls `refreshIfNeeded` when the
+cached answer is stale or missing. It still honours the daily throttle and
+`check-for-updates`, so this is at most one request a day and none at all when
+updates are off.

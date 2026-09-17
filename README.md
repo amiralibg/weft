@@ -31,6 +31,11 @@ its own.
 - **Two layouts per space** — `bsp` (binary split) and `float` (no tiling at
   all). Switch a space between them at runtime; window membership and focus
   survive the change.
+- **Moving restructures, it does not swap** — `move east` takes the window one
+  step east *in the layout tree*, so it keeps its size. Swapping it with
+  whatever window is over there, which is what most BSP tilers do by default,
+  means a half-screen window can come back as a quarter. `swap <dir>` is there
+  for when you do want the literal trade.
 - **Stacks** — collapse several windows into one slot and cycle through them.
   The windows behind show as a row of title bars you can click to bring one
   forward, and a row of dots on the front window's border says how many there
@@ -38,6 +43,10 @@ its own.
   stack; `stack move <dir>` drops the focused window into its neighbour's.
 - **Modes** — modal layers, like vim's. The shipped config puts resizing behind
   one so `h/j/k/l` can be bare keys while it is active.
+- **Runs your commands too** — `exec <anything>` goes through `/bin/sh`, so the
+  half of an skhd config that was never about windows keeps working. The
+  command gets `WEFT_SPACE_LABEL`, `WEFT_FOCUSED_APP` and the rest of weft's
+  state in its environment, so a script never has to ask.
 - **Window rules** — regex on app name or window title; send an app to a space,
   or tell weft to leave it alone entirely.
 - **Multi-display** — spaces are tiled in *their own* display's rect, and
@@ -136,13 +145,24 @@ does that automatically if the repository has the signing secrets configured.
 
 weft installs from a script or a clone, so nothing would otherwise tell you a
 fix exists. WeftBar asks GitHub once a day whether a newer release is out and
-adds a single menu-bar item when there is one; clicking it opens the release
-page. `weftctl doctor` reports the same thing from the cached answer.
+adds a menu-bar item when there is one. **Settings › Advanced › Updates** shows
+the same thing with a **Check Now** button, and opening it asks for you if the
+answer on disk has aged out.
 
-It downloads nothing and installs nothing — updating is the same one-liner as
-installing, and the permissions you granted carry over because the installer
-signs weft with a stable identity. Turn the check off with
-`check-for-updates = false` under `[general]`.
+Clicking **Update** asks first, then runs the release's own
+`install-release.sh` — the same script the one-liner runs, not a second
+updater. It downloads the release, verifies the checksum, replaces the copy of
+WeftBar you are running, restarts the service and reopens the app. Your settings
+and permissions carry over, because the installer signs weft with a stable
+identity.
+
+Most of an update is the download, and on a slow link to GitHub that is minutes
+rather than seconds, so Settings shows a progress bar, the percentage and an
+elapsed clock throughout. WeftBar quits partway through by design — that is the
+installer replacing it — and reopens on its own.
+
+Turn the check off with `check-for-updates = false` under `[general]`. Updating
+by hand is always the one-liner at the top of this file.
 
 ## Permissions
 
@@ -208,11 +228,21 @@ the gesture a person uses. Weft holds the window by its title bar, presses your
 "move a space" shortcut once per desktop of travel, and lets go. Accessibility,
 which weft already needs, is the only requirement.
 
-The cost is that you see it happen: the screen changes desktop and changes back,
-about a second per desktop travelled. That is fine for a command you just typed,
-so `space move-window` always does it. It is not fine unprompted — a rule fires
-when an app opens, which may be while you are typing in something else — so a
-rule's `space =` does nothing until you set `follow-space-rules = true`.
+The cost is that you see it happen: the screen changes desktop on the way,
+about a second per desktop travelled. Because it is visible either way,
+`space move-window` **goes with the window** by default — the alternative is
+changing desktop and then changing back, which is one more switch to end up
+somewhere you probably did not want to be. Add `--no-follow` when you mean to
+stay put:
+
+```toml
+"alt-shift-2" = "space move-window 2"              # send it there and follow
+"alt-ctrl-2"  = "space move-window 2 --no-follow"  # send it there, stay here
+```
+
+It is not fine unprompted — a rule fires when an app opens, which may be while
+you are typing in something else — so a rule's `space =` does nothing until you
+set `follow-space-rules = true`.
 
 Weft reads whichever keys you have bound to "Move left/right a space" rather
 than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
@@ -235,7 +265,7 @@ QWERTY, Colemak and Dvorak.
 | Chord | Does |
 |---|---|
 | `⌥H` `⌥J` `⌥K` `⌥L` | Focus the window left / down / up / right |
-| `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Swap the focused window that way |
+| `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Move the focused window that way |
 | `⌥1`…`⌥5` | Go to desktop 1–5 |
 | `⌥⇧1`…`⌥⇧5` | Send the focused window to that desktop |
 | `⌥Tab` | Back to the desktop you came from |
@@ -281,6 +311,7 @@ reserve = 0                     # room for an always-on-screen bar
 "alt-h" = "focus west"
 "alt-1" = "space focus 1"
 "alt-shift-r" = "mode resize"
+"alt-return" = "exec open -a Ghostty"   # anything, through /bin/sh
 
 [mode.resize]
 "h" = "resize left 40"
@@ -318,6 +349,7 @@ of these commands.
 ```bash
 weftctl focus east                  # same thing your keybind does
 weftctl space focus 3
+weftctl exec 'screencapture -i -c'  # run a shell command
 weftctl space layout float
 weftctl query state                 # JSON: the world as weftd sees it
 weftctl query windows
@@ -392,7 +424,7 @@ passes `args` through unchanged.
 
 ```bash
 swift build -c release      # weftd, weftctl, weft-bar
-swift test                  # 97 tests, no window manager required
+swift test                  # 194 tests, no window manager required
 ./scripts/build-app.sh      # bundles build/WeftBar.app
 ```
 
