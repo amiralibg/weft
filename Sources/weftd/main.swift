@@ -879,10 +879,24 @@ final class Daemon: @unchecked Sendable {
         systemFocusLock.withLock { systemFocusLocked = wid }
         // A recolour, or the one border moving over: no layout pass needed.
         if bordersBridge.drawsBorders { bordersBridge.renderer.setFocus(wid) }
+        // Where the window physically is, for the ones membership cannot
+        // answer for. A float, a rule's `manage = false`, a quirked window and
+        // a panel are in no layout at all, so the loop below never matched
+        // them and `focusedDisplay` stayed on the display the user had left —
+        // and with it `currentSpace`, which is the space every following
+        // command, every border pass and every new window resolves against.
+        // Clicking a floating window on the second monitor and then pressing a
+        // space keybind acted on the first monitor's desktop.
+        let onDisplay = WorldReader.frame(of: wid).flatMap { f in
+            displayUUID(containing: CGPoint(x: f.x + f.width / 2, y: f.y + f.height / 2))
+        }
         updateSpaces { sp in
             for sid in sp.visibleSpaces where sp.layouts[sid]?.windows.contains(wid) == true {
                 sp.focusedDisplay = sp.displayBySpace[sid]
                 return
+            }
+            if let onDisplay, sp.currentByDisplay[onDisplay] != nil {
+                sp.focusedDisplay = onDisplay
             }
         }
     }
@@ -1268,6 +1282,22 @@ final class Daemon: @unchecked Sendable {
                 self.pids[w.id] = w.pid
                 self.appNames[w.id] = w.app
                 self.windowTitles[w.id] = w.title
+                // Floated by hand, and it stays floated.
+                //
+                // `manualFloat` was folded into `unmanagedNow` *after* this
+                // loop, which set the "do not manage it" flag and left the
+                // window in `bySpace` all the same — so `syncMembership` put
+                // it straight back into its space's tree and the next apply
+                // tiled it. `float toggle` therefore held only until the next
+                // sweep: leave the desktop and come back, or open any window
+                // anywhere, and the float was a tile again. Every other
+                // reason to leave a window alone — a rule, a quirk, a panel —
+                // already skips the membership line below, and this is the
+                // one that did not.
+                if self.manualFloat.contains(w.id) {
+                    unmanagedNow.insert(w.id)
+                    continue
+                }
                 // Closed but kept: on a showing desktop, not on screen. Not
                 // a tile (`isTileable`), and not unmanaged either — if the
                 // app shows it again, the next sweep gives it a slot.
@@ -1885,13 +1915,22 @@ final class Daemon: @unchecked Sendable {
         default:
             break
         }
+        // The space this window is on, not the space weft thinks the user is
+        // on. Floating a window on the second monitor took the *other*
+        // display's layout apart instead — the removal was a no-op there, and
+        // the window was then centred on a screen it was not on, so it jumped
+        // monitors on its way to floating.
+        let sp0 = readSpaces()
+        let home = sp0.layouts.first { $0.value.windows.contains(wid) }?.key
+            ?? SpaceControl.spacesForWindow(wid).first(where: { sp0.layouts[$0] != nil })
+            ?? currentSID()
         if isManual {
             // Snapshot where the user had it before the layout reclaims it,
             // so floating it again lands back in the same place.
             if let live = WorldReader.frame(of: wid) { floatFrames[wid] = live }
             manualFloat.remove(wid)
             unmanaged.remove(wid)
-            if let sid = currentSID() {
+            if let sid = home {
                 updateSpaces { sp in
                     switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
                     case .tiling(var t):
@@ -1909,7 +1948,7 @@ final class Daemon: @unchecked Sendable {
         } else {
             manualFloat.insert(wid)
             unmanaged.insert(wid)
-            if let sid = currentSID() {
+            if let sid = home {
                 updateSpaces { sp in
                     switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
                     case .tiling(var t):
@@ -1927,7 +1966,7 @@ final class Daemon: @unchecked Sendable {
             // again used to snap it back to the centre every time — the
             // second float threw away the whole arrangement the first one
             // was for. Fall back to a centred 70% only the first time.
-            let uScreen = usableScreen(for: currentSID())
+            let uScreen = usableScreen(for: home)
             let target = floatFrames[wid].flatMap { remembered -> Frame? in
                 // Ignore geometry from a screen this window is no longer on.
                 let cx = remembered.x + remembered.width / 2
@@ -2244,18 +2283,49 @@ final class Daemon: @unchecked Sendable {
             // nothing re-tiled, and nothing was logged either. A keybind that
             // does nothing at all and reports success is the worst of the
             // three outcomes available here.
+            //
+            // The display this desktop belongs to. Everything below has to
+            // know it, because on a two-display Mac "focus this space" is two
+            // different operations depending on whether the space is already
+            // showing — and both of them have to leave `focusedDisplay`
+            // pointing at it, or the next command resolves "the current
+            // space" against the monitor the user just left.
+            let home = displays.first(where: { $0.spaces.contains(sid) })?.uuid
+                ?? sp.displayBySpace[sid]
+            let previous = currentSID()
+            // Showing somewhere. Whether that is somewhere the user is
+            // looking *from* is the next question.
             if displays.contains(where: { $0.currentSpace == sid }) {
-                // Genuinely already there. Do not re-tile or re-activate:
-                // doing so on a repeated keypress yanked focus around for no
-                // reason.
                 if !sp.currentByDisplay.values.contains(sid) {
                     // The cache was the stale one. Correct it, so the next
                     // command does not start from the same wrong answer.
                     syncQueue.async { [weak self] in self?.syncFromSnapshot() }
                 }
-                return IPCResponse(ok: true, output: "already on \(label)")
+                // Showing on the display the user is already on: genuinely
+                // nothing to do. Re-tiling or re-activating here yanked focus
+                // around on a repeated keypress.
+                guard let home, home != sp.focusedDisplay else {
+                    return IPCResponse(ok: true, output: "already on \(label)")
+                }
+                // Showing on the *other* display, which is not the same thing
+                // and used to be treated as if it were. `alt-1` with main
+                // already up on the second monitor answered "already on main"
+                // and moved nothing: keyboard focus stayed where it was, so
+                // the desktop the user had just named was not the one their
+                // next keybind acted on. Nothing needs switching — the space
+                // is on screen — but focus does have to go there.
+                updateSpaces { s in
+                    if let previous, previous != sid { s.recentSpace = previous }
+                }
+                let took = takeFocus(display: home, showing: sid)
+                bus.emit(stateChangedEvent())
+                return IPCResponse(
+                    ok: true,
+                    output: took == nil
+                        ? "\(label) is showing on the other display — pointer moved there"
+                        : "focused \(label) on the other display"
+                )
             }
-            let previous = currentSID()
             if SpaceControl.focusSpace(sid) {
                 // Verified switch (SpaceControl re-reads the WindowServer).
                 updateSpaces { s in
@@ -2263,6 +2333,15 @@ final class Daemon: @unchecked Sendable {
                         s.currentByDisplay[d.uuid] = sid
                     }
                     if let previous, previous != sid { s.recentSpace = previous }
+                    // Keyboard focus follows the desktop the user named, even
+                    // when that desktop lives on the other monitor. Without
+                    // this `currentSpace` still resolved through the old
+                    // display, so the space weft tiled, bordered and focused
+                    // after the switch was the one on the display nobody had
+                    // asked about — and `applySpaceLayout` below only
+                    // corrected it by accident, when the destination happened
+                    // to have a window it could activate.
+                    if let home { s.focusedDisplay = home }
                 }
                 // Instant either way (weft-sa or the Dock swipe), and verified
                 // landed — safe to tile + focus now.
@@ -2301,6 +2380,7 @@ final class Daemon: @unchecked Sendable {
             }
             updateSpaces { s in
                 if let previous, previous != sid { s.recentSpace = previous }
+                if let home { s.focusedDisplay = home }
             }
             SpaceControl.focusSpaceNumber(number)
             // Confirm rather than claim: the Mission Control shortcut may be
@@ -2420,6 +2500,26 @@ final class Daemon: @unchecked Sendable {
             }
         }
         let startedOn = currentSID()
+        // A desktop on the *other* monitor is not something the carry can
+        // reach, and it is the only route weft has to a background desktop —
+        // so `move display east` failed outright on every two-display Mac,
+        // with "target N and window space M are not on one display".
+        //
+        // It does not need the carry. With separate Spaces per display the
+        // WindowServer decides a window's display from where the window is:
+        // put its frame inside the other monitor and it joins that monitor's
+        // showing desktop. One AX write, no desktop switch, no keystroke —
+        // better than the carry rather than a fallback for it. It only works
+        // for a desktop that is showing, which is exactly what `move display`
+        // always names.
+        if !SpaceControl.spacesForWindow(wid).contains(sid),
+           let home = readSpaces().displayBySpace[sid],
+           WorldReader.currentSpaces()[home] == sid,
+           displayOf(window: wid) != home,
+           moveAcrossDisplays(wid, to: sid, on: home)
+        {
+            return finishMove(wid, toSpace: sid, label: label, follow: follow, startedOn: startedOn)
+        }
         guard SpaceControl.moveWindowToSpace(wid, sid, follow: follow) else {
             // The actual reason, not a list of the things it might have been.
             // weft moves a window by holding it and pressing the bound "move a
@@ -2433,6 +2533,48 @@ final class Daemon: @unchecked Sendable {
                     + "Keyboard Shortcuts → Mission Control → Move left/right a space."
             return IPCResponse(ok: false, error: "the move did not land: \(why)")
         }
+        return finishMove(wid, toSpace: sid, label: label, follow: follow, startedOn: startedOn)
+    }
+
+    /// Which display a window is physically on, by its centre.
+    private func displayOf(window wid: WindowID) -> String? {
+        guard let f = WorldReader.frame(of: wid) else { return nil }
+        return displayUUID(containing: CGPoint(x: f.x + f.width / 2, y: f.y + f.height / 2))
+    }
+
+    /// Put `wid` on the desktop showing on display `uuid`, by moving it there.
+    ///
+    /// Verified like every other mutation in this area: the WindowServer
+    /// reporting `sid` afterwards, never the fact that a frame was written.
+    /// The window keeps its size — `finishMove` re-tiles it into the target
+    /// display's rect a moment later, and arriving at the right size matters
+    /// less than arriving at all.
+    private func moveAcrossDisplays(_ wid: WindowID, to sid: SpaceID, on uuid: String) -> Bool {
+        guard let live = WorldReader.frame(of: wid), let pid = pid(of: wid) else { return false }
+        let screen = usableScreen(onDisplay: uuid)
+        let width = min(live.width, screen.width)
+        let height = min(live.height, screen.height)
+        let target = Frame(
+            x: screen.x + (screen.width - width) / 2,
+            y: screen.y + (screen.height - height) / 2,
+            width: width,
+            height: height
+        )
+        applier.apply(frames: [wid: target], pids: [wid: pid], force: true)
+        let deadline = Date().addingTimeInterval(0.5)
+        repeat {
+            if SpaceControl.spacesForWindow(wid).contains(sid) { return true }
+            usleep(5_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Reconcile the model after a move that has already landed: drop the
+    /// window from every other space's layout, insert it into the target's,
+    /// and re-apply whatever is on screen.
+    private func finishMove(
+        _ wid: WindowID, toSpace sid: SpaceID, label: String, follow: Bool, startedOn: SpaceID?
+    ) -> IPCResponse {
         // Record the desktop the carry left us on before anything reads it.
         // `applySpaceLayout` below asks `visibleSpaces` which space to raise
         // into, and every later command resolves `recent` against this — so a
@@ -2714,24 +2856,36 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: true, output: "already on display \(describe(target))")
         }
         let label = sp.labels[sid] ?? "\(sid)"
-        if let focus = sp.layouts[sid]?.focus, let pid = pid(of: focus) {
-            // Activating the window is the display switch; noteFocusedWindow
-            // inside focusAndWarp records the display it lives on.
-            focusAndWarp(window: focus, pid: pid)
+        if let focus = takeFocus(display: uuid, showing: sid) {
             bus.emit(stateChangedEvent())
             return IPCResponse(ok: true, output: "focused \(focus) on \(label)")
         }
-        // Nothing there can take keyboard focus. weft still moves its own
-        // notion of the current display — that is what the user asked for,
-        // and it is what makes the next `move display` or new window land
-        // here — and puts the pointer there so the next click agrees.
+        bus.emit(stateChangedEvent())
+        return IPCResponse(ok: true, output: "\(label) is empty — pointer moved there")
+    }
+
+    /// Move keyboard focus onto `uuid`, whose current space is already `sid`.
+    ///
+    /// Not a space switch: with separate Spaces per display both displays are
+    /// showing something, so this is focusing a window that is on screen
+    /// already. Returns the window that took focus, or nil when nothing there
+    /// could — in which case weft still moves its own notion of the current
+    /// display, because that is what the caller asked for and what makes the
+    /// next command and the next window land on the right monitor, and puts
+    /// the pointer there so the next click agrees.
+    private func takeFocus(display uuid: String, showing sid: SpaceID) -> WindowID? {
+        if let focus = readSpaces().layouts[sid]?.focus, let pid = pid(of: focus) {
+            // Activating the window is the display switch; noteFocusedWindow
+            // inside focusAndWarp records the display it lives on.
+            focusAndWarp(window: focus, pid: pid)
+            return focus
+        }
         updateSpaces { $0.focusedDisplay = uuid }
         let screen = usableScreen(onDisplay: uuid)
         CGWarpMouseCursorPosition(CGPoint(
             x: screen.x + screen.width / 2, y: screen.y + screen.height / 2
         ))
-        bus.emit(stateChangedEvent())
-        return IPCResponse(ok: true, output: "\(label) is empty — pointer moved there")
+        return nil
     }
 
     /// Send the focused window to another display's current space.
@@ -2749,10 +2903,14 @@ final class Daemon: @unchecked Sendable {
         guard let sid = sp.currentByDisplay[uuid] else {
             return IPCResponse(ok: false, error: "display \(describe(target)) has no current space")
         }
-        guard let wid = currentLayout().focus else {
+        // Same fallback `space move-window` uses: a float, or a window a rule
+        // unmanaged, is in no layout and can never be the layout's focus — so
+        // "send this window to the other monitor" answered "nothing focused"
+        // for exactly the windows most likely to need sending.
+        guard let wid = currentLayout().focus ?? FocusedWindow.current() else {
             return IPCResponse(ok: false, error: "nothing focused")
         }
-        if sp.displayBySpace[currentSID() ?? 0] == uuid {
+        if displayOf(window: wid) == uuid {
             return IPCResponse(ok: true, output: "window \(wid) is already on that display")
         }
         let moved = moveWindow(wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)")

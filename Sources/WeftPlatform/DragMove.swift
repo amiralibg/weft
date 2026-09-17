@@ -340,6 +340,18 @@ public enum DragMove {
             }
         }
 
+        // Let the desktop settle under the held window before letting go.
+        //
+        // `waitForChange` returns the moment the WindowServer reports the new
+        // desktop, which is earlier than the moment the transition is over —
+        // and a drop taken during it replays the last movement on the desktop
+        // being left, so the window is let go on the old one. The spike this
+        // is built from (spikes/dragmove.swift) waits here for exactly that
+        // reason and the shipped version never did. It is one wait per move,
+        // against a gesture that already pays a full space-switch animation
+        // per desktop travelled.
+        if landed { usleep(120_000) }
+
         // Released explicitly on every path. A synthetic press with no release
         // leaves the session dragging, and nothing else can clear it.
         mouse(.leftMouseDragged, CGPoint(x: grab.x, y: grab.y + 10))
@@ -362,6 +374,18 @@ public enum DragMove {
         guard let e = CGEvent(
             mouseEventSource: nil, mouseType: type, mouseCursorPosition: at, mouseButton: .left)
         else { return }
+        // No modifiers, whatever the user is still holding.
+        //
+        // A carry is started from a keybind, and the keybinds people give it
+        // are modifier-heavy by nature — `alt-shift-1`. `CGEvent(mouseEventSource:
+        // nil, …)` stamps the new event with the modifiers that are physically
+        // down at that moment, so the press that is supposed to be "grab this
+        // title bar" arrived as an alt-shift-click on it. What a person does to
+        // drag a window is press with nothing held, and that is what this has
+        // to be: an application is entitled to treat a modified click on its
+        // chrome as something else entirely, and weft's own event tap treats
+        // one carrying `mouse-modifier` as a window drag it should claim.
+        e.flags = []
         e.setIntegerValueField(.eventSourceUserData, value: marker)
         e.post(tap: .cgSessionEventTap)
     }

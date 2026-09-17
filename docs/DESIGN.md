@@ -2015,3 +2015,142 @@ re-run under a trace is asking them to reproduce a bug to find out what it was.
 `DragMove.failureReason` carries the actual one out to the reply, including two
 that had no message at all: a desktop list that does not contain both spaces,
 and a carry whose keys went out but left the window where it was.
+
+---
+
+## 28. Four bugs that shared one shape
+
+Reported together: moving a window to another desktop moved the pointer and
+nothing else; spaces, focus and borders misbehaved across two displays;
+`float toggle` held until the next space change and then re-tiled; and the
+in-app updater downloaded, showed progress, and reported that it had not
+installed.
+
+They are unrelated in mechanism and identical in shape. In each one weft asked
+a question of something that could not answer it — its own event tap, its own
+cached idea of the focused display, its own compile-time version constant — and
+believed the answer.
+
+### 28.1 weft's event tap swallowed weft's own clicks
+
+`DragMove.carry` picks a window up by posting a `leftMouseDown` on its title
+bar. The loopback guard that exists precisely so weft's synthetic events do not
+re-enter its own keybinds sat **after** the mouse branches of `tapCallback`,
+reachable only by `keyDown`.
+
+`CGEvent(mouseEventSource: nil, …)` stamps a new event with the modifiers that
+are physically down at the time, and the keybind that starts a carry is
+modifier-heavy by nature — `alt-shift-1`. So the press arrived carrying alt,
+which is exactly what `mouse-modifier = "alt"` claims a click for. The tap
+claimed it and returned nil; the application never saw a press; the window was
+never picked up; and the grab probe (§27.1) correctly refused to send a desktop
+shortcut to a window weft was not holding. Everything worked as specified and
+the only thing that reached the screen was the pointer jumping between the four
+grab candidates.
+
+A divider or stack-strip grab zone under a candidate point does the same thing
+with no modifier at all.
+
+The guard moved above every branch, and `DragMove` now clears `e.flags` on the
+events it posts: what a person does to drag a window is press with nothing
+held, and an application is entitled to treat a modified click on its chrome as
+something else entirely.
+
+The carry also waits for the desktop transition to finish before letting go.
+`waitForChange` returns the moment the WindowServer reports the new desktop,
+which is earlier than the moment the switch is over, and a drop taken during it
+replays the last movement on the desktop being left. `spikes/dragmove.swift`
+waits here and says why; the shipped version never did.
+
+### 28.2 `focusedDisplay` was set by one path and read by all of them
+
+`SpaceState.currentSpace` — the space every command, every border pass and
+every new window resolves against — is `currentByDisplay[focusedDisplay]`. Only
+`noteFocusedWindow` ever wrote that field, and it wrote it by looking the
+focused window up in each visible space's **layout**.
+
+Three consequences, all of them "the other monitor is buggy":
+
+- `space focus` never touched it. Switching a desktop on the second monitor
+  left `currentSpace` resolving through the first, so the space weft then
+  tiled, bordered and focused was the one nobody had asked about. It looked
+  correct only when the destination happened to have a window that
+  `applySpaceLayout(stealFocus:)` could activate, which then set the field as a
+  side effect.
+- A space already showing on the other display was answered with "already on
+  \<label\>" and nothing else. That is true of the *desktop* and false of the
+  user: keyboard focus stayed where it was, so the space they had just named
+  was not the one their next keybind acted on.
+- A float, a rule's `manage = false`, a quirked window and a panel are in no
+  layout, so the lookup never matched them. Clicking a floating window on the
+  second monitor left weft's idea of the current display behind.
+
+`space focus` now resolves the target's display up front and sets the field on
+every path that lands — the swipe, the keystroke fallback, and the new
+focus-only path for a space that is already showing elsewhere.
+`noteFocusedWindow` falls back to the window's own centre against the display
+rects, which is the question membership was standing in for.
+
+`move display <dir>` was broken outright on any two-display Mac for a related
+reason: it goes through the carry, and the carry presses "move left/right a
+space", which only ever steps along one display's own list — so it refused with
+*"target N and window space M are not on one display"* and nothing else was
+tried. It does not need the carry. With separate Spaces per display the
+WindowServer decides a window's display from where the window **is**: writing
+its frame inside the other monitor joins it to that monitor's showing desktop.
+One AX write, no desktop switch, no keystroke, verified by re-reading
+membership like every other mutation here. Only valid for a desktop that is
+showing — which is exactly what `move display` always names.
+
+### 28.3 A hand float was excluded from layouts but not from membership
+
+`syncFromSnapshot` builds `bySpace` — the window→space membership
+`syncMembership` reconciles layouts against — and then folded `manualFloat`
+into `unmanagedNow` **after** that loop. So a floated window got the "do not
+manage it" flag and stayed in `bySpace` all the same: the next sweep put it
+straight back into its space's tree, and the next apply tiled it.
+
+`float toggle` therefore held exactly until the next sweep. Leave the desktop
+and come back, or open any window anywhere, and the float was a tile again.
+Every other reason to leave a window alone — a rule, a quirk, a panel — already
+`continue`s past the membership line. This is the one that did not.
+
+`handleFloat` also worked against `currentSID()` rather than the window's own
+space, so floating a window on the second monitor took the *other* display's
+layout apart (a no-op) and then centred the window on a screen it was not on.
+
+### 28.4 The updater proved failure with a constant
+
+`install-release.sh` runs as a child of WeftBar. It `pkill`s the app, then
+`rm -rf`s the bundle and copies the new one in. Under `set -euo pipefail` an
+exit status of 0 means all of that succeeded — the new bundle **was** written.
+
+But `pkill` returns as soon as the signal is queued. An app that does not
+actually go is survivable — its binary stays mapped — and the result is the old
+build running on top of a new bundle. The installer's closing `open` then
+activates that same old process rather than starting anything, and the old
+process reports:
+
+> The installer finished without replacing weft, which is still 0.9.6.
+
+`WeftVersion.current` is this binary's compile-time constant. It cannot change
+however well the update went, so that branch could only ever report failure.
+The one outcome the code was written to never produce — silence — had been
+replaced with an outcome that was always wrong.
+
+Two fixes, because either alone leaves it reachable:
+
+- The installer **waits for the quit**, and kills outright if it must. A bundle
+  is never replaced underneath a live process. It then reads the installed
+  version back out of the bundle and puts it in the log, because "the copy
+  returned 0" and "the app on disk is the new one" are different claims.
+- The updater **asks the disk**. `finish` reads `CFBundleShortVersionString`
+  from the bundle it just replaced. If that is the version it asked for, the
+  update worked and this process is the copy left behind: it launches the new
+  build — `createsNewApplicationInstance`, or LaunchServices answers by
+  activating this old one — and stands down. Only a disk that really does still
+  hold the old build produces a failure, and it names the version it found.
+
+Both ship inside the app, so they take effect for updates started *from* a
+build that carries them. That lag is inherent to an updater that lives in the
+thing being updated.

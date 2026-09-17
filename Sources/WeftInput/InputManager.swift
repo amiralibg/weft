@@ -150,6 +150,29 @@ private func tapCallback(
         }
         return Unmanaged.passUnretained(event)
     }
+    // Synthetic loopback guard: our own posts carry userData 0x57454654
+    // ("WEFT"). Before the mouse branches, not after them — and that is the
+    // whole of "moving a window to another desktop moves the cursor and
+    // nothing else".
+    //
+    // The carry in `DragMove` holds a window by posting a left-button press
+    // and a few drags. `CGEvent(mouseEventSource: nil, …)` stamps the event
+    // with the modifiers that are physically down at the time, and the
+    // keybind that started the carry is `alt-shift-<n>` — so the synthetic
+    // press arrives carrying alt, which is exactly what `mouse-modifier`
+    // claims a click for. This tap swallowed it, the application never saw a
+    // press, the window was never picked up, and the carry correctly refused
+    // to send the desktop shortcut to a window it was not holding. All that
+    // reached the screen was the pointer jumping between the four grab
+    // candidates.
+    //
+    // A divider or stack-strip zone under a grab point does the same thing
+    // with no modifier at all. Neither is a click the user made, so the tap
+    // has no business looking at either: weft's own events pass straight
+    // through and leave the drag latch alone.
+    if event.getIntegerValueField(.eventSourceUserData) == 0x57454654 {
+        return Unmanaged.passUnretained(event)
+    }
     if type == .leftMouseDown || type == .rightMouseDown {
         let loc = event.location
         let claimed: MouseButton? = box.lock.withLock {
@@ -208,11 +231,6 @@ private func tapCallback(
 
     guard type == .keyDown else {
         return Unmanaged.passUnretained(event)  // incl. flagsChanged: observe, pass
-    }
-
-    // Synthetic loopback guard: our own posts carry userData 0x57454654 ("WEFT")
-    if event.getIntegerValueField(.eventSourceUserData) == 0x57454654 {
-        return Unmanaged.passUnretained(event)
     }
 
     let keycode = event.getIntegerValueField(.keyboardEventKeycode)

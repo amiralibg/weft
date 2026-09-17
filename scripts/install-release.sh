@@ -170,6 +170,28 @@ fi
 # the update doing what it said.
 say "quitting WeftBar — it reopens when the update finishes"
 pkill -x WeftBar >/dev/null 2>&1 || true
+# And wait for it to actually go.
+#
+# `pkill` returns as soon as the signal is queued, and the very next thing
+# this script does is delete WeftBar.app out from under a process that is
+# still running from it. That is survivable for the process — its binary
+# stays mapped — but it means the app carries on running the OLD build on top
+# of a NEW bundle, reports the version it was compiled with, and tells the
+# user the update did not happen. It had happened; the only thing left over
+# was the copy sent to report on it.
+#
+# An app that will not go quietly is killed outright: the alternative is
+# replacing a bundle underneath a live process, and the update is past the
+# point of being called off.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x WeftBar >/dev/null 2>&1 || break
+    sleep 0.3
+done
+if pgrep -x WeftBar >/dev/null 2>&1; then
+    warn "WeftBar did not quit when asked; closing it the hard way"
+    pkill -9 -x WeftBar >/dev/null 2>&1 || true
+    sleep 0.5
+fi
 
 say "installing binaries to $BINDIR"
 mkdir -p "$BINDIR"
@@ -180,6 +202,16 @@ say "installing WeftBar.app to $APPDIR"
 mkdir -p "$APPDIR"
 rm -rf "$APPDIR/WeftBar.app"
 cp -R "$STAGE/WeftBar.app" "$APPDIR/WeftBar.app"
+# Read back what actually landed, and say so. `cp` failing is already fatal
+# under `set -e`, but "the copy returned 0" and "the app on disk is the new
+# one" are not the same claim — and the update UI has nothing else to go on:
+# the process asking is the old build, so its own version number can never be
+# evidence either way.
+[ -x "$APPDIR/WeftBar.app/Contents/MacOS/WeftBar" ] \
+    || die "WeftBar.app did not install to $APPDIR"
+INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$APPDIR/WeftBar.app/Contents/Info.plist" 2>/dev/null || echo "")
+say "installed WeftBar ${INSTALLED:-(version unreadable)}"
 
 # ------------------------------------------------------------------- signing
 # Give the binaries a stable identity, unless this build already has one.

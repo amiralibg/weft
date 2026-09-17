@@ -37,6 +37,11 @@ final class Updater: ObservableObject {
     private var poll: Timer?
     private var process: Process?
     private var startedAt: Date?
+    /// The version this run is installing, and the directory holding the
+    /// bundle it replaces. Both are needed to answer "did it work", and
+    /// neither can be recovered from `Bundle.main` once it has.
+    private var installing: String?
+    private var installingInto: URL?
 
     /// The version an update was started for, kept across the app dying.
     ///
@@ -139,6 +144,8 @@ final class Updater: ObservableObject {
             return
         }
         process = p
+        installing = update.latest
+        installingInto = appDir
         // Before any of it can go wrong, and deliberately not cleared on the
         // way out: this process does not live to see the end of a successful
         // update, so the next launch clears it by comparing versions.
@@ -214,9 +221,10 @@ final class Updater: ObservableObject {
         // exactly what it was reported as.
         fraction = UpdateProgress.percent(in: lines)
         guard let p = process, !p.isRunning else { return }
-        // Ran to completion without replacing us: on the happy path the
-        // installer quits this app first, so reaching here at all means it
-        // stopped early.
+        // The installer is done and this app is still here. On the happy path
+        // it quits WeftBar first, so that is either an update that stopped
+        // early or one whose quit did not take — and only the bundle on disk
+        // can tell the two apart. `finish` asks it.
         if let p = process, p.terminationStatus != 0 {
             finish(withFailure: "The installer stopped with status \(p.terminationStatus). "
                 + "See \(logURL.path).")
@@ -229,17 +237,86 @@ final class Updater: ObservableObject {
         poll?.invalidate()
         poll = nil
         process = nil
-        step = nil
         fraction = nil
         startedAt = nil
+        let target = installing
+        let appDir = installingInto
+        installing = nil
+        installingInto = nil
+        if message == nil, let target, let appDir,
+           let onDisk = Self.installedVersion(in: appDir),
+           !WeftVersion.isNewer(target, than: onDisk)
+        {
+            // It worked. This process is the copy that got left behind.
+            //
+            // Reaching here at all means the installer's quit did not take, so
+            // the old build is still running on top of a bundle that is now
+            // the new one — and `open` at the end of the installer only
+            // activated it rather than starting anything. The window then
+            // reported failure and *proved* it with `WeftVersion.current`,
+            // which is this binary's compile-time constant and cannot change
+            // however well the update went. Ask the bundle on disk, which is
+            // the only thing here that knows.
+            step = "Restarting…"
+            relaunch(appDir)
+            return
+        }
+        step = nil
         // A nil message used to mean "say nothing", and that is the one
         // outcome this window must never produce: on the happy path the
         // installer *quits this app* before it finishes, so an update that
-        // reaches here has stopped early without replacing anything. Silence
-        // put the Update button back exactly as it was, which is the report —
-        // "it did not work and showed no progress".
+        // reaches here and finds the old build still on disk has stopped early
+        // without replacing anything. Silence put the Update button back
+        // exactly as it was, which is the report — "it did not work and showed
+        // no progress".
         failure = message
-            ?? "The installer finished without replacing weft, which is still "
-                + "\(WeftVersion.current). See \(logURL.path)."
+            ?? "The installer finished without replacing weft. "
+                + (appDir.flatMap { Self.installedVersion(in: $0) }
+                    .map { "\($0) is still the version on disk. " } ?? "")
+                + "See \(logURL.path)."
+    }
+
+    /// The version of the WeftBar.app sitting in `appDir` right now.
+    ///
+    /// Read from the bundle rather than from `Bundle.main`: after a successful
+    /// update the two are different builds, and it is the difference that says
+    /// the update worked.
+    private static func installedVersion(in appDir: URL) -> String? {
+        let plist = appDir
+            .appendingPathComponent("WeftBar.app/Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let info = try? PropertyListSerialization.propertyList(
+                  from: data, format: nil) as? [String: Any],
+              let version = info["CFBundleShortVersionString"] as? String
+        else { return nil }
+        return version
+    }
+
+    /// Start the newly installed build and stand down.
+    ///
+    /// `createsNewApplicationInstance`, because the bundle being launched is
+    /// the one this process came from as far as LaunchServices is concerned —
+    /// without it the request is answered by activating *this* copy, which is
+    /// exactly the old build the relaunch exists to replace. The new one is up
+    /// before this one goes, so the menu bar never empties.
+    private func relaunch(_ appDir: URL) {
+        let app = appDir.appendingPathComponent("WeftBar.app")
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        // Back to the window the user was watching. They pressed Update in
+        // Settings and have been looking at a progress bar ever since; coming
+        // back as a bare menu-bar icon reads as the app having given up.
+        config.arguments = ["--settings"]
+        NSWorkspace.shared.openApplication(at: app, configuration: config) { _, error in
+            Task { @MainActor in
+                guard error == nil else {
+                    self.step = nil
+                    self.failure = "weft updated, but could not restart itself: "
+                        + "\(error!.localizedDescription). Quit weft and open it again."
+                    return
+                }
+                NSApp.terminate(nil)
+            }
+        }
     }
 }
