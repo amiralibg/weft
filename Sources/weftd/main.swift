@@ -3515,21 +3515,18 @@ final class Daemon: @unchecked Sendable {
             var windowSpaces: [WindowID: [SpaceID]] = [:]
             let spaces = sp.order.compactMap { sid -> SpaceStatus? in
                 guard let display = sp.displayBySpace[sid] else { return nil }
-                let label = sp.workspace(on: sid)?.label ?? "\(sid)"
-                let layout = sp.layout(on: sid)?.kind
-                    ?? sp.workspace(on: sid)?.overrideKind
-                    ?? cfg.spaces.first(where: { $0.label == label })?.layout
-                    ?? cfg.general.defaultLayout
-                let windows = sp.layout(on: sid)?.windows.sorted() ?? []
-                for wid in windows { windowSpaces[wid, default: []].append(sid) }
-                return SpaceStatus(
-                    id: sid,
-                    label: label,
-                    layout: layout.rawValue,
-                    windows: windows,
+                let status = SpaceStatus.of(
+                    desktop: sid,
+                    in: sp,
+                    display: display,
                     current: sp.currentByDisplay[display] == sid,
-                    display: display
+                    declaredLayout: { label in
+                        cfg.spaces.first(where: { $0.label == label })?.layout
+                    },
+                    defaultLayout: cfg.general.defaultLayout
                 )
+                for wid in status.windows { windowSpaces[wid, default: []].append(sid) }
+                return status
             }
             let windows = windowSpaces.keys.sorted().compactMap { wid -> BarWindowStatus? in
                 guard let pid = metadata.pids[wid] else { return nil }
@@ -3655,18 +3652,18 @@ final class Daemon: @unchecked Sendable {
             let sp = readSpaces()
             let cfg = currentConfig()
             return emit(world.spaces.map { s in
-                let label = sp.workspace(on: s.id)?.label ?? "\(s.id)"
-                let layout = sp.layout(on: s.id)?.kind
-                    ?? sp.workspace(on: s.id)?.overrideKind
-                    ?? cfg.spaces.first(where: { $0.label == label })?.layout
-                    ?? cfg.general.defaultLayout
-                return SpaceStatus(
-                    id: s.id,
-                    label: label,
-                    layout: layout.rawValue,
-                    windows: sp.layout(on: s.id)?.windows.sorted() ?? s.windows,
+                SpaceStatus.of(
+                    desktop: s.id,
+                    in: sp,
+                    display: s.displayUUID,
                     current: s.isCurrent,
-                    display: s.displayUUID
+                    declaredLayout: { label in
+                        cfg.spaces.first(where: { $0.label == label })?.layout
+                    },
+                    defaultLayout: cfg.general.defaultLayout,
+                    // A desktop weft has not swept yet reports what the
+                    // WindowServer says is on it, not an empty list.
+                    fallbackWindows: s.windows
                 )
             })
         default:
@@ -4000,19 +3997,6 @@ private struct StateView: Codable, Sendable {
     var frames: [FrameEntry]
 }
 
-private struct BarStateStatus: Codable, Sendable {
-    var spaces: [SpaceStatus]
-    var windows: [BarWindowStatus]
-}
-
-private struct BarWindowStatus: Codable, Sendable {
-    var id: WindowID
-    var app: String
-    var title: String
-    var pid: Int32
-    var spaces: [SpaceID]
-}
-
 private struct DaemonPermissions: Codable, Sendable {
     /// The path the user must add in System Settings — not weftctl's, not
     /// WeftBar's. Shown verbatim so it can be pasted or revealed in Finder.
@@ -4070,15 +4054,6 @@ private struct DisplayStatus: Codable, Sendable {
     var spaces: [SpaceID]
     var currentSpace: SpaceID?
     var focused: Bool
-}
-
-private struct SpaceStatus: Codable, Sendable {
-    var id: SpaceID
-    var label: String
-    var layout: String
-    var windows: [WindowID]
-    var current: Bool
-    var display: String
 }
 
 private struct FloatView: Codable, Sendable {

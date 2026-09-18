@@ -65,6 +65,13 @@ let package = Package(
             name: "WeftInputTests",
             dependencies: ["WeftInput"]
         ),
+        // The socket's shapes. weft-bar and weftctl parse these, and a field
+        // that quietly changes meaning does not fail to decode — it decodes
+        // into the wrong answer.
+        .testTarget(
+            name: "WeftIPCTests",
+            dependencies: ["WeftIPC", "WeftCore"]
+        ),
         .testTarget(
             name: "WeftConfigTests",
             dependencies: ["WeftConfig", "WeftCore", "WeftInput"]
