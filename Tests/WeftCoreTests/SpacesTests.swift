@@ -144,24 +144,23 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
 /// The layout is gone; an override naming it simply does not survive, and a
 /// space with no override tiles bsp — so there is nothing to migrate.
 @Test func aPersistedScrollOverrideLoadsAsBsp() {
-    // Overrides are read when a workspace is created, so they are restored
-    // first — which is the order the daemon's first sweep uses too.
-    var s = SpaceState()
-    s.assignOverrides(sids: [10, 20, 30], kinds: ["", "scroll", "float"])
-    #expect(s.overrides[20] == nil)
-    #expect(s.overrides[30] == .float)
-    s.adoptDesktops([10, 20, 30], names: [])
+    // An override belongs to a workspace, so it is restored after the
+    // workspaces exist — the order the daemon's first sweep uses too.
+    var s = desktops([10, 20, 30], names: [])
+    s.assignOverrides(kinds: ["", "scroll", "float"])
+    #expect(s.workspace(on: 20)?.overrideKind == nil)
+    #expect(s.workspace(on: 30)?.overrideKind == .float)
     let live = s.liveWorkspaces(desktops: [10, 20, 30])
     let (s1, _) = syncMembership(s, membership: [ws(s, 20): [7]], live: live)
     #expect(s1.layout(on: 20)?.kind == .bsp)
     #expect(s1.layout(on: 30)?.kind == .float)
 }
 
-@Test func recentSpaceResolution() {
+@Test func recentWorkspaceResolution() {
     var s = desktops([3, 5])
-    s.recentSpace = 3
+    s.recentWorkspace = ws(s, 3)
     #expect(s.resolveWorkspace("recent") == ws(s, 3))
-    s.recentSpace = 5
+    s.recentWorkspace = ws(s, 5)
     #expect(s.resolveWorkspace("recent") == ws(s, 5))
 }
 
@@ -325,41 +324,48 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 /// brand-new desktop inherits a dead workspace's tree.
 @Test func aVanishedSpaceLosesItsLayout() {
     var s = desktops([7, 8])
-    s.overrides[8] = .float
+    s.workspaces[ws(s, 8)]?.overrideKind = .float
     let dead = ws(s, 8)
     s.adoptDesktops([7], names: nil)
     #expect(s.workspace(on: 7) != nil)
     #expect(s.active[8] == nil)
+    // The workspace goes, and its override goes with it because the override
+    // now lives on the workspace rather than in a table beside it.
     #expect(s.workspaces[dead] == nil)
-    #expect(s.overrides[8] == nil)
     #expect(s.wsOrder == [ws(s, 7)])
 }
 
 @Test func layoutOverridesRoundTripByOrdinal() {
     var s = desktops([10, 20, 30], names: ["main", "web", "code"])
-    s.overrides[20] = .float
-    let saved = s.persistedOverrides(sids: [10, 20, 30])
+    s.workspaces[ws(s, 20)]?.overrideKind = .float
+    let saved = s.persistedOverrides()
     #expect(saved == ["", "float", ""])
-    // A restart hands out different sids for the same desktops.
+    // A restart hands out different sids for the same desktops, and fresh
+    // workspace ids for the same workspaces — which is why the file is keyed
+    // by ordinal and neither id is ever written down.
     var next = desktops([11, 21, 31], names: ["main", "web", "code"])
-    next.assignOverrides(sids: [11, 21, 31], kinds: saved)
-    #expect(next.overrides[21] == .float)
-    #expect(next.overrides[11] == nil)
+    next.assignOverrides(kinds: saved)
+    #expect(next.workspace(on: 21)?.overrideKind == .float)
+    #expect(next.workspace(on: 11)?.overrideKind == nil)
+    // An empty workspace takes the restored kind outright — nothing to convert.
+    #expect(next.layout(on: 21)?.kind == .float)
 }
 
 /// Unplugging a display must not leave a stale override behind to be applied
 /// to whatever space inherits that id later.
 @Test func overridesDieWithTheirSpace() {
     var s = desktops([10, 20], names: ["main", "web"])
-    s.overrides[20] = .float
+    let dead = ws(s, 20)
+    s.workspaces[dead]?.overrideKind = .float
     s.adoptDesktops([10], names: ["main"])
-    #expect(s.overrides[20] == nil)
+    #expect(s.workspaces[dead] == nil)
+    #expect(s.persistedOverrides() == [""])
 }
 
 @Test func spaceWithOverrideFloatKeepsFloatWhenNewWindowOpens() {
     var s0 = desktops([1])
     s0.setLayout(.float(FloatState(order: [1], remembered: [:], focus: 1)), on: 1)
-    s0.overrides[1] = .float
+    s0.workspaces[ws(s0, 1)]?.overrideKind = .float
     // A second window opens on space 1
     let (s1, fresh) = syncMembership(
         s0, membership: [ws(s0, 1): [1, 2]], live: s0.liveWorkspaces(desktops: [1])
@@ -372,9 +378,8 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 @Test func spaceEmptyWithOverrideFloatKeepsFloatWhenFirstWindowOpens() {
     // Space 2 has an override of float and no windows yet — the state a
     // restart leaves a desktop in before anything opens there.
-    var s0 = SpaceState()
-    s0.overrides[2] = .float
-    s0.adoptDesktops([2], names: [])
+    var s0 = desktops([2], names: [])
+    s0.assignOverrides(kinds: ["float"])
     let (s1, fresh) = syncMembership(
         s0, membership: [ws(s0, 2): [100]], live: s0.liveWorkspaces(desktops: [2])
     )

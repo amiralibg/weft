@@ -115,12 +115,25 @@ public struct Workspace: Sendable, Equatable {
     /// The native Space it lives on. A workspace never spans two.
     public var desktop: SpaceID
     public var layout: SpaceLayout
+    /// The kind the user asked for with `space layout <kind>`, as opposed to
+    /// the one the layout happens to be. Kept apart from `layout` so the
+    /// intent survives the workspace emptying, and so it can be persisted:
+    /// without the record, the next config reload, the next empty sweep and
+    /// the next restart all quietly undo the choice.
+    public var overrideKind: LayoutKind?
 
-    public init(id: WorkspaceID, label: String, desktop: SpaceID, layout: SpaceLayout) {
+    public init(
+        id: WorkspaceID,
+        label: String,
+        desktop: SpaceID,
+        layout: SpaceLayout,
+        overrideKind: LayoutKind? = nil
+    ) {
         self.id = id
         self.label = label
         self.desktop = desktop
         self.layout = layout
+        self.overrideKind = overrideKind
     }
 }
 
@@ -170,37 +183,31 @@ public struct SpaceState: Sendable, Equatable {
     /// removed and re-added the numeric order stops matching the on-screen
     /// order and every label lands one desktop off.
     public var order: [SpaceID]
-    /// The previously focused space ID for back-and-forth space toggle (`space focus recent`).
-    public var recentSpace: SpaceID?
-    /// Dynamic layout overrides chosen via `space layout <kind>`, keyed by
-    /// SpaceID. Distinct from a workspace's layout so the intent survives an
-    /// empty-space sweep and can be persisted across restarts.
-    public var overrides: [SpaceID: LayoutKind]
+    /// The workspace to go back to for `space focus recent`.
+    public var recentWorkspace: WorkspaceID?
 
     public init(
         workspaces: [WorkspaceID: Workspace] = [:],
         active: [SpaceID: WorkspaceID] = [:],
         wsOrder: [WorkspaceID] = [],
         nextWorkspaceID: UInt32 = 1,
-        overrides: [SpaceID: LayoutKind] = [:],
         currentByDisplay: [String: SpaceID] = [:],
         displays: [String] = [],
         displayBySpace: [SpaceID: String] = [:],
         focusedDisplay: String? = nil,
         order: [SpaceID] = [],
-        recentSpace: SpaceID? = nil
+        recentWorkspace: WorkspaceID? = nil
     ) {
         self.workspaces = workspaces
         self.active = active
         self.wsOrder = wsOrder
         self.nextWorkspaceID = nextWorkspaceID
-        self.overrides = overrides
         self.currentByDisplay = currentByDisplay
         self.displays = displays
         self.displayBySpace = displayBySpace
         self.focusedDisplay = focusedDisplay
         self.order = order
-        self.recentSpace = recentSpace
+        self.recentWorkspace = recentWorkspace
     }
 
     /// The space the user is on: the focused display's current space. Falls
@@ -277,7 +284,7 @@ public struct SpaceState: Sendable, Equatable {
     /// then a raw space id (keeps alt-digit keybinds working after renames —
     /// "1" means the first workspace even when it isn't named so).
     public func resolveWorkspace(_ text: String) -> WorkspaceID? {
-        if text == "recent" { return recentSpace.flatMap { active[$0] } }
+        if text == "recent" { return recentWorkspace }
         if let id = id(forLabel: text) { return id }
         // A bare integer is an ordinal first (that is what the user types on
         // alt-3) and only falls through to a raw space id when it is too large
@@ -331,7 +338,6 @@ public struct SpaceState: Sendable, Equatable {
         // display must not leave a tree behind for whatever inherits the id.
         workspaces = workspaces.filter { live.contains($0.value.desktop) }
         active = active.filter { live.contains($0.key) }
-        overrides = overrides.filter { live.contains($0.key) }
         wsOrder = []
         for (i, sid) in sids.enumerated() {
             let fallback = "\(i + 1)"
@@ -343,16 +349,8 @@ public struct SpaceState: Sendable, Equatable {
             } else {
                 id = WorkspaceID(nextWorkspaceID)
                 nextWorkspaceID += 1
-                // A workspace is born with the kind the user last chose for
-                // its desktop. `syncMembership` used to seed this, keyed off
-                // "this space has no layout yet" — a state that stopped
-                // existing the moment creation moved here, so the seeding had
-                // to move with it or every `space layout float` would come
-                // back as bsp after a restart.
-                let initial: SpaceLayout =
-                    overrides[sid] == .float ? .float(FloatState()) : .tiling(Tree())
                 workspaces[id] = Workspace(
-                    id: id, label: name ?? fallback, desktop: sid, layout: initial
+                    id: id, label: name ?? fallback, desktop: sid, layout: .tiling(Tree())
                 )
                 active[sid] = id
             }
@@ -367,25 +365,35 @@ public struct SpaceState: Sendable, Equatable {
 
     /// Layout overrides by ordinal, ready to persist as `["", "float", ""]`.
     ///
-    /// Persisting by ordinal rather than by space id lets the choices survive
-    /// a daemon restart (macOS hands out fresh space ids on reboot) while
-    /// remaining independent of whether spaces are labelled.
-    public func persistedOverrides(sids: [SpaceID]) -> [String] {
-        sids.map { overrides[$0]?.rawValue ?? "" }
+    /// Persisting by ordinal rather than by id lets the choices survive a
+    /// daemon restart — macOS hands out fresh space ids on reboot, and weft's
+    /// own workspace ids are not persisted at all — while remaining
+    /// independent of whether workspaces are labelled.
+    public func persistedOverrides() -> [String] {
+        wsOrder.map { workspaces[$0]?.overrideKind?.rawValue ?? "" }
     }
 
     /// Re-apply a previously persisted list of layout overrides by ordinal.
+    /// Call it after `adoptDesktops`, which is what builds the order they are
+    /// counted in.
     ///
     /// A kind this build does not recognise is dropped rather than rejected,
     /// which is how a `layouts.json` written when `scroll` existed comes back
-    /// as bsp: no override survives, and bsp is what a space with no override
-    /// gets. Nothing to migrate, and nothing to explain to the user beyond
-    /// the space they left in scroll now tiling.
-    public mutating func assignOverrides(sids: [SpaceID], kinds: [String]) {
-        for (i, sid) in sids.enumerated() where i < kinds.count {
-            let raw = kinds[i]
-            if let kind = LayoutKind(rawValue: raw) {
-                overrides[sid] = kind
+    /// as bsp: no override survives, and bsp is what a workspace with no
+    /// override gets. Nothing to migrate, and nothing to explain to the user
+    /// beyond the space they left in scroll now tiling.
+    public mutating func assignOverrides(kinds: [String]) {
+        for (i, id) in wsOrder.enumerated() where i < kinds.count {
+            guard let kind = LayoutKind(rawValue: kinds[i]) else { continue }
+            workspaces[id]?.overrideKind = kind
+            // Restoring a saved choice onto a workspace that holds nothing is
+            // exact — an empty float and an empty tree differ only in kind, so
+            // there is nothing to convert and nothing to lose. A workspace that
+            // already holds windows is left alone: this runs at startup, and
+            // rearranging someone's windows on the strength of a file is the
+            // caller's decision to make, through `convertLayout`.
+            if workspaces[id]?.layout.windows.isEmpty == true {
+                workspaces[id]?.layout = kind == .float ? .float(FloatState()) : .tiling(Tree())
             }
         }
     }

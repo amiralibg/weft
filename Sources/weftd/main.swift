@@ -1087,11 +1087,17 @@ final class Daemon: @unchecked Sendable {
         readSpaces().currentSpace
     }
 
+    /// What a desktop with no workspace on it would be laid out as: the kind
+    /// the user last chose, else the `[[space]]` declaration, else the general
+    /// default. Every caller reaches this through `layout(on:) ?? …`, so it is
+    /// only ever asked about a desktop that has nothing — it used to open by
+    /// returning the existing layout, which since workspaces became the thing
+    /// that holds one is a branch no caller can take.
     private func resolvedInitialLayout(for sid: SpaceID, in sp: SpaceState) -> SpaceLayout {
-        if let existing = sp.layout(on: sid) { return existing }
         let cfg = currentConfig()
-        let kind = sp.overrides[sid]
-            ?? cfg.spaces.first(where: { $0.label == (sp.workspace(on: sid)?.label ?? "") })?.layout
+        let ws = sp.workspace(on: sid)
+        let kind = ws?.overrideKind
+            ?? cfg.spaces.first(where: { $0.label == (ws?.label ?? "") })?.layout
             ?? cfg.general.defaultLayout
         switch kind {
         case .float: return .float(FloatState())
@@ -1244,14 +1250,13 @@ final class Daemon: @unchecked Sendable {
                 // first config just works; falls back to labels.json, then numerics.
                 // Delete labels.json to re-adopt the config's names wholesale.
                 let declared = cfg.spaces.map { $0.label }
-                // Overrides first: `adoptDesktops` reads them to decide what
-                // kind a brand-new workspace starts as, so a desktop the user
-                // left in float comes back in float rather than being tiled
-                // once and converted a moment later.
-                sp.assignOverrides(sids: allSids, kinds: Daemon.loadLayoutOverrides())
                 sp.adoptDesktops(
                     allSids, names: declared.isEmpty ? Daemon.loadLabels() : declared
                 )
+                // After, not before: an override belongs to a workspace, and
+                // `adoptDesktops` is what builds both the workspaces and the
+                // order the saved list is counted in.
+                sp.assignOverrides(kinds: Daemon.loadLayoutOverrides())
             } else {
                 // Desktops added/removed at runtime: keep every existing label,
                 // but re-derive the ordinal list so `space focus 3` still means
@@ -1281,8 +1286,14 @@ final class Daemon: @unchecked Sendable {
                 sp.focusedDisplay = focusedDisplay
             }
             let newCurrent = sp.currentSpace
-            if let old = oldCurrent, let nw = newCurrent, old != nw {
-                sp.recentSpace = old
+            if let old = oldCurrent, let nw = newCurrent, old != nw,
+               let previous = sp.active[old] {
+                // Only a desktop that still exists can become "recent". It used
+                // to be recorded as a raw space id whether or not the desktop
+                // survived the sweep, so unplugging a display left `space focus
+                // recent` pointing at a dead one and answering "space N is not
+                // on any display" until something else moved.
+                sp.recentWorkspace = previous
             }
             // Invert window→spaces into per-space membership (all spaces, not
             // just current — unvisited spaces compute layouts blind). Rules +
@@ -1463,7 +1474,7 @@ final class Daemon: @unchecked Sendable {
             // this branch is seeding, not enforcement.
             for id in live.subtracting(priorKeys) {
                 guard let ws = sp.workspaces[id] else { continue }
-                let kind = sp.overrides[ws.desktop]
+                let kind = ws.overrideKind
                     ?? cfg.spaces.first(where: { $0.label == ws.label })?.layout
                     ?? cfg.general.defaultLayout
                 self.convertLayout(&sp, workspace: id, to: kind)
@@ -2487,7 +2498,9 @@ final class Daemon: @unchecked Sendable {
                 // next keybind acted on. Nothing needs switching — the space
                 // is on screen — but focus does have to go there.
                 updateSpaces { s in
-                    if let previous, previous != sid { s.recentSpace = previous }
+                    if let previous, previous != sid, let was = s.active[previous] {
+                        s.recentWorkspace = was
+                    }
                 }
                 let took = takeFocus(display: home, showing: sid)
                 bus.emit(stateChangedEvent())
@@ -2504,7 +2517,9 @@ final class Daemon: @unchecked Sendable {
                     for d in displays where d.spaces.contains(sid) {
                         s.currentByDisplay[d.uuid] = sid
                     }
-                    if let previous, previous != sid { s.recentSpace = previous }
+                    if let previous, previous != sid, let was = s.active[previous] {
+                        s.recentWorkspace = was
+                    }
                     // Keyboard focus follows the desktop the user named, even
                     // when that desktop lives on the other monitor. Without
                     // this `currentSpace` still resolved through the old
@@ -2551,7 +2566,9 @@ final class Daemon: @unchecked Sendable {
                 )
             }
             updateSpaces { s in
-                if let previous, previous != sid { s.recentSpace = previous }
+                if let previous, previous != sid, let was = s.active[previous] {
+                    s.recentWorkspace = was
+                }
                 if let home { s.focusedDisplay = home }
             }
             SpaceControl.focusSpaceNumber(number)
@@ -2615,11 +2632,12 @@ final class Daemon: @unchecked Sendable {
             forgiveQuirks()
             syncFromSnapshot()
             updateSpaces { sp in
-                if let id = sp.active[sid] { convertLayout(&sp, workspace: id, to: targetKind) }
+                guard let id = sp.active[sid] else { return }
+                convertLayout(&sp, workspace: id, to: targetKind)
                 // Remember that this was asked for, not derived. Without the
-                // record the next config reload, the next time the space
+                // record the next config reload, the next time the workspace
                 // empties, and the next restart all quietly undo it.
-                sp.overrides[sid] = targetKind
+                sp.workspaces[id]?.overrideKind = targetKind
             }
             saveLayoutOverrides()
             if let sid = currentSID() {
@@ -2747,7 +2765,9 @@ final class Daemon: @unchecked Sendable {
             let live = WorldReader.currentSpaces()
             updateSpaces { s in
                 for (uuid, current) in live { s.currentByDisplay[uuid] = current }
-                if let startedOn, startedOn != sid { s.recentSpace = startedOn }
+                if let startedOn, startedOn != sid, let was = s.active[startedOn] {
+                    s.recentWorkspace = was
+                }
                 s.focusedDisplay = s.displayBySpace[sid] ?? s.focusedDisplay
             }
             actedSpacesLock.withLock { actedSpacesLocked = live }
@@ -3303,11 +3323,10 @@ final class Daemon: @unchecked Sendable {
             // must not undo a `space layout` the user ran since. Reloads fire
             // on every save of the file, so without this every unrelated edit
             // — a keybind, a rule, a gap — snapped every space back.
-            let sid = ws.desktop
             let declarationChanged = previous[decl.label] != decl.layout
-            if !declarationChanged, sp.overrides[sid] != nil { continue }
-            if declarationChanged, sp.overrides[sid] != nil {
-                updateSpaces { $0.overrides.removeValue(forKey: sid) }
+            if !declarationChanged, ws.overrideKind != nil { continue }
+            if declarationChanged, ws.overrideKind != nil {
+                updateSpaces { $0.workspaces[id]?.overrideKind = nil }
                 clearedOverride = true
             }
             if ws.layout.kind == decl.layout { continue }
@@ -3445,7 +3464,7 @@ final class Daemon: @unchecked Sendable {
 
     private func saveLayoutOverrides() {
         let sp = readSpaces()
-        let kinds = sp.persistedOverrides(sids: sp.order)
+        let kinds = sp.persistedOverrides()
         layoutSaveQueue.async {
             let url = Daemon.layoutsFile()
             try? FileManager.default.createDirectory(
@@ -3498,7 +3517,7 @@ final class Daemon: @unchecked Sendable {
                 guard let display = sp.displayBySpace[sid] else { return nil }
                 let label = sp.workspace(on: sid)?.label ?? "\(sid)"
                 let layout = sp.layout(on: sid)?.kind
-                    ?? sp.overrides[sid]
+                    ?? sp.workspace(on: sid)?.overrideKind
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
                 let windows = sp.layout(on: sid)?.windows.sorted() ?? []
@@ -3638,7 +3657,7 @@ final class Daemon: @unchecked Sendable {
             return emit(world.spaces.map { s in
                 let label = sp.workspace(on: s.id)?.label ?? "\(s.id)"
                 let layout = sp.layout(on: s.id)?.kind
-                    ?? sp.overrides[s.id]
+                    ?? sp.workspace(on: s.id)?.overrideKind
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
                 return SpaceStatus(
