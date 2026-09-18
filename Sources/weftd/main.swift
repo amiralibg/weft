@@ -1722,6 +1722,75 @@ final class Daemon: @unchecked Sendable {
         bus.emit(stateChangedEvent())
     }
 
+    /// Keyboard focus landed on `wid` — from an AX notification, or from an
+    /// app coming forward.
+    ///
+    /// Both sources are needed and neither is enough. AX names the window but
+    /// stays silent when the app merely activates; activation names the app
+    /// but not the window. Everything downstream of "focus moved" is here, so
+    /// the two paths cannot drift apart.
+    private func focusChanged(to wid: WindowID?) {
+        // A desktop switch nobody announced usually shows up as focus
+        // landing on a window over there. No window list involved, and it
+        // is what lets the space watch run slowly instead of at 3 Hz.
+        checkSpaceChanged()
+        // Before the rest, and even when focus went to nothing:
+        // closing a window moves focus, and for an app that keeps its
+        // closed windows this is the only event there is.
+        evictOrderedOut()
+        guard let wid else { return }
+        // Focus may have crossed to the other display; resolve that
+        // before asking whether the window is in "the current" layout.
+        noteFocusedWindow(wid)
+        // Unknown window: a close whose destroyed notification we missed,
+        // a creation the sweep hasn't seen, or simply an unmanaged/float
+        // window. This used to run a full WindowServer sweep inline —
+        // on the queue every keybind blocks on — which is where the focus
+        // lag came from. Ask for a coalesced sweep and return now.
+        //
+        // "Unknown" means unknown to *any* space on screen, not to the
+        // current one. Asking only the current space meant that with two
+        // displays attached, every click on the other monitor was a
+        // window weft had never heard of and cost a full WindowServer
+        // sweep — on a two-display desktop that is most focus changes.
+        let sp0 = readSpaces()
+        guard let homeSID = sp0.visibleSpaces.first(where: {
+            sp0.layouts[$0]?.windows.contains(wid) == true
+        }) else {
+            // A float, a rule's `manage = false`, a quirk, a panel: known
+            // to the last sweep and deliberately in no layout. Another
+            // sweep would reach the same verdict, and clicking back and
+            // forth between a tile and a float cost two full WindowServer
+            // sweeps plus a re-apply of every visible space per click.
+            if core.sync(execute: { self.unmanaged.contains(wid) }) {
+                // Say so anyway. This *is* a focus change — it is just a
+                // focus change onto a window no layout owns. Returning in
+                // silence left the menu bar, sketchybar and anything else
+                // on the bus showing the tile the user focused before,
+                // for as long as they worked in the float.
+                bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
+                bus.emit(stateChangedEvent())
+                return
+            }
+            scheduleSync()
+            return
+        }
+        updateSpaces { sp in
+            guard let layout = sp.layouts[homeSID] else { return }
+            let sid = homeSID
+            switch layout {
+            case .tiling(let t):
+                guard t.windows.contains(wid) else { return }
+                sp.layouts[sid] = .tiling(t.focusing(wid))
+            case .float(let f):
+                guard f.windows.contains(wid) else { return }
+                sp.layouts[sid] = .float(f.focusing(wid))
+            }
+        }
+        bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
+        bus.emit(stateChangedEvent())
+    }
+
     private func handleObserverEvent(_ event: ObserverEvent) {
         switch event {
         case .windowCreated(let pid, let wid):
@@ -1759,56 +1828,24 @@ final class Daemon: @unchecked Sendable {
             }
             scheduleDragSettleApply()
         case .windowFocused(let wid):
-            // A desktop switch nobody announced usually shows up as focus
-            // landing on a window over there. No window list involved, and it
-            // is what lets the space watch run slowly instead of at 3 Hz.
-            checkSpaceChanged()
-            // Before the rest, and even when focus went to nothing:
-            // closing a window moves focus, and for an app that keeps its
-            // closed windows this is the only event there is.
-            evictOrderedOut()
-            guard let wid else { return }
-            // Focus may have crossed to the other display; resolve that
-            // before asking whether the window is in "the current" layout.
-            noteFocusedWindow(wid)
-            // Unknown window: a close whose destroyed notification we missed,
-            // a creation the sweep hasn't seen, or simply an unmanaged/float
-            // window. This used to run a full WindowServer sweep inline —
-            // on the queue every keybind blocks on — which is where the focus
-            // lag came from. Ask for a coalesced sweep and return now.
-            //
-            // "Unknown" means unknown to *any* space on screen, not to the
-            // current one. Asking only the current space meant that with two
-            // displays attached, every click on the other monitor was a
-            // window weft had never heard of and cost a full WindowServer
-            // sweep — on a two-display desktop that is most focus changes.
-            let sp0 = readSpaces()
-            guard let homeSID = sp0.visibleSpaces.first(where: {
-                sp0.layouts[$0]?.windows.contains(wid) == true
-            }) else {
-                // A float, a rule's `manage = false`, a quirk, a panel: known
-                // to the last sweep and deliberately in no layout. Another
-                // sweep would reach the same verdict, and clicking back and
-                // forth between a tile and a float cost two full WindowServer
-                // sweeps plus a re-apply of every visible space per click.
-                if core.sync(execute: { self.unmanaged.contains(wid) }) { return }
-                scheduleSync()
-                return
-            }
-            updateSpaces { sp in
-                guard let layout = sp.layouts[homeSID] else { return }
-                let sid = homeSID
-                switch layout {
-                case .tiling(let t):
-                    guard t.windows.contains(wid) else { return }
-                    sp.layouts[sid] = .tiling(t.focusing(wid))
-                case .float(let f):
-                    guard f.windows.contains(wid) else { return }
-                    sp.layouts[sid] = .float(f.focusing(wid))
+            focusChanged(to: wid)
+        case .appActivated(let pid):
+            // Clicking another app's window is a focus change that AX never
+            // reports: the app's own focused window did not change, only
+            // which app is in front. Ask the app what it considers focused
+            // and run the same path the AX notification takes.
+            let front = FocusedWindow.of(pid: pid)
+            if Trace.logging {
+                let known = systemFocusLock.withLock { systemFocusLocked }
+                if front != known {
+                    fputs(
+                        "weftd: pid \(pid) came forward on \(front.map(String.init) ?? "nothing")"
+                            + " — AX had not said so (weft had \(known.map(String.init) ?? "nothing"))\n",
+                        stderr
+                    )
                 }
             }
-            bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
-            bus.emit(stateChangedEvent())
+            focusChanged(to: front)
         case .appLaunched(let pid, let bundleID):
             bus.emit(DaemonEvent(kind: .appLaunched, app: "\(bundleID) pid=\(pid)"))
             scheduleSync()

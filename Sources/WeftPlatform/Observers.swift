@@ -212,6 +212,23 @@ public final class ObserverSet: @unchecked Sendable {
                 forName: NSWorkspace.activeSpaceDidChangeNotification,
                 object: nil, queue: queue
             ) { [weak self] _ in self?.forward(.spaceChanged) },
+            // The click that switches app.
+            //
+            // AX has no notification for it: `kAXFocusedWindowChanged` fires
+            // when an app's own focused window changes, and activating an app
+            // does not change which of its windows that is. So every focus
+            // change made by clicking on a different app's window arrived
+            // here as nothing at all. NSWorkspace does announce it, for every
+            // app, whether or not AX is granted for that process.
+            center.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil, queue: queue
+            ) { [weak self] note in
+                guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication
+                else { return }
+                self?.forward(.appActivated(pid: app.processIdentifier))
+            },
         ]
         CGDisplayRegisterReconfigurationCallback(displayReconfigCallback, nil)
     }

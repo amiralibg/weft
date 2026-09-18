@@ -16,6 +16,17 @@ public enum ObserverEvent: Sendable, Equatable {
     case windowMoved(WindowID)
     case windowResized(WindowID)
     case windowFocused(WindowID?)
+    /// The user brought an application forward.
+    ///
+    /// Not the same event as `windowFocused`, and not covered by it. An app's
+    /// `AXFocusedWindow` does not change when the app is merely activated —
+    /// the window it names was already its focused one — so clicking on
+    /// another app's window produces no AX focus notification at all. That is
+    /// every click that switches app, and with two displays it is most clicks
+    /// on the other monitor: weft went on believing focus was where it left
+    /// it, resolved "the current space" against the display the user had
+    /// left, and pushed focus back there on the next sweep.
+    case appActivated(pid: Int32)
     case appLaunched(pid: Int32, bundleID: String)
     case appTerminated(pid: Int32, bundleID: String)
     case spaceChanged

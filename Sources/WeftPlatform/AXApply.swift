@@ -674,7 +674,21 @@ public final class AXApplier: @unchecked Sendable {
         AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
-    /// AX raise (z-order only, no resize) without blocking the caller.
+    /// AX raise: z-order only, and nothing else.
+    ///
+    /// It used to write `AXMain`/`AXFocused` and activate the app as well,
+    /// which made it a focus change wearing the name of a z-order change —
+    /// and this is what every background sweep calls. `applySpaceLayout`
+    /// raises the focused tile of the visible space on each sweep, so weft
+    /// re-asserted its own idea of focus several times a second. While that
+    /// idea was right it was invisible; the moment it was stale — a click on
+    /// another app's window, which produces no AX focus notification — the
+    /// sweep yanked focus back off the window the user had just clicked, over
+    /// to the one weft still believed in, often on the other display.
+    ///
+    /// Callers that mean "focus this" call `focusWindow`, which does all
+    /// three. Every path that wants the window merely in front now gets
+    /// exactly that.
     ///
     /// Ordering is still exact: frame writes and raises for one window go to
     /// the same per-pid serial queue, so a raise enqueued after an apply runs
@@ -683,14 +697,8 @@ public final class AXApplier: @unchecked Sendable {
     /// pending frame write.
     public func raise(_ wid: WindowID, pid: Int32) {
         queue(for: pid).async {
-            let el: AXUIElement? = self.resolveElement(for: wid, pid: pid)
-            if let el {
-                Self.makeFocused(el)
-                AXUIElementPerformAction(el, kAXRaiseAction as CFString)
-            }
-            self.activateQueue.async {
-                NSRunningApplication(processIdentifier: pid)?.activate()
-            }
+            guard let el = self.resolveElement(for: wid, pid: pid) else { return }
+            AXUIElementPerformAction(el, kAXRaiseAction as CFString)
         }
     }
 
@@ -1081,7 +1089,20 @@ private final class VerdictSink: @unchecked Sendable {
 public enum FocusedWindow {
     public static func current() -> WindowID? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        return of(pid: app.processIdentifier)
+    }
+
+    /// The window one application considers focused.
+    ///
+    /// Named rather than inferred from "whoever is frontmost", because the
+    /// caller that needs this most is the app-activation path: the
+    /// notification says which app came forward, and by the time the daemon
+    /// gets round to asking, a second app may have.
+    public static func of(pid: Int32) -> WindowID? {
+        let appEl = AXUIElementCreateApplication(pid)
+        // A wedged app must not hold up focus tracking; the fallbacks below
+        // and the next event both cover a miss.
+        AXUIElementSetMessagingTimeout(appEl, 0.15)
         for attr in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(appEl, attr as CFString, &value) == .success,
