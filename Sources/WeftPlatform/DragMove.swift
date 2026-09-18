@@ -258,19 +258,36 @@ public enum DragMove {
         // sent: a window that cannot be picked up must not cost the user a
         // desktop switch.
         //
+        // The heights used to be guessed — 11pt and 24pt below the top edge,
+        // which is where a title bar usually is. `chromeRow` asks the window
+        // instead: its close / minimise / full-screen buttons are *in* the
+        // title bar by definition, so their centre line is the title bar's,
+        // whatever the app has done with its chrome.
+        //
         // The second point is the empty strip a tabbed window leaves to the
         // right of its tabs, which is draggable where the middle is not.
-        // Offsets from the window's top-left, so a remembered one still lands
-        // on the same part of the chrome when the window is a different size.
-        // The one that worked for this app last time goes first: probing costs
-        // about 110 ms per miss, and an app's title bar is in the same place
-        // every time.
-        var offsets: [CGPoint] = [
-            CGPoint(x: frame.width / 2, y: 11),
-            CGPoint(x: frame.width - 50, y: 11),
-            CGPoint(x: 80, y: 11),
-            CGPoint(x: frame.width / 2, y: 24),
-        ]
+        // Offsets are from the window's top-left, so the one that worked for
+        // this app last time still lands on the same part of the chrome when
+        // the window is a different size, and it goes first.
+        //
+        // The same read answers the other question. A window with no title-bar
+        // buttons at all — a terminal told to draw no title bar, a kiosk view
+        // — very likely has nothing to hold, and every miss is about 110 ms of
+        // synthetic mouse events across the user's screen. Four of them is the
+        // visible wiggle before a carry that was never going to work. So a
+        // window with no chrome gets one attempt, not four: enough for an app
+        // that draws its own draggable strip without exposing buttons, and a
+        // tenth of the flailing for one that simply cannot be carried.
+        let chrome = chromeRow(of: wid, in: frame)
+        let row = chrome ?? 11
+        var offsets: [CGPoint] = chrome == nil
+            ? [CGPoint(x: frame.width / 2, y: row)]
+            : [
+                CGPoint(x: frame.width / 2, y: row),
+                CGPoint(x: frame.width - 50, y: row),
+                CGPoint(x: 80, y: row),
+                CGPoint(x: frame.width / 2, y: row + 13),
+            ]
         if let remembered = grabOffset(for: wid) {
             offsets.removeAll { abs($0.x - remembered.x) < 1 && abs($0.y - remembered.y) < 1 }
             offsets.insert(remembered, at: 0)
@@ -304,14 +321,20 @@ public enum DragMove {
             // something that was never activated, because the press and the
             // release cancel out.
             mouse(.leftMouseUp, point)
-            usleep(60_000)
+            usleep(30_000)
         }
         guard let grab = held else {
             forgetGrab(for: wid)
             reasonLock.withLock {
-                lastFailure = "nothing along this window's top edge picks it up, so weft "
-                    + "cannot carry it. Apps that draw their own title bar sometimes leave "
-                    + "no draggable strip at all."
+                lastFailure = chrome == nil
+                    ? "this window has no title bar, and weft moves a window between desktops "
+                        + "by holding it and changing desktop — the way you would. There is "
+                        + "nothing to hold. Give the window a title bar (in Ghostty, "
+                        + "`macos-titlebar-style = transparent` rather than `hidden`) and the "
+                        + "move works."
+                    : "nothing along this window's top edge picks it up, so weft "
+                        + "cannot carry it. Apps that draw their own title bar sometimes leave "
+                        + "no draggable strip at all."
             }
             if Trace.logging {
                 fputs(
@@ -368,6 +391,82 @@ public enum DragMove {
             usleep(5_000)
         } while Date() < deadline
         return landed
+    }
+
+    /// How far below a window's top edge its title bar's centre line runs, or
+    /// nil when the window has no title-bar buttons to measure it by.
+    ///
+    /// Read from the window, not assumed. The buttons are in the title bar by
+    /// definition, so their centre is the one height a drag is certain to land
+    /// on chrome rather than content — and a window that has none is, in
+    /// almost every case, a window with no title bar at all. Both answers are
+    /// worth more than the guess they replace: the first makes the usual case
+    /// hold on the first attempt, the second stops weft dragging the pointer
+    /// across a window it cannot pick up.
+    ///
+    /// One AX round trip, on the carry path only, against an element with the
+    /// same 0.15 s ceiling everything else in weft uses. Never on a hot path.
+    private static func chromeRow(of wid: WindowID, in frame: Frame) -> Double? {
+        guard let pid = WorldReader.pid(of: wid), let el = element(of: wid, pid: pid) else {
+            return nil
+        }
+        for attr in [
+            kAXCloseButtonAttribute,
+            kAXMinimizeButtonAttribute,
+            kAXFullScreenButtonAttribute,
+        ] as [String] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, attr as CFString, &value) == .success,
+                  let button = value as! AXUIElement?
+            else { continue }
+            guard let origin: CGPoint = axValue(button, kAXPositionAttribute, .cgPoint),
+                  let size: CGSize = axValue(button, kAXSizeAttribute, .cgSize)
+            else { continue }
+            let row = Double(origin.y) + Double(size.height) / 2 - frame.y
+            // A button the app reports somewhere impossible — off the window,
+            // or below the chrome a title bar could occupy — is worse than no
+            // answer, because it would send the press into the content.
+            guard row > 0, row < min(frame.height, 60) else { continue }
+            return row
+        }
+        return nil
+    }
+
+    /// One geometry attribute of an AX element, or nil if the app answered
+    /// with something that is not an `AXValue` of the expected kind.
+    ///
+    /// Type-checked rather than force-cast: this reads another process's
+    /// answer, and a forced cast on it would make any app that replies oddly
+    /// a crash in weftd rather than a window weft declines to carry.
+    private static func axValue<T>(
+        _ el: AXUIElement, _ attribute: String, _ kind: AXValueType
+    ) -> T? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, attribute as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXValueGetTypeID()
+        else { return nil }
+        let value = unsafeBitCast(raw, to: AXValue.self)
+        guard AXValueGetType(value) == kind else { return nil }
+        let out = UnsafeMutablePointer<T>.allocate(capacity: 1)
+        defer { out.deallocate() }
+        guard AXValueGetValue(value, kind, out) else { return nil }
+        return out.pointee
+    }
+
+    /// The AX element for one window of one process.
+    private static func element(of wid: WindowID, pid: Int32) -> AXUIElement? {
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appEl, kAXWindowsAttribute as CFString, &value
+        ) == .success, let windows = value as? [AXUIElement]
+        else { return nil }
+        for el in windows {
+            var found: UInt32 = 0
+            if _AXUIElementGetWindow(el, &found) == .success, found == wid { return el }
+        }
+        return nil
     }
 
     private static func mouse(_ type: CGEventType, _ at: CGPoint) {
