@@ -1158,17 +1158,29 @@ final class Daemon: @unchecked Sendable {
         for pid in worldPids { bundles[pid] = bundleID(for: pid) }
         // Classify windows we have not seen before. One AX read each, here in
         // phase 1 where AX is allowed, never on the core queue (§13.2).
-        let (unclassified, visibleSids, sinceSnapshot) = core.sync {
-
-            (
-                world.windows.filter { self.standardWindow[$0.id] == nil },
+        let now = Date()
+        // Windows judged "not a real window" a few seconds ago and never asked
+        // again. See `negativeVerdict`: the first answer is taken while the
+        // app may still be starting, and used to be the only one there was.
+        let (unclassified, visibleSids, sinceSnapshot, recheck, wasNegative) = core.sync {
+            let due = Set(
+                self.negativeVerdict
+                    .filter {
+                        !self.recheckedNegatives.contains($0.key)
+                            && now.timeIntervalSince($0.value) >= Self.negativeRecheckDelay
+                    }
+                    .map { $0.key }
+            )
+            return (
+                world.windows.filter { self.standardWindow[$0.id] == nil || due.contains($0.id) },
                 Set(self.spaces.visibleSpaces),
-                self.unbindableSince
+                self.unbindableSince,
+                due,
+                Set(self.negativeVerdict.keys)
             )
         }
         var freshlyClassified: [WindowID: Bool] = [:]
         var freshUnbindable: [WindowID: Date] = [:]
-        let now = Date()
         // One fan-out for the whole sweep. Asking window by window meant a
         // cold start walked every app in series before anything was tiled.
         let tClassify0 = Date()
@@ -1187,7 +1199,9 @@ final class Daemon: @unchecked Sendable {
                     freshlyClassified[w.id] = true
                 case .failure(let why):
                     freshlyClassified[w.id] = false
-                    fputs("weftd: floating \(w.app) (\(w.id)) — \(Self.reason(why))\n", stderr)
+                    if !wasNegative.contains(w.id) {
+                        fputs("weftd: floating \(w.app) (\(w.id)) — \(Self.reason(why))\n", stderr)
+                    }
                 }
                 continue
             }
@@ -1202,7 +1216,9 @@ final class Daemon: @unchecked Sendable {
             freshUnbindable[w.id] = first
             if now.timeIntervalSince(first) >= 1.0 {
                 freshlyClassified[w.id] = false
-                fputs("weftd: ignoring \(w.app) (\(w.id)) — on screen but AX cannot see it\n", stderr)
+                if !wasNegative.contains(w.id) {
+                    fputs("weftd: ignoring \(w.app) (\(w.id)) — on screen but AX cannot see it\n", stderr)
+                }
             }
         }
         // One usable rect per space, not one for the machine: the split axis
@@ -1269,6 +1285,20 @@ final class Daemon: @unchecked Sendable {
             self.pids = self.pids.filter { worldWids.contains($0.key) }
             self.standardWindow = self.standardWindow.filter { worldWids.contains($0.key) }
             for (wid, standard) in freshlyClassified { self.standardWindow[wid] = standard }
+            self.negativeVerdict = self.negativeVerdict.filter { worldWids.contains($0.key) }
+            self.recheckedNegatives = self.recheckedNegatives.intersection(worldWids)
+            // One re-ask per window, and only for a verdict that went against
+            // it. Asked and answered the same way twice is the app telling us
+            // the truth; asked once while it was still launching is not.
+            self.recheckedNegatives.formUnion(recheck)
+            for (wid, standard) in freshlyClassified {
+                if standard {
+                    self.negativeVerdict.removeValue(forKey: wid)
+                    self.recheckedNegatives.remove(wid)
+                } else if self.negativeVerdict[wid] == nil {
+                    self.negativeVerdict[wid] = now
+                }
+            }
             self.unbindableSince = self.unbindableSince.filter {
                 worldWids.contains($0.key) && self.standardWindow[$0.key] == nil
             }
@@ -1431,6 +1461,23 @@ final class Daemon: @unchecked Sendable {
             pendingClassify = work
             syncQueue.asyncAfter(deadline: .now() + 1.1, execute: work)
         }
+        // A window judged "not a real window" gets one more sweep to disagree,
+        // once the app has had a few seconds to finish starting. Nothing else
+        // guarantees one: an app that opens a window on an otherwise idle
+        // desktop produces no further events, so the second answer would never
+        // be asked for and the first would stand for the window's whole life.
+        let recheckDue: TimeInterval? = core.sync {
+            self.negativeVerdict
+                .filter { !self.recheckedNegatives.contains($0.key) }
+                .map { Self.negativeRecheckDelay - now.timeIntervalSince($0.value) }
+                .min()
+        }
+        if let delay = recheckDue {
+            pendingRecheck?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.syncFromSnapshot() }
+            pendingRecheck = work
+            syncQueue.asyncAfter(deadline: .now() + max(delay, 0.05), execute: work)
+        }
         // Rule moves happen here, in phase 3 — *after* phase 2 has already
         // filed each window under the space SLS reported for it. So a window a
         // rule relocates is, from this moment, laid out by the wrong space's
@@ -1569,6 +1616,8 @@ final class Daemon: @unchecked Sendable {
     private var pendingDragApply: DispatchWorkItem?
     /// One-shot re-check for windows still inside the unbindable grace period.
     private var pendingClassify: DispatchWorkItem?
+    /// One-shot second opinion on a window judged "not a real window".
+    private var pendingRecheck: DispatchWorkItem?
     /// Follow-up sweep after a rule relocates a window, so layout membership
     /// catches up with where the window actually is.
     private var pendingRuleResync: DispatchWorkItem?
@@ -1966,11 +2015,23 @@ final class Daemon: @unchecked Sendable {
         // `applyFrames`, `raiseFronts` and `focusAndWarp` all assert they are
         // off core. Hence the shape — decide and mutate inside one `core.sync`,
         // then do the screen work after it, outside.
-        let isManual = core.sync { self.manualFloat.contains(wid) }
+        //
+        // Floating by hand is not the only way a window ends up outside every
+        // layout. weft floats one itself when its AX verdict says "not a real
+        // window" or when two frame writes in a row were refused — and both
+        // of those are heuristics taken once, often while the app was still
+        // starting up. A window floated that way answered `float toggle` by
+        // *floating it again*: added to `manualFloat`, centred at 70%, still
+        // not tiled, and reporting success. There was no verb that put it
+        // back. The question `float toggle` asks is "is this window in a
+        // layout right now", not "did the user put it here".
+        let isFloating = core.sync {
+            self.manualFloat.contains(wid) || self.floatedByVerdict(wid)
+        }
         switch mode {
-        case .on where isManual:
+        case .on where isFloating:
             return IPCResponse(ok: true, output: "window \(wid) already floating")
-        case .off where !isManual:
+        case .off where !isFloating:
             return IPCResponse(ok: true, output: "window \(wid) already tiled")
         default:
             break
@@ -1984,7 +2045,7 @@ final class Daemon: @unchecked Sendable {
         let home = sp0.layouts.first { $0.value.windows.contains(wid) }?.key
             ?? SpaceControl.spacesForWindow(wid).first(where: { sp0.layouts[$0] != nil })
             ?? currentSID()
-        if isManual {
+        if isFloating {
             // Snapshot where the user had it before the layout reclaims it,
             // so floating it again lands back in the same place. The AX read
             // stays off core — only the store goes on it.
@@ -1993,6 +2054,14 @@ final class Daemon: @unchecked Sendable {
                 if let live { self.floatFrames[wid] = live }
                 self.manualFloat.remove(wid)
                 self.unmanaged.remove(wid)
+                // The user has overruled the heuristic for this window. Say so
+                // in the state the next sweep reads, or the sweep re-applies
+                // the same verdict and the window floats straight back out —
+                // which is `float toggle` doing nothing, slowly.
+                self.strikes.removeValue(forKey: wid)
+                self.unbindableSince.removeValue(forKey: wid)
+                self.negativeVerdict.removeValue(forKey: wid)
+                if self.standardWindow[wid] == false { self.standardWindow[wid] = true }
                 if let sid = home {
                     self.updateSpaces { sp in
                         switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
@@ -3026,6 +3095,33 @@ final class Daemon: @unchecked Sendable {
     /// sweep. Layer-0 and bigger-than-100px is not enough on its own — a
     /// menu-bar extra's panel passes both.
     private var standardWindow: [WindowID: Bool] = [:]
+    /// wid → when weft last judged it "not a real window", for the ones that
+    /// have not been asked a second time yet.
+    ///
+    /// The verdict is one AX read, and for a window that has just opened it is
+    /// taken at the worst possible moment. An app still starting up reports
+    /// its window as fixed-size, or too small to have title-bar buttons, or is
+    /// not AX-enumerable at all — and "cached for the window's lifetime" then
+    /// means permanently. An app opened for the first time since weft was
+    /// installed came up floating and stayed floating, through every sweep,
+    /// with `retile` the only way back and nothing to suggest it.
+    ///
+    /// One re-ask a few seconds later is enough: by then the app has finished
+    /// starting, and the second answer is the one worth keeping. It costs
+    /// nothing in steady state, because a window nothing was wrong with never
+    /// enters this map.
+    private var negativeVerdict: [WindowID: Date] = [:]
+    /// Windows whose negative verdict has already had its second chance.
+    private var recheckedNegatives: Set<WindowID> = []
+    private static let negativeRecheckDelay: TimeInterval = 4.0
+
+    /// Whether this window is outside every layout because weft judged it so,
+    /// rather than because the user or a rule said to leave it alone.
+    ///
+    /// Core-queue state; callers are already on core.
+    private func floatedByVerdict(_ wid: WindowID) -> Bool {
+        standardWindow[wid] == false || strikes[wid, default: 0] >= 2
+    }
 
     /// The log line for a classification refusal, in the user's terms rather
     /// than the AX attribute's.
