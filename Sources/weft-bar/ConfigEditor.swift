@@ -3,6 +3,7 @@ import SwiftUI
 import WeftBarConfig
 import WeftConfig
 import enum WeftCore.WeftVersion
+import WeftIPC
 import WeftPlatform
 
 // The Settings window.
@@ -2135,11 +2136,10 @@ final class EngineHealth: ObservableObject {
                 else { return nil }
                 return try? JSONDecoder().decode(DaemonPermissions.self, from: data)
             }()
-            struct LiveSpace: Decodable { var label: String }
             let spaces: [String] = {
                 guard let json = BarIPC.send("query spaces"),
                       let data = json.data(using: .utf8),
-                      let decoded = try? JSONDecoder().decode([LiveSpace].self, from: data)
+                      let decoded = try? JSONDecoder().decode([SpaceStatus].self, from: data)
                 else { return [] }
                 return decoded.map(\.label)
             }()

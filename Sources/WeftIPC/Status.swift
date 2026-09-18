@@ -104,3 +104,40 @@ public struct BarStateStatus: Codable, Sendable, Equatable {
         self.windows = windows
     }
 }
+
+/// `query windows`: a WindowInfo plus weft's verdict on it. `floating` is nil
+/// for a window in a layout, and otherwise names why it is not — "manual"
+/// (the user floated it), "popup" (not a tileable window), "quirk" (refused
+/// its frame twice), "rule" (a `manage = false` rule matched).
+///
+/// `spaces` is desktop ids, like everything else out here.
+public struct WindowStatus: Codable, Sendable, Equatable {
+    public var id: WindowID
+    public var app: String
+    public var title: String
+    public var pid: Int32
+    public var spaces: [SpaceID]
+    public var frame: Frame
+    public var bound: Bool
+    public var floating: String?
+
+    public init(
+        id: WindowID,
+        app: String,
+        title: String,
+        pid: Int32,
+        spaces: [SpaceID],
+        frame: Frame,
+        bound: Bool,
+        floating: String? = nil
+    ) {
+        self.id = id
+        self.app = app
+        self.title = title
+        self.pid = pid
+        self.spaces = spaces
+        self.frame = frame
+        self.bound = bound
+        self.floating = floating
+    }
+}

@@ -4029,21 +4029,6 @@ private struct DaemonPermissions: Codable, Sendable {
     }
 }
 
-/// `query windows`: a WindowInfo plus weft's verdict on it. `floating` is nil
-/// for a window in a layout, and otherwise names why it is not — "manual"
-/// (the user floated it), "popup" (not a tileable window), "quirk" (refused
-/// its frame twice), "rule" (a `manage = false` rule matched).
-private struct WindowStatus: Codable, Sendable {
-    var id: WindowID
-    var app: String
-    var title: String
-    var pid: Int32
-    var spaces: [SpaceID]
-    var frame: Frame
-    var bound: Bool
-    var floating: String?
-}
-
 private struct DisplayStatus: Codable, Sendable {
     var index: Int
     var uuid: String
