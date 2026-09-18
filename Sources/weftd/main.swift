@@ -23,14 +23,11 @@ final class Daemon: @unchecked Sendable {
     private let core = DispatchQueue(label: "weft.core")
     private let coreKey = DispatchSpecificKey<UInt8>()
     private let applyQueue = DispatchQueue(label: "weft.apply", qos: .userInitiated)
-    /// Serial, so parked-set writes land in the order they were taken.
-    private let parkedSaveQueue = DispatchQueue(label: "weft.parked-save", qos: .utility)
     private let layoutSaveQueue = DispatchQueue(label: "weft.layout-save", qos: .utility)
     /// `WEFT_TRACE=1` puts every bus event in the log. Off by default: it is
     /// a write syscall per event, and the events are the noisiest thing weft
     /// does.
     static let traceEvents = ProcessInfo.processInfo.environment["WEFT_TRACE"] == "1"
-    private let parkedLock = NSLock()
     /// Serializes keybind commands. The tap callback must never block (§6),
     /// and handleCommand blocks (core.sync + apply wait) — so input lands
     /// here and runs off the tap thread, in press order.
@@ -1574,11 +1571,10 @@ final class Daemon: @unchecked Sendable {
             self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
         }
-        // A dead window is not a parked window. Leaving it in the tracked set
-        // put a stale id in `parked.json` forever, and the WindowServer
-        // recycles ids: the next window handed this number was believed
-        // already parked, so the one call that would have moved it off screen
-        // — `reconcileParked`'s diff — never fired for it.
+        // The WindowServer recycles window ids, and `watchOnLoop` skips any wid
+        // it already holds an element for — so a dead id left in the observer's
+        // table means the next window handed that number never gets a move or
+        // resize notification for as long as the daemon runs.
         observers.forgetWindow(wid)
     }
 
