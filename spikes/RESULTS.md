@@ -391,6 +391,77 @@ windows get a border.
 
 ---
 
+## S9 — emulated workspaces: **every app parks, and the WindowServer does it in 0.2 ms**
+
+Measured 2026-09-18, macOS 27.0, arm64. Single display, 7 desktops, 5 windows.
+Harness: `virtual.swift`, visiting each desktop in turn so every application is asked
+while its window is the one on screen.
+
+The question is whether weft could stop tracking native Spaces and emulate them the way
+AeroSpace does — one native Space, every window on it, and a workspace switch is windows
+moved off screen and back. It is not asked for its own sake. Most of `SpaceControl`,
+`DockSwipe`, `DragMove`, `SpaceShortcut` and the three stacked heuristics in
+`checkSpaceChanged` exist only because the WindowServer will neither move a window
+between desktops (S8) nor say reliably which desktop is showing. If windows can be
+parked, that entire layer is deletable.
+
+Two things decide it, and neither can be reasoned out — they are properties of the
+applications on the machine.
+
+### Does the application accept being put off screen?
+
+| app | kind | parks to | still visible | stayed 1s | restored |
+| --- | --- | --- | --- | --- | --- |
+| Happ | VPN client | (1709,1080) | 1×32pt | yes | yes |
+| Zen | browser | (1709,1080) | 1×32pt | yes | yes |
+| Ghostty | terminal | (1709,1080) | 1×32pt | yes | yes |
+| Finder | AppKit | (1709,1060) | 1×52pt | yes | yes |
+| T3 Code | Electron | (1709,1080) | 1×32pt | yes | yes |
+
+**5 of 5, through Accessibility, including the Electron app and the terminal that cannot
+be carried between desktops at all.** None crawled back, all restored to the exact pixel.
+
+**S4's "AX clamps parking" is direction-dependent, and that is why this works.** S4 parked
+to negative x and was clamped to −(width − 40): macOS keeps 40px of a window reachable.
+Parking into the bottom-**right** corner is not clamped the same way — the window's left
+edge lands on the pixel asked for, leaving 1pt of width on screen. The vertical *is*
+clamped, by 31–51pt, because macOS will not put a title bar below the bottom of the
+screen. A sliver always remains, exactly as AeroSpace documents; here it is one point wide.
+
+### What does a switch cost?
+
+| method | 5 windows | per window | landed | app knows |
+| --- | --- | --- | --- | --- |
+| AX `setPosition` | 148 ms | 30 ms | 1×32pt visible | yes |
+| `SLSMoveWindow` | **1 ms** | **0.2 ms** | **1×1pt visible** | no |
+
+The WindowServer path is 150× faster, lands on the exact pixel because no application is
+consulted and so none can clamp, and restored 5 of 5 exactly. S4's nudge caveat does not
+bite here: a park and an unpark that both go through `SLSMoveWindow` leave the app's own
+idea of its position untouched throughout, so it is consistent again the moment the
+window is back. The nudge is only needed when the two methods are mixed.
+
+A workspace switch is bounded by the machine's *total* window count rather than any one
+desktop's, since every window lives on one native Space. At 0.2 ms a window, thirty
+windows is 6 ms — against the ~500 ms of animation a native Space switch costs today.
+
+### What this does not answer
+
+- **Mission Control, ⌘-Tab and the Dock** with every window piled onto one native Space.
+  AeroSpace's own guide calls Mission Control unusable without "Group windows by
+  application" turned on, and that is a change weft would be imposing on the user.
+- **Native fullscreen**, which creates its own Space and has no place in this model.
+- **Long parks.** These windows were off screen for ~1.2 s. An application parked for an
+  hour may behave differently — timers, occlusion state, `NSWindowOcclusionState` driving
+  render throttling in Electron and browsers.
+- **Crash recovery.** A daemon that dies with windows parked strands them at a sliver.
+  weft has the primitive already (`AXApplier.restore`, the S4 nudge) and the harness
+  writes a state file for the same reason, but nothing wires it to a crash yet.
+- **Five windows on one machine.** Fifty windows across a dozen applications is the
+  sample that would settle it.
+
+---
+
 ## Design changes this forces
 
 1. **Discovery moves off AX entirely** (S0). WindowServer for enumeration, AX captured at
@@ -412,3 +483,10 @@ windows get a border.
    "All Desktops" through Accessibility. Both work with SIP on, which retires weft-sa
    before it was written — along with the Dock byte-pattern table §11 calls the largest
    ongoing maintenance cost in the project.
+9. **Emulated workspaces are open to weft** (S9), and this is a decision rather than a
+   change. Every window on the machine parked off screen and came back, and the
+   WindowServer does it in 0.2 ms a window — so the native-Space layer, which is most of
+   the complexity in the daemon and the source of the focus and current-space bugs, could
+   go. What it costs is macOS's own window UI: Mission Control, ⌘-Tab and the Dock would
+   see every window on one Space. Nothing here settles that trade; it establishes that
+   the trade is available.
