@@ -89,29 +89,95 @@ Assumed, and to be proven before Phase 3 ships:
 
 ## Model
 
+Built in Phase 1; this is what is in `Sources/WeftCore/Spaces.swift` today.
+
 ```swift
-typealias WorkspaceID = UInt32          // weft's own, stable within a launch
+struct WorkspaceID: Hashable { let raw: UInt32 }   // weft's own, within a launch
 
 struct Workspace {
     var id: WorkspaceID
     var label: String
     var desktop: SpaceID                // the native Space it lives on
-    var display: String
     var layout: SpaceLayout             // .tiling(Tree) / .float(FloatState), unchanged
+    var overrideKind: LayoutKind?       // what `space layout <kind>` asked for
 }
 ```
 
-`SpaceState.layouts: [SpaceID: SpaceLayout]` becomes
-`[WorkspaceID: Workspace]`, plus `active: [SpaceID: WorkspaceID]` — which
-workspace is showing on each desktop.
+`WorkspaceID` is a struct rather than an alias for `UInt32`, because the whole
+difficulty of this model is telling a workspace from the desktop it sits on and
+several places derive one from the other in a single expression. It is not
+`Codable`: nothing outside the daemon has a use for one, so a workspace id put
+on the wire is a build error rather than a number that decodes cleanly and
+names the wrong thing.
+
+There is **no `display` field**. A workspace lives on one desktop and a desktop
+on one display, so the display is `displayBySpace[desktop]` — the lookup every
+screen rect already goes through. Storing it would be a second copy of a fact
+that has an owner, and the two would drift the first time a monitor was
+unplugged.
+
+`SpaceState.layouts: [SpaceID: SpaceLayout]` became
+`workspaces: [WorkspaceID: Workspace]` plus `active: [SpaceID: WorkspaceID]` —
+which workspace is showing on each desktop. `labels` folded into
+`Workspace.label`, because a workspace is what a label names.
+
+Two orderings, and keeping them apart is what lets a desktop hold more than one
+workspace:
+
+- `order: [SpaceID]` — Mission Control's own desktop numbering, which is what
+  the ctrl+N fallback keystroke has to post and can never be weft's.
+- `wsOrder: [WorkspaceID]` — the ordinal that labels and `space focus 3` count
+  in, and the one both persistence files are keyed by.
+
+**Workspace ids are never persisted.** `labels.json` and `layouts.json` are
+ordinal-keyed, exactly as before, so there is nothing to migrate when the
+mapping stops being one-to-one.
+
+`adoptDesktops(_:names:)` is the identity mapping written down in one place:
+one workspace per desktop, showing, created and destroyed together with it. It
+is **the one function Phase 3 changes**; everything else already asks which
+workspace rather than which desktop.
+
+### The seam
 
 **Membership has two owners, and the split is the whole design.** SLS says
 which *desktop* a window is on; that is macOS's fact and stays authoritative.
-weft says which *workspace within that desktop*; that is weft's own state. The
-reconciliation rule is one sentence: **a window whose desktop changed under us
-joins the active workspace of the desktop it arrived on.** That covers a user
-dragging a window in Mission Control, a rule relocating one, and an app opening
-a window wherever it likes.
+weft says which *workspace within that desktop*; that is weft's own state.
+
+It is one function, `reconcileWorkspaces`, taking plain dictionaries rather
+than a `SpaceState` so it can be read on its own and cannot reach for a fact it
+was not handed:
+
+```swift
+func reconcileWorkspaces(
+    windowDesktops: [WindowID: [SpaceID]],   // straight from SLS
+    membership: [WorkspaceID: [WindowID]],   // weft's current answer
+    desktopOf: [WorkspaceID: SpaceID],
+    activeOn: [SpaceID: WorkspaceID]
+) -> [WorkspaceID: [WindowID]]
+```
+
+One rule in two halves:
+
+- A window still on the desktop its workspace lives on **keeps that
+  workspace**, showing or not. This is the half that makes a hidden workspace
+  possible at all: SLS reports a parked window on its desktop exactly like any
+  other, so without it the first sweep after a switch would vacuum every hidden
+  window into whatever is on screen.
+- A window whose desktop changed under us **joins the active workspace of the
+  desktop it arrived on.** That covers a user dragging a window in Mission
+  Control, a rule relocating one, and an app opening a window wherever it
+  likes.
+
+A window leaves a workspace by no longer being reported on that workspace's
+desktop, so nothing in there removes anything. A sticky window is resolved once
+per desktop and holds a slot in one workspace on each.
+
+**Every live desktop must have an entry in `active`.** A desktop without one
+drops what arrives on it, `evictOrderedOut` finds nothing held and returns
+early so closed windows never give their slots back, and `refreshDividerZones`
+skips it so its borders and grab zones stop being drawn — three silent
+failures. The sweep checks it and logs when it does not hold.
 
 ## Park and unpark
 
@@ -166,9 +232,15 @@ Each is shippable and reversible on its own.
 
 0. **Spike.** Done — S9.
 1. **`Workspace` as a pure-core type**, with the identity mapping: one
-   workspace per desktop. No behaviour change, no new config, every existing
-   test still passing. This is the large, boring, safe refactor and it is most
-   of the work.
+   workspace per desktop. No behaviour change, no new config. **Done** — see
+   the Model section above. It landed in four commits: the seam and the type
+   unused, the layout and label re-key, the override and `recent`, and this.
+   Two things came out of it. A vanished desktop used to lose its label but
+   keep its layout, because the cleanup was split across two functions that
+   each knew half of what had happened; `adoptDesktops` now owns both. And the
+   wire is deliberately unchanged — `query spaces` and `query bar-state` still
+   report native space ids, because weft-bar decodes them as `UInt64` and hands
+   them straight back to `space focus`.
 2. **Park and unpark in `WeftPlatform`**, with the crash-safe ledger: every
    park writes `{wid: real frame}` to disk before it moves anything, and
    startup unparks whatever the ledger holds before the first sweep. `weftctl
@@ -198,6 +270,7 @@ Each is shippable and reversible on its own.
   on disk. Write the ledger first, always, and accept a stale entry over a
   stranded window.
 - **Two sources of truth for membership.** SLS for the desktop, weft for the
-  workspace. Every bug in this design will live in that seam; the
-  reconciliation rule above is deliberately one sentence so it can be held in
-  the head and tested directly.
+  workspace. Every bug in this design will live in that seam. It is one pure
+  function with seven tests, two of which describe several workspaces on one
+  desktop — a configuration nothing creates yet, so that the rule is already
+  right when something does.
