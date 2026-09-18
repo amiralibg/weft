@@ -76,6 +76,15 @@ let package = Package(
             name: "WeftConfigTests",
             dependencies: ["WeftConfig", "WeftCore", "WeftInput"]
         ),
+        // The park ledger's file format. It is read once, after a crash, to
+        // find windows nothing else in weft can see — so a shape that decodes
+        // into the wrong answer does not show up as a decode failure, it shows
+        // up as windows left at the corner of the screen.
+        .testTarget(
+            name: "WeftPlatformTests",
+            dependencies: ["WeftPlatform", "WeftCore"],
+            linkerSettings: skylightLink
+        ),
         .testTarget(
             name: "WeftBarConfigTests",
             dependencies: ["WeftBarConfig"],
