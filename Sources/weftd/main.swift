@@ -40,6 +40,11 @@ final class Daemon: @unchecked Sendable {
     private let hub = SubscriberHub()
     private let bus = EventBus()
     private let observers = ObserverSet()
+    /// Hides and shows a workspace's windows. Nothing parks yet — under the
+    /// identity mapping every desktop holds one workspace and none is ever
+    /// hidden — but the ledger is read at startup regardless, so the recovery
+    /// path is not first exercised by the first crash that needs it.
+    private let parker = Parker()
     private let input = InputManager()
     /// Per-space tiling + labels (M4). Single-space `State` values are built
     /// on demand from the current space's tree for the pure reducer.
@@ -303,7 +308,54 @@ final class Daemon: @unchecked Sendable {
         // the sweep on the main thread means none of those arrive until it
         // finishes. The queue is serial, so anything the observers post in the
         // meantime is handled after the first sweep, in order.
-        syncQueue.async { [weak self] in self?.syncFromSnapshot(initial: true) }
+        //
+        // The unpark goes on the same serial queue, ahead of the sweep, so the
+        // order is structural rather than a matter of timing. It has to
+        // finish first: the sweep reads every window's frame from SkyLight,
+        // and a parked window read at the corner is adopted as its real one —
+        // a float workspace remembers the corner as the user's arrangement,
+        // `inserting(in:)` picks split axes from it, and the sweep tiles
+        // around windows it should have been putting back.
+        syncQueue.async { [weak self] in
+            self?.unparkFromLedger()
+            self?.syncFromSnapshot(initial: true)
+        }
+    }
+
+    /// Put back anything a previous run left off screen.
+    ///
+    /// Under the identity mapping the ledger never exists, so this is a
+    /// `stat` and nothing else. It is wired now anyway: the ledger's whole
+    /// purpose is the crash, and a path whose first run is Phase 3's first
+    /// crash is not a recovery path.
+    ///
+    /// Needs no AX, no display lookup and no permission — the ledger holds
+    /// each window's frame, and the move is pure WindowServer.
+    private func unparkFromLedger() {
+        let outcome = parker.unparkAll()
+        guard !outcome.isEmpty else { return }
+        if !outcome.restored.isEmpty {
+            fputs("weftd: unparked \(outcome.restored.count) window(s) from a previous run\n", stderr)
+        }
+        // A window the WindowServer would not move is still off screen, and
+        // its entry is kept so the next launch tries again.
+        if !outcome.refused.isEmpty {
+            fputs(
+                "weftd: could not unpark \(outcome.refused) — still off screen\n", stderr
+            )
+        }
+        // Not a failure: the id belongs to a different window now, or the app
+        // moved its own window while it was hidden. Said out loud because it
+        // is the difference between a window weft chose not to touch and one
+        // it lost.
+        if !outcome.notOurs.isEmpty {
+            fputs(
+                "weftd: ignoring stale park entries for \(outcome.notOurs) — "
+                    + "not where they were left\n",
+                stderr
+            )
+        }
+        if let note = outcome.note { fputs("weftd: \(note)\n", stderr) }
     }
 
     private func warpMouseToWindow(_ wid: WindowID, target: Frame? = nil) {
