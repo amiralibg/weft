@@ -24,23 +24,24 @@ Highest value per line of effort on this page.
 
 ### 2. A runtime layout choice does not survive a restart
 
-`SpaceState.layouts` is documented as "Missing = not yet visited this launch"
-(`Sources/WeftCore/Spaces.swift:107`), and the `space layout` handler
-(`Sources/weftd/main.swift:1580`) mutates the in-memory state and stops there.
-Labels persist through `saveLabels()` → `~/.config/weft/labels.json`; the
-parked set persists through `parked.json`; layouts have no equivalent.
+`⌥⇧F` into float, then reboot — or `weftctl service restart`, or install an
+update — and the space used to come back `bsp` with no indication why. That
+landed hardest immediately after onboarding, because Setup's **Finish**
+restarts the engine by design.
 
-So `⌥⇧F` into float, then reboot — or `weftctl service restart`, or install an
-update — and the space is back to `bsp` with no indication why. This lands
-hardest immediately after onboarding, because Setup's **Finish** restarts the
-engine by design.
+The kind now persists: `Workspace.overrideKind` records that the choice was
+asked for rather than derived, and `saveLayoutOverrides()` writes it to
+`~/.config/weft/layouts.json` by ordinal, beside `labels.json`. Which the
+config beats is settled in `applyDeclaredLayouts`: editing `layout =` in
+weft.toml is an instruction and wins, a reload that did not touch that
+declaration leaves a `space layout` alone. It is not written down anywhere a
+user would look.
 
-- [ ] Persist the per-space layout *kind* next to `labels.json`, keyed the same
+- [x] Persist the per-space layout *kind* next to `labels.json`, keyed the same
       way (by ordinal — sids die on reboot, §5.3).
-- [ ] Decide what config-declared `[[space]] layout` means when a saved choice
-      disagrees. Saved choice wins, or config wins on every load? Whichever, say
-      so in the README, because silently picking one is how "my layout keeps
-      resetting" bug reports start.
+- [ ] Say in the README which wins when a saved choice and a `[[space]] layout`
+      declaration disagree. The code decided; silently picking one is how "my
+      layout keeps resetting" bug reports start.
 - [ ] Later, the bigger version: persist the whole tree — splits, ratios,
       stacks. That is M7's "crash-safe state restore", and it is what makes a
       daemon restart invisible rather than merely survivable.

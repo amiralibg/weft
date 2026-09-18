@@ -1,34 +1,23 @@
 import WeftCore
 import AppKit
 import WeftPlatform
+import WeftIPC
 import Carbon.HIToolbox
 import Foundation
 
-struct BarSpace: Decodable {
-    let id: UInt64
-    let label: String
-    let layout: String
-    let windows: [Int]
-    let current: Bool
-    let display: String
-}
-
-struct BarWindow: Decodable {
-    let id: Int
-    let app: String
-    let title: String
-    let pid: Int
-    let spaces: [UInt64]
-}
+// The socket's shapes come from WeftIPC, which is also what weftd encodes
+// from. They used to be redeclared here, field for field, with `id` as UInt64
+// and `windows` as [Int] — a separate spelling of the same wire that decoded
+// happily whatever the daemon had started meaning by those numbers.
 
 @MainActor
 final class SpaceRowView: NSView {
-    private let space: BarSpace
+    private let space: SpaceStatus
     private let displayIndex: Int
     private let icons: [NSImage]
     private let onClick: () -> Void
 
-    init(space: BarSpace, displayIndex: Int, icons: [NSImage], onClick: @escaping () -> Void) {
+    init(space: SpaceStatus, displayIndex: Int, icons: [NSImage], onClick: @escaping () -> Void) {
         self.space = space
         self.displayIndex = displayIndex
         self.icons = icons

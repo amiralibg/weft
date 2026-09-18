@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WeftIPC
 
 /// What the menu bar draws, kept up to date without the main thread ever
 /// waiting on a socket.
@@ -17,8 +18,8 @@ import Foundation
 /// read synchronously.
 @MainActor
 final class BarState: ObservableObject {
-    @Published private(set) var spaces: [BarSpace] = []
-    @Published private(set) var windows: [BarWindow] = []
+    @Published private(set) var spaces: [SpaceStatus] = []
+    @Published private(set) var windows: [BarWindowStatus] = []
     /// Nil until the first answer arrives; false once the daemon has been
     /// asked and did not reply.
     @Published private(set) var daemonUp: Bool?
@@ -41,7 +42,7 @@ final class BarState: ObservableObject {
     private var pollTimer: Timer?
     private var stream: StreamToken?
 
-    var currentSpace: BarSpace? { spaces.first(where: \.current) }
+    var currentSpace: SpaceStatus? { spaces.first(where: \.current) }
 
     func start() {
         refresh(checkPermissions: true)
@@ -134,23 +135,18 @@ final class BarState: ObservableObject {
 
     /// Everything the menu needs, read off the main thread in one go.
     private struct Snapshot: Sendable {
-        var spaces: [BarSpace] = []
-        var windows: [BarWindow] = []
+        var spaces: [SpaceStatus] = []
+        var windows: [BarWindowStatus] = []
         var reachable = false
         var needsRestart: Bool?
         var permissionsReady: Bool?
     }
 
-    private struct BarStateResponse: Decodable {
-        var spaces: [BarSpace]
-        var windows: [BarWindow]
-    }
-
     private nonisolated static func takeSnapshot(checkPermissions: Bool) -> Snapshot {
-        let state: BarStateResponse?
+        let state: BarStateStatus?
         if let json = BarIPC.send("query bar-state"),
            let data = json.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode(BarStateResponse.self, from: data)
+           let decoded = try? JSONDecoder().decode(BarStateStatus.self, from: data)
         {
             state = decoded
         } else {
@@ -177,20 +173,24 @@ final class BarState: ObservableObject {
         return snapshot
     }
 
-    private nonisolated static func takeLegacyState() -> BarStateResponse? {
+    private nonisolated static func takeLegacyState() -> BarStateStatus? {
         guard let sJSON = BarIPC.send("query spaces"),
               let sData = sJSON.data(using: .utf8),
-              let spaces = try? JSONDecoder().decode([BarSpace].self, from: sData)
+              let spaces = try? JSONDecoder().decode([SpaceStatus].self, from: sData)
         else { return nil }
-        let windows: [BarWindow]
+        let windows: [BarWindowStatus]
+        // `query windows` answers with WindowStatus, which is a superset.
+        // Decoding it as the smaller type on purpose: this path exists for a
+        // daemon older than `query bar-state`, and asking that daemon for
+        // fields it may not emit is how a compatibility path stops being one.
         if let wJSON = BarIPC.send("query windows"),
            let wData = wJSON.data(using: .utf8),
-           let list = try? JSONDecoder().decode([BarWindow].self, from: wData)
+           let list = try? JSONDecoder().decode([BarWindowStatus].self, from: wData)
         {
             windows = list
         } else {
             windows = []
         }
-        return BarStateResponse(spaces: spaces, windows: windows)
+        return BarStateStatus(spaces: spaces, windows: windows)
     }
 }

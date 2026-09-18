@@ -1,13 +1,15 @@
 import AppKit
 import Carbon.HIToolbox
+import WeftCore
+import WeftIPC
 
 final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
 struct SwitcherItem {
-    let wid: Int
-    let pid: Int
+    let wid: WindowID
+    let pid: Int32
     let app: String
     let title: String
     let spaceLabel: String
@@ -192,28 +194,17 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     private nonisolated static func fetch() -> [SwitcherItem] {
-        struct QueryWin: Decodable {
-            let id: Int
-            let app: String
-            let title: String
-            let pid: Int
-            let spaces: [UInt64]
-        }
-        struct QuerySpace: Decodable {
-            let id: UInt64
-            let label: String
-        }
         // `--no-ax`: the switcher never reads `bound`. The plain form is the
         // fallback for a daemon older than the flag.
         guard let jsonStr = BarIPC.send("query windows --no-ax") ?? BarIPC.send("query windows"),
               let data = jsonStr.data(using: .utf8),
-              let wins = try? JSONDecoder().decode([QueryWin].self, from: data)
+              let wins = try? JSONDecoder().decode([WindowStatus].self, from: data)
         else { return [] }
 
-        var spacesMap: [UInt64: String] = [:]
+        var spacesMap: [SpaceID: String] = [:]
         if let sJson = BarIPC.send("query spaces"),
            let sData = sJson.data(using: .utf8),
-           let parsed = try? JSONDecoder().decode([QuerySpace].self, from: sData)
+           let parsed = try? JSONDecoder().decode([SpaceStatus].self, from: sData)
         {
             for s in parsed { spacesMap[s.id] = s.label.isEmpty ? "\(s.id)" : s.label }
         }

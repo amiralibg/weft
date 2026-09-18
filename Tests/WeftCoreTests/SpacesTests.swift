@@ -1,40 +1,84 @@
 import Testing
 @testable import WeftCore
 
-@Test func labelsAssignByOrdinal() {
+/// The identity mapping every test below is written against: one workspace per
+/// desktop, in the order given. `adoptDesktops` is the only thing that creates
+/// a workspace, so it is also the only way to build a state to test with.
+private func desktops(_ sids: [SpaceID], names: [String] = []) -> SpaceState {
     var s = SpaceState()
-    s.assignLabels(sids: [5, 3, 7], names: ["code", "web"])
+    s.adoptDesktops(sids, names: names)
+    return s
+}
+
+/// The workspace showing on a desktop, for a test that needs to name one.
+private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]! }
+
+@Test func labelsAssignByOrdinal() {
+    let s = desktops([5, 3, 7], names: ["code", "web"])
     // `sids` arrives in Mission Control order and is honoured verbatim: the
     // first desktop on screen is "code" whatever its space id happens to be.
     // Sorting the ids here (the old behaviour) put every label on the wrong
     // desktop as soon as a desktop was removed and re-added, because macOS
     // hands out space ids in creation order, not left-to-right order.
-    #expect(s.labels == [5: "code", 3: "web", 7: "3"])
+    #expect(s.workspace(on: 5)?.label == "code")
+    #expect(s.workspace(on: 3)?.label == "web")
+    #expect(s.workspace(on: 7)?.label == "3")
     #expect(s.order == [5, 3, 7])
-    #expect(s.persistedNames(sids: [5, 3, 7]) == ["code", "web", "3"])
+    // `wsOrder` is built from `order` in the same pass, so the persistence
+    // files — which are keyed by ordinal — cannot come back scrambled.
+    #expect(s.wsOrder == [ws(s, 5), ws(s, 3), ws(s, 7)])
+    #expect(s.persistedNames() == ["code", "web", "3"])
     #expect(s.ordinal(of: 3) == 2)
 }
 
+/// One workspace per desktop, and each one knows where it lives. The identity
+/// mapping stated as a test, so the commit that stops it being the identity
+/// mapping has to say so here.
+@Test func everyDesktopGetsExactlyOneWorkspace() {
+    let s = desktops([5, 3, 7], names: [])
+    #expect(s.workspaces.count == 3)
+    #expect(s.active.count == 3)
+    for sid in [5, 3, 7] as [SpaceID] {
+        #expect(s.desktop(of: ws(s, sid)) == sid)
+    }
+    #expect(Set(s.wsOrder).count == 3)
+}
+
+/// Re-adopting keeps the workspace a desktop already had, labels and layout
+/// intact. A sweep runs this on every pass, so anything it recreates is a tree
+/// thrown away several times a second.
+@Test func readoptingADesktopKeepsItsWorkspace() {
+    var s = desktops([5, 3], names: ["code", "web"])
+    let before = ws(s, 5)
+    s.setLayout(.float(FloatState()), on: 5)
+    s.adoptDesktops([5, 3], names: nil)
+    #expect(ws(s, 5) == before)
+    #expect(s.workspace(on: 5)?.label == "code")
+    #expect(s.layout(on: 5)?.kind == .float)
+}
+
 @Test func resolveLabelSidOrdinal() {
-    var s = SpaceState(layouts: [3: .tiling(Tree()), 5: .tiling(Tree()), 7: .tiling(Tree())])
-    s.assignLabels(sids: [3, 5, 7], names: ["code"])
-    #expect(s.resolveSpace("code") == 3)   // label
-    #expect(s.resolveSpace("5") == 5)      // raw sid
-    #expect(s.resolveSpace("3") == 7)      // label "3" wins over sid/ordinal
-    #expect(s.resolveSpace("1") == 3)      // ordinal 1 → first sid
-    #expect(s.resolveSpace("nope") == nil)
+    let s = desktops([3, 5, 7], names: ["code"])
+    #expect(s.resolveWorkspace("code") == ws(s, 3))   // label
+    // The raw-id escape hatch still names a DESKTOP. Someone typing a number
+    // out of `query spaces` means the native space that JSON reports, and a
+    // workspace id of the same value would hand them a different desktop.
+    #expect(s.resolveWorkspace("5") == ws(s, 5))
+    #expect(s.resolveWorkspace("3") == ws(s, 7))      // label "3" wins over id/ordinal
+    #expect(s.resolveWorkspace("1") == ws(s, 3))      // ordinal 1 → first workspace
+    #expect(s.resolveWorkspace("nope") == nil)
 }
 
 @Test func membershipSyncPerSpace() {
-    let s0 = SpaceState()
-    let (s1, fresh1) = syncMembership(s0, spaces: [3: [1, 2], 5: [3]])
-    #expect(s1.layouts[3]?.windows.sorted() == [1, 2])
-    #expect(s1.layouts[5]?.windows == [3])
+    let s0 = desktops([3, 5])
+    let (s1, fresh1) = syncMembership(s0, membership: [ws(s0, 3): [1, 2], ws(s0, 5): [3]])
+    #expect(s1.layout(on: 3)?.windows.sorted() == [1, 2])
+    #expect(s1.layout(on: 5)?.windows == [3])
     #expect(fresh1 == [1, 2, 3])
     // Window 2 moves 3 → 5; window 1 closes.
-    let (s2, fresh2) = syncMembership(s1, spaces: [3: [], 5: [2, 3]])
-    #expect(s2.layouts[3]?.windows == [])
-    #expect(s2.layouts[5]?.windows.sorted() == [2, 3])
+    let (s2, fresh2) = syncMembership(s1, membership: [ws(s0, 3): [], ws(s0, 5): [2, 3]])
+    #expect(s2.layout(on: 3)?.windows == [])
+    #expect(s2.layout(on: 5)?.windows.sorted() == [2, 3])
     #expect(fresh2 == [2])  // new to space 5's tree (rebind is idempotent)
 }
 
@@ -67,13 +111,14 @@ import Testing
 }
 
 @Test func floatMembershipSync() {
-    let s0 = SpaceState(layouts: [5: .float(FloatState())])
-    let (s1, fresh) = syncMembership(s0, spaces: [5: [1, 2]])
-    #expect(s1.layouts[5]?.kind == .float)
-    #expect(s1.layouts[5]?.windows == [1, 2])
+    var s0 = desktops([5])
+    s0.setLayout(.float(FloatState()), on: 5)
+    let (s1, fresh) = syncMembership(s0, membership: [ws(s0, 5): [1, 2]])
+    #expect(s1.layout(on: 5)?.kind == .float)
+    #expect(s1.layout(on: 5)?.windows == [1, 2])
     #expect(fresh == [1, 2])
-    let (s2, _) = syncMembership(s1, spaces: [5: [2]])
-    #expect(s2.layouts[5]?.windows == [2])
+    let (s2, _) = syncMembership(s1, membership: [ws(s0, 5): [2]])
+    #expect(s2.layout(on: 5)?.windows == [2])
 }
 
 /// bsp → float → bsp keeps every window and the focus. Float remembers the
@@ -99,21 +144,24 @@ import Testing
 /// The layout is gone; an override naming it simply does not survive, and a
 /// space with no override tiles bsp — so there is nothing to migrate.
 @Test func aPersistedScrollOverrideLoadsAsBsp() {
-    var s = SpaceState()
-    s.assignLabels(sids: [10, 20, 30], names: [])
-    s.assignOverrides(sids: [10, 20, 30], kinds: ["", "scroll", "float"])
-    #expect(s.overrides[20] == nil)
-    #expect(s.overrides[30] == .float)
-    let (s1, _) = syncMembership(s, spaces: [20: [7]], live: [10, 20, 30])
-    #expect(s1.layouts[20]?.kind == .bsp)
-    #expect(s1.layouts[30]?.kind == .float)
+    // An override belongs to a workspace, so it is restored after the
+    // workspaces exist — the order the daemon's first sweep uses too.
+    var s = desktops([10, 20, 30], names: [])
+    s.assignOverrides(kinds: ["", "scroll", "float"])
+    #expect(s.workspace(on: 20)?.overrideKind == nil)
+    #expect(s.workspace(on: 30)?.overrideKind == .float)
+    let live = s.liveWorkspaces(desktops: [10, 20, 30])
+    let (s1, _) = syncMembership(s, membership: [ws(s, 20): [7]], live: live)
+    #expect(s1.layout(on: 20)?.kind == .bsp)
+    #expect(s1.layout(on: 30)?.kind == .float)
 }
 
-@Test func recentSpaceResolution() {
-    var s = SpaceState(layouts: [3: .tiling(Tree()), 5: .tiling(Tree())], recentSpace: 3)
-    #expect(s.resolveSpace("recent") == 3)
-    s.recentSpace = 5
-    #expect(s.resolveSpace("recent") == 5)
+@Test func recentWorkspaceResolution() {
+    var s = desktops([3, 5])
+    s.recentWorkspace = ws(s, 3)
+    #expect(s.resolveWorkspace("recent") == ws(s, 3))
+    s.recentWorkspace = ws(s, 5)
+    #expect(s.resolveWorkspace("recent") == ws(s, 5))
 }
 
 @Test func spaceLayoutGrammar() throws {
@@ -155,21 +203,20 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 }
 
 @Test func splitAxisFollowsEachSpacesOwnDisplay() {
-    let state = SpaceState(
-        currentByDisplay: ["A": 3, "B": 9],
-        displays: ["A", "B"],
-        displayBySpace: [3: "A", 9: "B"]
-    )
+    var state = desktops([3, 9])
+    state.currentByDisplay = ["A": 3, "B": 9]
+    state.displays = ["A", "B"]
+    state.displayBySpace = [3: "A", 9: "B"]
     // Same two windows on each space; only the display shape differs.
     let (synced, fresh) = syncMembership(
         state,
-        spaces: [3: [1, 2], 9: [1, 2]],
-        screens: [3: builtIn, 9: external]
+        membership: [ws(state, 3): [1, 2], ws(state, 9): [1, 2]],
+        screens: [ws(state, 3): builtIn, ws(state, 9): external]
     )
     #expect(fresh == [1, 2])
 
-    guard case .tiling(let onBuiltIn)? = synced.layouts[3],
-          case .tiling(let onExternal)? = synced.layouts[9]
+    guard case .tiling(let onBuiltIn)? = synced.layout(on: 3),
+          case .tiling(let onExternal)? = synced.layout(on: 9)
     else { Issue.record("expected tiling layouts"); return }
 
     let a = layout(onBuiltIn, in: builtIn, config: .none)
@@ -194,12 +241,15 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 @Test func splitAxisDiffersWhenDisplayShapesDiffer() {
     // A tall display splits top/bottom where a wide one splits left/right.
     let tall = Frame(x: 2000, y: 0, width: 1080, height: 1920)
-    let state = SpaceState(displayBySpace: [3: "A", 9: "B"])
+    var state = desktops([3, 9])
+    state.displayBySpace = [3: "A", 9: "B"]
     let (synced, _) = syncMembership(
-        state, spaces: [3: [1, 2], 9: [1, 2]], screens: [3: builtIn, 9: tall]
+        state,
+        membership: [ws(state, 3): [1, 2], ws(state, 9): [1, 2]],
+        screens: [ws(state, 3): builtIn, ws(state, 9): tall]
     )
-    guard case .tiling(let wide)? = synced.layouts[3],
-          case .tiling(let narrow)? = synced.layouts[9]
+    guard case .tiling(let wide)? = synced.layout(on: 3),
+          case .tiling(let narrow)? = synced.layout(on: 9)
     else { Issue.record("expected tiling layouts"); return }
     let a = layout(wide, in: builtIn, config: .none)
     let b = layout(narrow, in: tall, config: .none)
@@ -250,68 +300,207 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 /// window to arrive found a space with no layout at all — which the daemon
 /// seeds from config.
 @Test func anEmptySpaceKeepsItsLayoutKind() {
-    let s0 = SpaceState(layouts: [7: .float(FloatState())])
+    var s0 = desktops([7])
+    s0.setLayout(.float(FloatState()), on: 7)
+    let live = s0.liveWorkspaces(desktops: [7])
     // Sweep with the space present but holding nothing.
-    let (s1, _) = syncMembership(s0, spaces: [:], live: [7])
-    #expect(s1.layouts[7]?.kind == .float)
-    #expect(s1.layouts[7]?.windows == [])
+    let (s1, _) = syncMembership(s0, membership: [:], live: live)
+    #expect(s1.layout(on: 7)?.kind == .float)
+    #expect(s1.layout(on: 7)?.windows == [])
     // And it is still float when the first window lands on it.
-    let (s2, fresh) = syncMembership(s1, spaces: [7: [11]], live: [7])
-    #expect(s2.layouts[7]?.kind == .float)
-    #expect(s2.layouts[7]?.windows == [11])
+    let (s2, fresh) = syncMembership(s1, membership: [ws(s0, 7): [11]], live: live)
+    #expect(s2.layout(on: 7)?.kind == .float)
+    #expect(s2.layout(on: 7)?.windows == [11])
     #expect(fresh == [11])
 }
 
 /// A space that is genuinely gone — an unplugged display — still loses its
 /// layout, which is the behaviour the dropping was there for.
+///
+/// This used to be `syncMembership`'s job, which knew only that a space was
+/// absent from a list. `adoptDesktops` knows the desktop is gone, so it takes
+/// what is showing there and the layout override with it. A stale `active`
+/// entry is harmless right up until macOS recycles the id, and then a
+/// brand-new desktop inherits a dead workspace's tree.
 @Test func aVanishedSpaceLosesItsLayout() {
-    let s0 = SpaceState(layouts: [7: .float(FloatState()), 8: .tiling(Tree())])
-    let (s1, _) = syncMembership(s0, spaces: [7: [1]], live: [7])
-    #expect(s1.layouts[7] != nil)
-    #expect(s1.layouts[8] == nil)
+    var s = desktops([7, 8])
+    s.workspaces[ws(s, 8)]?.overrideKind = .float
+    let dead = ws(s, 8)
+    s.adoptDesktops([7], names: nil)
+    #expect(s.workspace(on: 7) != nil)
+    #expect(s.active[8] == nil)
+    // The workspace goes, and its override goes with it because the override
+    // now lives on the workspace rather than in a table beside it.
+    #expect(s.workspaces[dead] == nil)
+    #expect(s.wsOrder == [ws(s, 7)])
 }
 
 @Test func layoutOverridesRoundTripByOrdinal() {
-    var s = SpaceState()
-    s.assignLabels(sids: [10, 20, 30], names: ["main", "web", "code"])
-    s.overrides[20] = .float
-    let saved = s.persistedOverrides(sids: [10, 20, 30])
+    var s = desktops([10, 20, 30], names: ["main", "web", "code"])
+    s.workspaces[ws(s, 20)]?.overrideKind = .float
+    let saved = s.persistedOverrides()
     #expect(saved == ["", "float", ""])
-    // A restart hands out different sids for the same desktops.
-    var next = SpaceState()
-    next.assignLabels(sids: [11, 21, 31], names: ["main", "web", "code"])
-    next.assignOverrides(sids: [11, 21, 31], kinds: saved)
-    #expect(next.overrides[21] == .float)
-    #expect(next.overrides[11] == nil)
+    // A restart hands out different sids for the same desktops, and fresh
+    // workspace ids for the same workspaces — which is why the file is keyed
+    // by ordinal and neither id is ever written down.
+    var next = desktops([11, 21, 31], names: ["main", "web", "code"])
+    next.assignOverrides(kinds: saved)
+    #expect(next.workspace(on: 21)?.overrideKind == .float)
+    #expect(next.workspace(on: 11)?.overrideKind == nil)
+    // An empty workspace takes the restored kind outright — nothing to convert.
+    #expect(next.layout(on: 21)?.kind == .float)
 }
 
 /// Unplugging a display must not leave a stale override behind to be applied
 /// to whatever space inherits that id later.
 @Test func overridesDieWithTheirSpace() {
-    var s = SpaceState()
-    s.assignLabels(sids: [10, 20], names: ["main", "web"])
-    s.overrides[20] = .float
-    s.assignLabels(sids: [10], names: ["main"])
-    #expect(s.overrides[20] == nil)
+    var s = desktops([10, 20], names: ["main", "web"])
+    let dead = ws(s, 20)
+    s.workspaces[dead]?.overrideKind = .float
+    s.adoptDesktops([10], names: ["main"])
+    #expect(s.workspaces[dead] == nil)
+    #expect(s.persistedOverrides() == [""])
 }
 
 @Test func spaceWithOverrideFloatKeepsFloatWhenNewWindowOpens() {
-    let s0 = SpaceState(
-        layouts: [1: .float(FloatState(order: [1], remembered: [:], focus: 1))],
-        overrides: [1: .float]
-    )
+    var s0 = desktops([1])
+    s0.setLayout(.float(FloatState(order: [1], remembered: [:], focus: 1)), on: 1)
+    s0.workspaces[ws(s0, 1)]?.overrideKind = .float
     // A second window opens on space 1
-    let (s1, fresh) = syncMembership(s0, spaces: [1: [1, 2]], live: [1])
-    #expect(s1.layouts[1]?.kind == .float)
-    #expect(s1.layouts[1]?.windows == [1, 2])
+    let (s1, fresh) = syncMembership(
+        s0, membership: [ws(s0, 1): [1, 2]], live: s0.liveWorkspaces(desktops: [1])
+    )
+    #expect(s1.layout(on: 1)?.kind == .float)
+    #expect(s1.layout(on: 1)?.windows == [1, 2])
     #expect(fresh == [2])
 }
 
 @Test func spaceEmptyWithOverrideFloatKeepsFloatWhenFirstWindowOpens() {
-    // Space 2 starts with no layout but has an override of float
-    let s0 = SpaceState(overrides: [2: .float])
-    let (s1, fresh) = syncMembership(s0, spaces: [2: [100]], live: [2])
-    #expect(s1.layouts[2]?.kind == .float)
-    #expect(s1.layouts[2]?.windows == [100])
+    // Space 2 has an override of float and no windows yet — the state a
+    // restart leaves a desktop in before anything opens there.
+    var s0 = desktops([2], names: [])
+    s0.assignOverrides(kinds: ["float"])
+    let (s1, fresh) = syncMembership(
+        s0, membership: [ws(s0, 2): [100]], live: s0.liveWorkspaces(desktops: [2])
+    )
+    #expect(s1.layout(on: 2)?.kind == .float)
+    #expect(s1.layout(on: 2)?.windows == [100])
     #expect(fresh == [100])
+}
+
+// MARK: - The workspace seam
+//
+// `reconcileWorkspaces` is where the two owners of membership meet: SLS says
+// which desktop a window is on, weft says which workspace within it. These
+// tests are the specification of that one rule, and two of them describe a
+// configuration nothing creates yet — several workspaces on one desktop —
+// because the whole point of writing the rule now is that it is already right
+// when something does.
+
+private let ws1 = WorkspaceID(1)
+private let ws2 = WorkspaceID(2)
+private let ws3 = WorkspaceID(3)
+
+/// One workspace per desktop — today's model, and the thing Phase 1 must not
+/// change. Whatever SLS reports is what comes out, unchanged.
+@Test func identityMappingReproducesWhatSLSReports() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [3], 12: [5]],
+        membership: [ws1: [10, 11], ws2: [12]],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    #expect(out == [ws1: [10, 11], ws2: [12]])
+}
+
+/// The reconciliation rule's second half. A window weft filed on desktop 3
+/// that SLS now reports on desktop 5 has been moved by something weft did not
+/// do — Mission Control, a rule, the app itself — and it joins whatever is
+/// showing where it landed.
+@Test func aWindowThatChangedDesktopJoinsTheArrivingDesktopsActiveWorkspace() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws1: [10], ws2: []],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    // It joined 5's workspace, and left 3's by simply not being reported there.
+    #expect(out[ws2] == [10])
+    #expect(out[ws1] == nil)
+}
+
+/// The reconciliation rule's first half, and the one that makes a hidden
+/// workspace possible at all.
+///
+/// Two workspaces on desktop 3, `ws2` showing. SLS reports every window on
+/// desktop 3 either way — a parked window is still on its desktop, and still
+/// in the on-screen window list (S9) — so without this half `ws1`'s windows
+/// would be swept into `ws2` on the first sweep after they were hidden, and a
+/// workspace switch would be a one-way trip.
+@Test func aHiddenWorkspaceKeepsItsWindowsWhileAnotherIsShowing() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [3], 12: [3]],
+        membership: [ws1: [10, 11], ws2: [12]],
+        desktopOf: [ws1: 3, ws2: 3],
+        activeOn: [3: ws2]
+    )
+    #expect(out[ws1] == [10, 11])
+    #expect(out[ws2] == [12])
+}
+
+/// A window that is new to a desktop holding several workspaces goes to the
+/// one showing, not to the first one that happens to be on that desktop.
+@Test func aNewWindowLandsInTheShowingWorkspaceNotJustAnyOnThatDesktop() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 99: [3]],
+        membership: [ws1: [10], ws2: []],
+        desktopOf: [ws1: 3, ws2: 3],
+        activeOn: [3: ws2]
+    )
+    #expect(out[ws1] == [10])
+    #expect(out[ws2] == [99])
+}
+
+/// A sticky window is on every desktop at once, so it is resolved once per
+/// desktop and holds a slot in a workspace on each.
+@Test func aStickyWindowLandsInOneWorkspacePerDesktop() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3, 5]],
+        membership: [:],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    #expect(out == [ws1: [10], ws2: [10]])
+}
+
+/// A desktop with no active workspace has nowhere to put what arrives, and
+/// drops it silently — there is nothing else a pure function can do.
+///
+/// This is the failure the caller has to make impossible: `evictOrderedOut`
+/// and `refreshDividerZones` both give up quietly on a desktop whose lookup
+/// misses, so the symptom would be closed windows never giving their slot back
+/// and borders vanishing, with nothing in the log. Every live desktop gets an
+/// active workspace before this is ever called.
+@Test func aDesktopWithNoActiveWorkspaceDropsWhatArrivesOnIt() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [7]],
+        membership: [ws1: [10]],
+        desktopOf: [ws1: 3],
+        activeOn: [3: ws1]
+    )
+    #expect(out == [ws1: [10]])
+}
+
+/// A workspace whose desktop weft no longer knows about contributes nothing —
+/// its windows are reconciled against the desktop SLS puts them on, like any
+/// others. An unplugged display must not be able to hold windows hostage in a
+/// workspace that can never be shown again.
+@Test func aWorkspaceWithNoDesktopHoldsNothingBack() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws3: [10], ws2: []],
+        desktopOf: [ws2: 5],
+        activeOn: [5: ws2]
+    )
+    #expect(out == [ws2: [10]])
 }
