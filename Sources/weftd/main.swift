@@ -346,7 +346,7 @@ final class Daemon: @unchecked Sendable {
         let sp = readSpaces()
         let onDisplay = displayUUID(containing: point)
         guard let sid = onDisplay.flatMap({ sp.currentByDisplay[$0] }) ?? sp.currentSpace,
-              let layout = sp.layouts[sid]
+              let layout = sp.layout(on: sid)
         else { return nil }
         let screen = usableScreen(for: sid)
         let config = currentConfig().general.asTilingConfig()
@@ -502,9 +502,9 @@ final class Daemon: @unchecked Sendable {
                 if let target = findWindow(at: location), target.wid != drag.windowID {
                     updateSpaces { sp in
                         guard let sid = self.currentSID() else { return }
-                        switch sp.layouts[sid] {
+                        switch sp.layout(on: sid) {
                         case .tiling(let t):
-                            sp.layouts[sid] = .tiling(t.swapping(drag.windowID, target.wid))
+                            sp.setLayout(.tiling(t.swapping(drag.windowID, target.wid)), on: sid)
                         case .float, nil:
                             break
                         }
@@ -527,7 +527,7 @@ final class Daemon: @unchecked Sendable {
     private func dragDivider(_ d: Divider, by delta: Double) {
         let frames: [WindowID: Frame]? = core.sync {
             guard let sid = self.spaces.currentSpace,
-                  case .tiling(let tree)? = self.spaces.layouts[sid]
+                  case .tiling(let tree)? = self.spaces.layout(on: sid)
             else { return nil }
             let screen = self.usableScreen(for: sid)
             let config = self.currentConfig().general.asTilingConfig()
@@ -537,7 +537,7 @@ final class Daemon: @unchecked Sendable {
                 deltaPoints: delta, frames: current
             )
             guard next != tree else { return nil }
-            self.spaces.layouts[sid] = .tiling(next)
+            self.spaces.setLayout(.tiling(next), on: sid)
             return WeftCore.layout(next, in: screen, config: config)
         }
         guard let frames else { return }
@@ -553,11 +553,11 @@ final class Daemon: @unchecked Sendable {
     private func raiseStackMember(_ wid: WindowID) {
         let sp = readSpaces()
         guard let sid = sp.visibleSpaces.first(where: {
-            sp.layouts[$0]?.windows.contains(wid) == true
+            sp.layout(on: $0)?.windows.contains(wid) == true
         }), let pid = pid(of: wid) else { return }
         updateSpaces { s in
-            if case .tiling(let t)? = s.layouts[sid], t.windows.contains(wid) {
-                s.layouts[sid] = .tiling(t.focusing(wid))
+            if case .tiling(let t)? = s.layout(on: sid), t.windows.contains(wid) {
+                s.setLayout(.tiling(t.focusing(wid)), on: sid)
             }
         }
         applySpaceLayout(sid)
@@ -648,7 +648,7 @@ final class Daemon: @unchecked Sendable {
         // One call, ~40 µs, no window list.
         let showing = WorldReader.currentSpaces()
         for (uuid, sid) in showing {
-            guard let layout = sp.layouts[sid] else { continue }
+            guard let layout = sp.layout(on: sid) else { continue }
             let screen = usableScreen(onDisplay: sp.displayBySpace[sid] ?? uuid)
             let frames: [WindowID: Frame]
             var grabbable = true
@@ -710,7 +710,7 @@ final class Daemon: @unchecked Sendable {
             // holds the one rule: a focused window with no border makes no
             // border active.
             let focus = systemFocusLock.withLock { systemFocusLocked }
-                ?? sp.currentSpace.flatMap { sp.layouts[$0]?.focus }
+                ?? sp.currentSpace.flatMap { sp.layout(on: $0)?.focus }
             // Membership and targets — what the renderer is asked for. Its own
             // trace line prints what it actually drew, read from the
             // WindowServer. Comparing the two is how you tell a window weft
@@ -744,7 +744,7 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func currentSpaceLayoutKind() -> LayoutKind? {
-        guard let sid = currentSID(), let l = readSpaces().layouts[sid] else { return nil }
+        guard let sid = currentSID(), let l = readSpaces().layout(on: sid) else { return nil }
         switch l {
         case .tiling: return .bsp
         case .float: return .float
@@ -769,11 +769,11 @@ final class Daemon: @unchecked Sendable {
         let snap: Snap = core.sync {
             let sp = self.spaces
             let sid = sp.currentSpace
-            let layout = sid.flatMap { sp.layouts[$0] }
+            let layout = sid.flatMap { sp.layout(on: $0) }
             let focus = layout?.focus
             return Snap(
                 sid: sid,
-                label: sid.flatMap { sp.labels[$0] },
+                label: sid.flatMap { sp.workspace(on: $0)?.label },
                 kind: layout?.kind,
                 count: layout?.windows.count ?? 0,
                 focus: focus,
@@ -890,7 +890,7 @@ final class Daemon: @unchecked Sendable {
             displayUUID(containing: CGPoint(x: f.x + f.width / 2, y: f.y + f.height / 2))
         }
         updateSpaces { sp in
-            for sid in sp.visibleSpaces where sp.layouts[sid]?.windows.contains(wid) == true {
+            for sid in sp.visibleSpaces where sp.layout(on: sid)?.windows.contains(wid) == true {
                 sp.focusedDisplay = sp.displayBySpace[sid]
                 return
             }
@@ -911,7 +911,7 @@ final class Daemon: @unchecked Sendable {
     /// Whether focus is on a window no layout owns — a float over the tiles.
     private func focusIsUnmanaged() -> Bool {
         guard let focus = systemFocusLock.withLock({ systemFocusLocked }) else { return false }
-        return !readSpaces().layouts.values.contains { $0.windows.contains(focus) }
+        return !readSpaces().workspaces.values.contains { $0.layout.windows.contains(focus) }
     }
 
     /// Display uuids west→east. The order `focus display west|east` counts in.
@@ -1088,10 +1088,10 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func resolvedInitialLayout(for sid: SpaceID, in sp: SpaceState) -> SpaceLayout {
-        if let existing = sp.layouts[sid] { return existing }
+        if let existing = sp.layout(on: sid) { return existing }
         let cfg = currentConfig()
         let kind = sp.overrides[sid]
-            ?? cfg.spaces.first(where: { $0.label == (sp.labels[sid] ?? "") })?.layout
+            ?? cfg.spaces.first(where: { $0.label == (sp.workspace(on: sid)?.label ?? "") })?.layout
             ?? cfg.general.defaultLayout
         switch kind {
         case .float: return .float(FloatState())
@@ -1104,13 +1104,13 @@ final class Daemon: @unchecked Sendable {
     private func currentLayout() -> SpaceLayout {
         let sp = readSpaces()
         guard let sid = sp.currentSpace else { return .tiling(Tree()) }
-        return sp.layouts[sid] ?? resolvedInitialLayout(for: sid, in: sp)
+        return sp.layout(on: sid) ?? resolvedInitialLayout(for: sid, in: sp)
     }
 
     private func storeLayout(_ layout: SpaceLayout) {
         updateSpaces { sp in
             if let sid = sp.currentSpace {
-                sp.layouts[sid] = layout
+                sp.setLayout(layout, on: sid)
             }
         }
     }
@@ -1234,24 +1234,38 @@ final class Daemon: @unchecked Sendable {
         var pendingMoves: [RuleMove] = []
         let (currentSids, visible, total) = core.sync { () -> (Set<SpaceID>, [WindowInfo], Int) in
             var sp = self.spaces
-            if sp.labels.isEmpty {
+            // Which workspaces already existed, taken before `adoptDesktops`
+            // creates any. A workspace absent here is one weft has not visited
+            // this launch, and further down that is what earns it a seeded
+            // layout kind.
+            let priorKeys = Set(sp.workspaces.keys)
+            if sp.workspaces.isEmpty {
                 // Fresh launch: seed names from weft.toml [[space]] decls so a
                 // first config just works; falls back to labels.json, then numerics.
                 // Delete labels.json to re-adopt the config's names wholesale.
                 let declared = cfg.spaces.map { $0.label }
-                sp.assignLabels(sids: allSids, names: declared.isEmpty ? Daemon.loadLabels() : declared)
+                // Overrides first: `adoptDesktops` reads them to decide what
+                // kind a brand-new workspace starts as, so a desktop the user
+                // left in float comes back in float rather than being tiled
+                // once and converted a moment later.
                 sp.assignOverrides(sids: allSids, kinds: Daemon.loadLayoutOverrides())
+                sp.adoptDesktops(
+                    allSids, names: declared.isEmpty ? Daemon.loadLabels() : declared
+                )
             } else {
                 // Desktops added/removed at runtime: keep every existing label,
                 // but re-derive the ordinal list so `space focus 3` still means
-                // the third desktop on screen.
-                sp.order = allSids
-                for (i, sid) in allSids.enumerated() where sp.labels[sid] == nil {
-                    sp.labels[sid] = "\(i + 1)"
-                }
-                for sid in sp.labels.keys where !liveSids.contains(sid) {
-                    sp.labels.removeValue(forKey: sid)
-                }
+                // the third desktop on screen. `names: nil` is what says "keep
+                // what is already named"; a desktop that is new gets its number.
+                //
+                // This used to be open-coded here and left more behind than it
+                // took: labels were dropped for a vanished desktop and its
+                // layout was not — that fell to `syncMembership`'s live filter,
+                // which had no idea the desktop was gone and only knew it was
+                // not in the list. Now one function owns creation and removal,
+                // and removes the workspace, what is showing on the desktop and
+                // the layout override together.
+                sp.adoptDesktops(allSids, names: nil)
             }
             let oldCurrent = sp.currentSpace
             sp.displays = world.displays.map { $0.uuid }
@@ -1304,7 +1318,7 @@ final class Daemon: @unchecked Sendable {
             }
             self.spaceMoveAttempts = self.spaceMoveAttempts.intersection(worldWids)
             self.spaceMoveDeferredLogged = self.spaceMoveDeferredLogged.intersection(worldWids)
-            var bySpace: [SpaceID: [WindowID]] = [:]
+            var windowDesktops: [WindowID: [SpaceID]] = [:]
             var unmanagedNow: Set<WindowID> = []
             let showing = Set(sp.currentByDisplay.values)
             for w in world.windows {
@@ -1315,7 +1329,7 @@ final class Daemon: @unchecked Sendable {
                 //
                 // `manualFloat` was folded into `unmanagedNow` *after* this
                 // loop, which set the "do not manage it" flag and left the
-                // window in `bySpace` all the same — so `syncMembership` put
+                // window in `windowDesktops` all the same — so the sweep put
                 // it straight back into its space's tree and the next apply
                 // tiled it. `float toggle` therefore held only until the next
                 // sweep: leave the desktop and come back, or open any window
@@ -1374,7 +1388,7 @@ final class Daemon: @unchecked Sendable {
                         // Resolve against the in-progress labels (just seeded
                         // above), not the still-unwritten global — otherwise
                         // first-sync moves always miss with "unknown space".
-                        if let sid = sp.resolveSpace(target) {
+                        if let sid = sp.resolveWorkspace(target).flatMap({ sp.desktop(of: $0) }) {
                             pendingMoves.append(RuleMove(wid: w.id, app: w.app, sid: sid, label: target))
                         } else {
                             fputs("weftd: rule wants '\(w.app)' (\(w.id)) on unknown space '\(target)'\n", stderr)
@@ -1413,7 +1427,7 @@ final class Daemon: @unchecked Sendable {
                     unmanagedNow.insert(w.id)
                     continue
                 }
-                for sid in w.spaces { bySpace[sid, default: []].append(w.id) }
+                windowDesktops[w.id] = w.spaces
             }
             for wid in unmanagedNow.subtracting(self.unmanaged).sorted() {
                 fputs("weftd: floating \(wid) (rule/quirk — excluded from layouts)\n", stderr)
@@ -1422,27 +1436,55 @@ final class Daemon: @unchecked Sendable {
             self.floatFrames = self.floatFrames.filter { worldWids.contains($0.key) }
             unmanagedNow.formUnion(self.manualFloat)
             self.unmanaged = unmanagedNow
-            let priorKeys = Set(sp.layouts.keys)
+            // The seam. Up to here everything came from SLS: `windowDesktops`
+            // is the WindowServer's answer to "which desktop is this window
+            // on", verbatim. `reconcileWorkspaces` turns that into "which
+            // workspace", which is weft's own answer and the only part of
+            // membership macOS does not own.
+            let live = sp.liveWorkspaces(desktops: liveSids)
+            let membership = reconcileWorkspaces(
+                windowDesktops: windowDesktops,
+                membership: sp.workspaces.mapValues { $0.layout.windows },
+                desktopOf: sp.workspaces.mapValues { $0.desktop },
+                activeOn: sp.active
+            )
+            var screens: [WorkspaceID: Frame] = [:]
+            for id in live {
+                screens[id] = sp.desktop(of: id).flatMap { usableBySpace[$0] }
+            }
             let (synced, _) = syncMembership(
-                sp, spaces: bySpace, live: liveSids,
-                screens: usableBySpace, config: cfg.general.asTilingConfig()
+                sp, membership: membership, live: live,
+                screens: screens, config: cfg.general.asTilingConfig()
             )
             sp = synced
-            // Spaces seen for the first time this launch take the layout the
-            // user last chose for them, else the `[[space]]` declaration, else
-            // the general default. A space that already had a layout keeps it:
+            // Workspaces seen for the first time this launch take the layout
+            // the user last chose for them, else the `[[space]]` declaration,
+            // else the general default. One that already had a layout keeps it:
             // this branch is seeding, not enforcement.
-            for sid in liveSids where !priorKeys.contains(sid) {
-                let label = sp.labels[sid] ?? ""
-                let kind = sp.overrides[sid]
-                    ?? cfg.spaces.first(where: { $0.label == label })?.layout
+            for id in live.subtracting(priorKeys) {
+                guard let ws = sp.workspaces[id] else { continue }
+                let kind = sp.overrides[ws.desktop]
+                    ?? cfg.spaces.first(where: { $0.label == ws.label })?.layout
                     ?? cfg.general.defaultLayout
-                self.convertLayout(&sp, sid: sid, to: kind)
+                self.convertLayout(&sp, workspace: id, to: kind)
+            }
+            // Every live desktop must have a workspace showing on it, and the
+            // failure if one does not is silent from end to end: a window that
+            // arrives there is dropped by `reconcileWorkspaces` because there
+            // is nowhere to put it, `evictOrderedOut` finds nothing held and
+            // returns early so closed windows never give their slots back, and
+            // `refreshDividerZones` skips the desktop so its grab zones and
+            // borders simply stop being drawn. Nothing throws and nothing is
+            // logged. `adoptDesktops` is the only thing that creates or removes
+            // a workspace and it maintains this by construction, so reaching
+            // here means that function has a hole in it — say so.
+            for sid in liveSids where sp.active[sid] == nil {
+                fputs("weftd: desktop \(sid) has no workspace — windows there will not be tiled\n", stderr)
             }
             self.spaces = sp
             let currentSids = Set(sp.currentByDisplay.values)
             let visible = world.windows.filter { !Set($0.spaces).isDisjoint(with: currentSids) }
-            let total = sp.layouts.values.reduce(0) { $0 + $1.windows.count }
+            let total = sp.workspaces.values.reduce(0) { $0 + $1.layout.windows.count }
             return (currentSids, visible, total)
         }
 
@@ -1549,12 +1591,12 @@ final class Daemon: @unchecked Sendable {
     /// window's half of the split for as long as the sweep took.
     private func forgetWindow(_ wid: WindowID) {
         updateSpaces { sp in
-            for (sid, layout) in sp.layouts {
-                switch layout {
+            for (id, ws) in sp.workspaces {
+                switch ws.layout {
                 case .tiling(let t) where t.windows.contains(wid):
-                    sp.layouts[sid] = .tiling(t.removing(wid))
+                    sp.setLayout(.tiling(t.removing(wid)), of: id)
                 case .float(let f) where f.windows.contains(wid):
-                    sp.layouts[sid] = .float(f.removing(wid))
+                    sp.setLayout(.float(f.removing(wid)), of: id)
                 default:
                     break
                 }
@@ -1582,9 +1624,7 @@ final class Daemon: @unchecked Sendable {
         let sp = readSpaces()
         let pids = allPids()
         let currentSids = Set(sp.currentByDisplay.values)
-        let wids = sp.layouts
-            .filter { currentSids.contains($0.key) }
-            .flatMap { $0.value.windows }
+        let wids = currentSids.flatMap { sp.layout(on: $0)?.windows ?? [] }
         observers.watch(
             pids: Array(Set(pids.values)),
             windows: wids.compactMap { wid in pids[wid].map { (wid, $0) } }
@@ -1725,7 +1765,7 @@ final class Daemon: @unchecked Sendable {
         let unmanaged = core.sync { self.unmanaged }
         for (wid, t0) in awaitedWindows {
             let tiled = applier.isBound(wid)
-                && sp.layouts.values.contains { $0.windows.contains(wid) }
+                && sp.workspaces.values.contains { $0.layout.windows.contains(wid) }
             guard tiled || unmanaged.contains(wid) else { continue }
             awaitedWindows.removeValue(forKey: wid)
             Trace.record(
@@ -1752,7 +1792,7 @@ final class Daemon: @unchecked Sendable {
         guard !SystemChecks.screenLocked() else { return }
         let sp = readSpaces()
         let visible = sp.visibleSpaces
-        let held = visible.flatMap { sp.layouts[$0]?.windows ?? [] }
+        let held = visible.flatMap { sp.layout(on: $0)?.windows ?? [] }
         guard !held.isEmpty else { return }
         let t = Trace.start("focus.visibility")
         let onScreen = WorldReader.onScreenWindowIDs()
@@ -1800,7 +1840,7 @@ final class Daemon: @unchecked Sendable {
         // sweep — on a two-display desktop that is most focus changes.
         let sp0 = readSpaces()
         guard let homeSID = sp0.visibleSpaces.first(where: {
-            sp0.layouts[$0]?.windows.contains(wid) == true
+            sp0.layout(on: $0)?.windows.contains(wid) == true
         }) else {
             // A float, a rule's `manage = false`, a quirk, a panel: known
             // to the last sweep and deliberately in no layout. Another
@@ -1821,15 +1861,15 @@ final class Daemon: @unchecked Sendable {
             return
         }
         updateSpaces { sp in
-            guard let layout = sp.layouts[homeSID] else { return }
+            guard let layout = sp.layout(on: homeSID) else { return }
             let sid = homeSID
             switch layout {
             case .tiling(let t):
                 guard t.windows.contains(wid) else { return }
-                sp.layouts[sid] = .tiling(t.focusing(wid))
+                sp.setLayout(.tiling(t.focusing(wid)), on: sid)
             case .float(let f):
                 guard f.windows.contains(wid) else { return }
-                sp.layouts[sid] = .float(f.focusing(wid))
+                sp.setLayout(.float(f.focusing(wid)), on: sid)
             }
         }
         bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
@@ -2038,8 +2078,8 @@ final class Daemon: @unchecked Sendable {
         // the window was then centred on a screen it was not on, so it jumped
         // monitors on its way to floating.
         let sp0 = readSpaces()
-        let home = sp0.layouts.first { $0.value.windows.contains(wid) }?.key
-            ?? SpaceControl.spacesForWindow(wid).first(where: { sp0.layouts[$0] != nil })
+        let home = sp0.workspaces.values.first { $0.layout.windows.contains(wid) }?.desktop
+            ?? SpaceControl.spacesForWindow(wid).first(where: { sp0.active[$0] != nil })
             ?? currentSID()
         if isFloating {
             // Snapshot where the user had it before the layout reclaims it,
@@ -2060,13 +2100,13 @@ final class Daemon: @unchecked Sendable {
                 if self.standardWindow[wid] == false { self.standardWindow[wid] = true }
                 if let sid = home {
                     self.updateSpaces { sp in
-                        switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
+                        switch sp.layout(on: sid) ?? self.resolvedInitialLayout(for: sid, in: sp) {
                         case .tiling(var t):
                             t = t.inserting(wid)
-                            sp.layouts[sid] = .tiling(t)
+                            sp.setLayout(.tiling(t), on: sid)
                         case .float(var f):
                             f = f.inserting(wid)
-                            sp.layouts[sid] = .float(f)
+                            sp.setLayout(.float(f), on: sid)
                         }
                     }
                 }
@@ -2086,13 +2126,13 @@ final class Daemon: @unchecked Sendable {
                 self.unmanaged.insert(wid)
                 if let sid = home {
                     self.updateSpaces { sp in
-                        switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
+                        switch sp.layout(on: sid) ?? self.resolvedInitialLayout(for: sid, in: sp) {
                         case .tiling(var t):
                             t = t.removing(wid)
-                            sp.layouts[sid] = .tiling(t)
+                            sp.setLayout(.tiling(t), on: sid)
                         case .float(var f):
                             f = f.removing(wid)
-                            sp.layouts[sid] = .float(f)
+                            sp.setLayout(.float(f), on: sid)
                         }
                     }
                 }
@@ -2130,7 +2170,7 @@ final class Daemon: @unchecked Sendable {
         let sp = readSpaces()
         // Which space holds it: layouts first (cheap), then the WindowServer
         // for windows weft does not manage.
-        var home: SpaceID? = sp.layouts.first { $0.value.windows.contains(wid) }?.key
+        var home: SpaceID? = sp.workspaces.values.first { $0.layout.windows.contains(wid) }?.desktop
         if home == nil {
             home = WorldReader.snapshot().windows
                 .first { $0.id == wid }?.spaces.first
@@ -2139,7 +2179,7 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: false, error: "no such window \(wid)")
         }
         if !sp.currentByDisplay.values.contains(sid) {
-            let label = sp.labels[sid] ?? "\(sid)"
+            let label = sp.workspace(on: sid)?.label ?? "\(sid)"
             let switched = handleSpace(.focus(label))
             guard switched.ok else { return switched }
         }
@@ -2147,12 +2187,12 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: false, error: "window \(wid) has no process")
         }
         updateSpaces { s in
-            guard let layout = s.layouts[sid] else { return }
+            guard let layout = s.layout(on: sid) else { return }
             switch layout {
             case .tiling(let t) where t.windows.contains(wid):
-                s.layouts[sid] = .tiling(t.focusing(wid))
+                s.setLayout(.tiling(t.focusing(wid)), on: sid)
             case .float(let f) where f.windows.contains(wid):
-                s.layouts[sid] = .float(f.focusing(wid))
+                s.setLayout(.float(f.focusing(wid)), on: sid)
             default:
                 break
             }
@@ -2348,11 +2388,11 @@ final class Daemon: @unchecked Sendable {
             let sid = self.spaces.currentSpace
             let tile = self.currentConfig().general.asTilingConfig()
             let uScreen = self.usableScreen(for: sid)
-            switch sid.flatMap({ self.spaces.layouts[$0] }) ?? .tiling(Tree()) {
+            switch sid.flatMap({ self.spaces.layout(on: $0) }) ?? .tiling(Tree()) {
             case .tiling(let tree):
                 let cur = State(tree: tree, screen: uScreen, config: tile)
                 let (n, m) = Reducer.reduce(cur, command)
-                if let sid { self.spaces.layouts[sid] = .tiling(n.tree) }
+                if let sid { self.spaces.setLayout(.tiling(n.tree), on: sid) }
                 return m
             case .float(let fl):
                 // Live SLS frames, not `remembered`: the user has been moving
@@ -2360,7 +2400,7 @@ final class Daemon: @unchecked Sendable {
                 // definition and directional focus would score against it.
                 let live = self.liveFrames(of: fl.windows)
                 let (n, m) = Reducer.reduceFloat(fl, command: command, frames: live)
-                if let sid { self.spaces.layouts[sid] = .float(n) }
+                if let sid { self.spaces.setLayout(.float(n), on: sid) }
                 return m
             }
         }
@@ -2399,10 +2439,11 @@ final class Daemon: @unchecked Sendable {
         let sp = readSpaces()
         switch sub {
         case .focus(let target):
-            guard let sid = sp.resolveSpace(target) else {
-                return IPCResponse(ok: false, error: "unknown space '\(target)' (labels: \(sp.labels.values.sorted().joined(separator: ", ")))")
+            guard let id = sp.resolveWorkspace(target), let sid = sp.desktop(of: id) else {
+                let known = sp.workspaces.values.map { $0.label }.sorted().joined(separator: ", ")
+                return IPCResponse(ok: false, error: "unknown space '\(target)' (labels: \(known))")
             }
-            let label = sp.labels[sid] ?? "\(sid)"
+            let label = sp.label(of: id) ?? "\(sid)"
             // From `displays`, read from the WindowServer a line above, not
             // from `sp` — weft's cached idea of where the user is.
             //
@@ -2525,14 +2566,14 @@ final class Daemon: @unchecked Sendable {
                     + "Shortcuts → Mission Control → 'Switch to Desktop \(number)'."
             )
         case .moveWindow(let target, let widOpt, let follow):
-            guard let sid = sp.resolveSpace(target) else {
+            guard let id = sp.resolveWorkspace(target), let sid = sp.desktop(of: id) else {
                 return IPCResponse(ok: false, error: "unknown space '\(target)'")
             }
             guard let wid = widOpt ?? activeWindowID() else {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
             return moveWindow(
-                wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)", follow: follow)
+                wid, toSpace: sid, label: sp.label(of: id) ?? "\(sid)", follow: follow)
         case .label(let name):
             guard !name.isEmpty else {
                 return IPCResponse(ok: false, error: "usage: space label <name>")
@@ -2540,7 +2581,9 @@ final class Daemon: @unchecked Sendable {
             guard let sid = currentSID() else {
                 return IPCResponse(ok: false, error: "no current space")
             }
-            updateSpaces { $0.labels[sid] = name }
+            updateSpaces { sp in
+                if let id = sp.active[sid] { sp.workspaces[id]?.label = name }
+            }
             saveLabels()
             return IPCResponse(ok: true, output: "space \(sid) labelled '\(name)'")
         case .layout(let kind):
@@ -2572,7 +2615,7 @@ final class Daemon: @unchecked Sendable {
             forgiveQuirks()
             syncFromSnapshot()
             updateSpaces { sp in
-                convertLayout(&sp, sid: sid, to: targetKind)
+                if let id = sp.active[sid] { convertLayout(&sp, workspace: id, to: targetKind) }
                 // Remember that this was asked for, not derived. Without the
                 // record the next config reload, the next time the space
                 // empties, and the next restart all quietly undo it.
@@ -2718,17 +2761,18 @@ final class Daemon: @unchecked Sendable {
         let targetScreen = usableScreen(for: sid)
         let tile = currentConfig().general.asTilingConfig()
         updateSpaces { sp in
-            for key in sp.layouts.keys where key != sid {
-                switch sp.layouts[key] {
+            let destination = sp.active[sid]
+            for (id, ws) in sp.workspaces where id != destination {
+                switch ws.layout {
                 case .tiling(let t) where t.windows.contains(wid):
-                    sp.layouts[key] = .tiling(t.removing(wid))
+                    sp.setLayout(.tiling(t.removing(wid)), of: id)
                 case .float(let f) where f.windows.contains(wid):
-                    sp.layouts[key] = .float(f.removing(wid))
+                    sp.setLayout(.float(f.removing(wid)), of: id)
                 default:
                     break
                 }
             }
-            switch sp.layouts[sid] ?? self.resolvedInitialLayout(for: sid, in: sp) {
+            switch sp.layout(on: sid) ?? self.resolvedInitialLayout(for: sid, in: sp) {
             case .tiling(var t):
                 // Split against the TARGET display's rect: a window landing
                 // on a 3840-wide monitor should split it side by side even
@@ -2739,11 +2783,11 @@ final class Daemon: @unchecked Sendable {
                 // so the window the user just sent lands behind one they were
                 // not thinking about.
                 if follow { t = t.focusing(wid) }
-                sp.layouts[sid] = .tiling(t)
+                sp.setLayout(.tiling(t), on: sid)
             case .float(var f):
                 if !f.windows.contains(wid) { f = f.inserting(wid) }
                 if follow { f = f.focusing(wid) }
-                sp.layouts[sid] = .float(f)
+                sp.setLayout(.float(f), on: sid)
             }
         }
         if let cur = currentSID(), cur != sid {
@@ -2968,7 +3012,7 @@ final class Daemon: @unchecked Sendable {
         if sp.focusedDisplay == uuid {
             return IPCResponse(ok: true, output: "already on display \(describe(target))")
         }
-        let label = sp.labels[sid] ?? "\(sid)"
+        let label = sp.workspace(on: sid)?.label ?? "\(sid)"
         if let focus = takeFocus(display: uuid, showing: sid) {
             bus.emit(stateChangedEvent())
             return IPCResponse(ok: true, output: "focused \(focus) on \(label)")
@@ -2987,7 +3031,7 @@ final class Daemon: @unchecked Sendable {
     /// next command and the next window land on the right monitor, and puts
     /// the pointer there so the next click agrees.
     private func takeFocus(display uuid: String, showing sid: SpaceID) -> WindowID? {
-        if let focus = readSpaces().layouts[sid]?.focus, let pid = pid(of: focus) {
+        if let focus = readSpaces().layout(on: sid)?.focus, let pid = pid(of: focus) {
             // Activating the window is the display switch; noteFocusedWindow
             // inside focusAndWarp records the display it lives on.
             focusAndWarp(window: focus, pid: pid)
@@ -3026,7 +3070,8 @@ final class Daemon: @unchecked Sendable {
         if displayOf(window: wid) == uuid {
             return IPCResponse(ok: true, output: "window \(wid) is already on that display")
         }
-        let moved = moveWindow(wid, toSpace: sid, label: sp.labels[sid] ?? "\(sid)")
+        let moved = moveWindow(
+            wid, toSpace: sid, label: sp.workspace(on: sid)?.label ?? "\(sid)")
         guard moved.ok, follow else { return moved }
         // Follow the window rather than the display's previous focus: the
         // window we just sent is the one the user is thinking about.
@@ -3250,23 +3295,24 @@ final class Daemon: @unchecked Sendable {
         var changed = false
         var clearedOverride = false
         for decl in cfg.spaces {
-            guard let sid = sp.id(forLabel: decl.label),
-                  let cur = sp.layouts[sid]
+            guard let id = sp.id(forLabel: decl.label),
+                  let ws = sp.workspaces[id]
             else { continue }  // unknown label yet (space not visited) — applied on first sync
             // Editing `layout =` in weft.toml is an instruction and wins; a
             // reload that did not touch this space's declaration is not, and
             // must not undo a `space layout` the user ran since. Reloads fire
             // on every save of the file, so without this every unrelated edit
             // — a keybind, a rule, a gap — snapped every space back.
+            let sid = ws.desktop
             let declarationChanged = previous[decl.label] != decl.layout
             if !declarationChanged, sp.overrides[sid] != nil { continue }
             if declarationChanged, sp.overrides[sid] != nil {
                 updateSpaces { $0.overrides.removeValue(forKey: sid) }
                 clearedOverride = true
             }
-            if cur.kind == decl.layout { continue }
+            if ws.layout.kind == decl.layout { continue }
             updateSpaces { sp in
-                convertLayout(&sp, sid: sid, to: decl.layout)
+                convertLayout(&sp, workspace: id, to: decl.layout)
             }
             changed = true
         }
@@ -3280,16 +3326,18 @@ final class Daemon: @unchecked Sendable {
     /// a *change* between loads counts as the user re-deciding in the file.
     private var lastDeclaredLayouts: [String: LayoutKind] = [:]
 
-    /// Convert one space's layout preserving membership. INTO float captures
-    /// live SLS frames as the remembered arrangement.
-    private func convertLayout(_ sp: inout SpaceState, sid: SpaceID, to kind: LayoutKind) {
-        let cur = sp.layouts[sid] ?? .tiling(Tree())
+    /// Convert one workspace's layout preserving membership. INTO float
+    /// captures live SLS frames as the remembered arrangement.
+    private func convertLayout(
+        _ sp: inout SpaceState, workspace id: WorkspaceID, to kind: LayoutKind
+    ) {
+        let cur = sp.workspaces[id]?.layout ?? .tiling(Tree())
         guard cur.kind != kind else { return }
         switch (kind, cur) {
         case (.bsp, .tiling), (.float, .float):
             break  // already that kind (guarded above; listed for exhaustiveness)
         case (.bsp, .float(let f)):
-            sp.layouts[sid] = .tiling(treeFromOrder(f.order, focus: f.focus))
+            sp.setLayout(.tiling(treeFromOrder(f.order, focus: f.focus)), of: id)
         case (.float, .tiling(let t)):
             // The screen comes from `sp`, never from `readSpaces()`. Callers
             // run this inside `updateSpaces`, which holds `spaces` for
@@ -3297,10 +3345,10 @@ final class Daemon: @unchecked Sendable {
             // violation, and Swift aborts the daemon on the spot. That is the
             // SIGABRT in `usableScreen(for:)` under `applyDeclaredLayouts`,
             // and `space layout float` walked into the same one.
-            let screen = usableScreen(onDisplay: sp.displayBySpace[sid])
-            sp.layouts[sid] = .float(floatFromWindows(
+            let screen = usableScreen(onDisplay: sp.display(of: id))
+            sp.setLayout(.float(floatFromWindows(
                 t.windows, actuals: conversionFrames(of: t.windows, screen: screen), focus: t.focus
-            ))
+            )), of: id)
         }
     }
 
@@ -3366,7 +3414,7 @@ final class Daemon: @unchecked Sendable {
 
     private func saveLabels() {
         let sp = readSpaces()
-        let names = sp.persistedNames(sids: Array(sp.labels.keys))
+        let names = sp.persistedNames()
         let url = Daemon.labelsFile()
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
@@ -3448,12 +3496,12 @@ final class Daemon: @unchecked Sendable {
             var windowSpaces: [WindowID: [SpaceID]] = [:]
             let spaces = sp.order.compactMap { sid -> SpaceStatus? in
                 guard let display = sp.displayBySpace[sid] else { return nil }
-                let label = sp.labels[sid] ?? "\(sid)"
-                let layout = sp.layouts[sid]?.kind
+                let label = sp.workspace(on: sid)?.label ?? "\(sid)"
+                let layout = sp.layout(on: sid)?.kind
                     ?? sp.overrides[sid]
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
-                let windows = sp.layouts[sid]?.windows.sorted() ?? []
+                let windows = sp.layout(on: sid)?.windows.sorted() ?? []
                 for wid in windows { windowSpaces[wid, default: []].append(sid) }
                 return SpaceStatus(
                     id: sid,
@@ -3588,8 +3636,8 @@ final class Daemon: @unchecked Sendable {
             let sp = readSpaces()
             let cfg = currentConfig()
             return emit(world.spaces.map { s in
-                let label = sp.labels[s.id] ?? "\(s.id)"
-                let layout = sp.layouts[s.id]?.kind
+                let label = sp.workspace(on: s.id)?.label ?? "\(s.id)"
+                let layout = sp.layout(on: s.id)?.kind
                     ?? sp.overrides[s.id]
                     ?? cfg.spaces.first(where: { $0.label == label })?.layout
                     ?? cfg.general.defaultLayout
@@ -3597,7 +3645,7 @@ final class Daemon: @unchecked Sendable {
                     id: s.id,
                     label: label,
                     layout: layout.rawValue,
-                    windows: sp.layouts[s.id]?.windows.sorted() ?? s.windows,
+                    windows: sp.layout(on: s.id)?.windows.sorted() ?? s.windows,
                     current: s.isCurrent,
                     display: s.displayUUID
                 )
@@ -3784,7 +3832,7 @@ final class Daemon: @unchecked Sendable {
         guard !DragMove.isCarrying else { return }
         let screen = self.usableScreen(for: sid)
         let config = currentConfig().general.asTilingConfig()
-        guard let spaceLayout = readSpaces().layouts[sid] else { return }
+        guard let spaceLayout = readSpaces().layout(on: sid) else { return }
         switch spaceLayout {
         case .tiling(let tree):
             let frames = Trace.time("layout", detail: "\(tree.windows.count) window(s)") {
