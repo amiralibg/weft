@@ -1,7 +1,8 @@
 # Workspaces — weft's own, inside macOS's
 
-**Status:** plan. Nothing here is built. S9 in `spikes/RESULTS.md` establishes
-that the mechanism works; this says what to build on it.
+**Status:** Phases 1 and 2 are built; 3 onwards are a plan. S9 in
+`spikes/RESULTS.md` establishes that the mechanism works. Sections marked as
+built describe what is in the tree rather than what was proposed.
 
 ## The problem, stated once
 
@@ -181,17 +182,138 @@ failures. The sweep checks it and logs when it does not hold.
 
 ## Park and unpark
 
+Built in Phase 2; this is `Sources/WeftPlatform/Parker.swift` and
+`ParkLedger.swift`. Nothing calls `park` — under the identity mapping no
+workspace is ever hidden — so it is the primitive Phase 3 turns on. The
+*recovery* is live already, because a path whose first run is the first crash
+that needs it has not been shown to work.
+
 ```
-park(wid)   SLSMoveWindow(cid, wid, bottomRightOf(display))
-unpark(wid) SLSMoveWindow(cid, wid, itsTileFrame)
+park(wid)   SLSMoveWindow(cid, wid, Parker.spot(in: display))
+unpark(wid) SLSMoveWindow(cid, wid, the frame the ledger recorded)
 ```
 
 Both pure WindowServer, ~0.2 ms, and the application is never told — which is
 what makes it uncloseable to clamping. S4's nudge caveat does not bite: a park
 and an unpark that both go through `SLSMoveWindow` leave the app's own idea of
 its position untouched throughout, so it is consistent again the moment the
-window is back. AX is needed only when the layout actually changed while the
-workspace was hidden, and that is the ordinary `applyFrames` path.
+window is back. `AXApplier.restore` keeps its nudge because it is the mixed
+case, SkyLight out and Accessibility back. AX is needed only when the layout
+actually changed while the workspace was hidden, and that is the ordinary
+`applyFrames` path.
+
+### The ledger
+
+`~/.config/weft/parked.json`, beside `labels.json` and `layouts.json`.
+
+```json
+{
+  "version": 1,
+  "parked": [
+    {
+      "wid": 4321,
+      "frame":    { "x": 0, "y": 38, "width": 1728, "height": 1079 },
+      "parkedAt": { "x": 1727, "y": 1116 }
+    }
+  ]
+}
+```
+
+An array of records rather than a `[WindowID: …]` dictionary, because
+`JSONEncoder` cannot key a JSON object by `UInt32` and emits a flat array of
+alternating keys and values instead — a shape nobody would choose for the one
+file that has to be readable by hand after a crash.
+
+`frame` is the window's **real** frame at park time, read from
+`SLSGetWindowBounds` inside `park` and never handed in by the caller. An app
+that refuses its tile is exactly the app whose restore would otherwise put it
+somewhere it has never been, and after a crash there is nothing else left to
+restore from: trees are not persisted, and a float workspace's arrangement
+belongs to the user.
+
+`parkedAt` is the answer to recycled window ids. The WindowServer hands ids out
+again, and a daemon that crashed never ran `forgetWindow`, so an entry read at
+startup may name a window weft never touched. Nothing is moved until the
+window's live bounds are compared against the corner the entry records — a
+window that is not sitting there is not the window that was parked. That check
+is deliberately not a hook into `forgetWindow`: that runs in a loop inside
+`evictOrderedOut`, so pruning the ledger there would put a synchronous fsync on
+a hot path, and it could not help in the one case the file exists for.
+
+`version` earns its place for the same reason. `labels.json` and `layouts.json`
+can be thrown away when they do not parse; throwing this one away strands
+windows, so a build meeting a file it does not understand has to be able to say
+so rather than read it as "nothing is parked". For the same reason `load`
+distinguishes an absent file from an unreadable one — collapsing the two is
+precisely how a stranded window becomes silent.
+
+### Where the write sits
+
+**Before the move, always.**
+
+```
+park(wids, on: display)
+  1. read each window's real frame      SLSGetWindowBounds, ~0.03 ms each
+  2. encode the whole ledger            the current set, not an append
+  3. write to parked.json.tmp
+  4. fsync(tmp)                         ← survives the process dying
+  5. rename(tmp → parked.json)          ← a reader sees old or new, never half
+  6. fsync(the directory)               ← survives the machine dying
+  7. SLSMoveWindow for each wid         ~0.2 ms each
+```
+
+A failure anywhere in 2–6 throws and **moves nothing**: a workspace that cannot
+write its ledger does not get hidden. Step 6 is the only one that is about a
+panic rather than a crash, and it is one syscall.
+
+Unpark is the mirror — the moves land first, the ledger is rewritten after —
+because dropping an entry and then failing to move the window is the one
+ordering that produces a window off screen with no record of it. A crash the
+other way round leaves an entry for a window that is already home, and the
+`parkedAt` check discards it on the next read. In both directions the disk is
+pessimistic, which is the rule: a stale entry over a stranded window.
+
+Writing is per set, not per window: one ledger write and then N moves. A
+workspace switch is a park and an unpark, so it is two writes and four fsyncs —
+the only part of a switch that is not microseconds, and unmeasured so far,
+against the ~500 ms of animation a native desktop switch costs today. Worth
+timing when Phase 3 wires it.
+
+### `rescue()` does not overlap with this
+
+`rescue()` heals a window that is off **every** display, tested with
+`Frame.intersects`. A parked window's origin is one point inside the display's
+bottom-right corner, so it intersects by that point and `rescue()` skips it.
+That is not a gap that could be tuned away: the same point is what keeps
+`kCGWindowIsOnscreen` true and keeps `evictOrderedOut` from reading a hidden
+workspace as a set of closed windows, which is the measurement the whole design
+rests on.
+
+They also heal different things. `rescue()` puts a window at its **computed**
+frame for the current space; the ledger puts it at the **real** frame it had,
+on whatever desktop it was on. Neither substitutes for the other, and they are
+not merged.
+
+### What strands a window, and what fails loudly
+
+| when | what happens | outcome |
+| --- | --- | --- |
+| the ledger write fails (disk full, permissions) | `park` throws, moves nothing | loud |
+| crash between the write and the moves | ledger names windows still at home; `parkedAt` discards them | clean |
+| crash partway through the moves | ledger covers all of them; the parked ones are restored, the rest discarded | clean |
+| crash while parked | the case the file exists for | clean |
+| the app moves its own window while it is hidden | `parkedAt` misses, entry dropped, window left where the app put it | clean |
+| `SLSMoveWindow` refuses a park | the entry is taken back out — while the daemon runs it is the one stale entry that is not safe | loud |
+| `SLSMoveWindow` refuses an unpark | logged, the entry is kept, the next launch tries again | loud |
+| the ledger cannot be read | logged, the file is left on disk for a later build, nothing is moved | loud |
+| crash while parked **and** `parked.json` lost | the windows sit at the corner and nothing can find them | **strands** |
+| a display is unplugged while a workspace is parked on it | the recorded frame names a display that is gone | Phase 4 |
+
+The last stranding row is the residual, and it has no answer in Phase 2.
+Widening `rescue()` to treat a few points of visible area as debris would close
+it; that is deliberately not done here, because Phase 4 already owns the
+neighbouring case — a display going away unparks whatever is parked on it — and
+this phase changes no shipped command's behaviour.
 
 ## Configuration
 
@@ -241,10 +363,15 @@ Each is shippable and reversible on its own.
    wire is deliberately unchanged — `query spaces` and `query bar-state` still
    report native space ids, because weft-bar decodes them as `UInt64` and hands
    them straight back to `space focus`.
-2. **Park and unpark in `WeftPlatform`**, with the crash-safe ledger: every
-   park writes `{wid: real frame}` to disk before it moves anything, and
-   startup unparks whatever the ledger holds before the first sweep. `weftctl
-   rescue` already exists for the rest.
+2. **Park and unpark in `WeftPlatform`**, with the crash-safe ledger. **Done**
+   — see the Park and unpark section above. Three commits: the file format,
+   the two moves, and the startup unpark. Two things came out of it. `weftctl
+   rescue` turns out **not** to be "already there for the rest": it cannot see
+   a parked window at all, because the point of itself that a parked window
+   keeps on screen is the same point `rescue()` reads as "this window is on a
+   display". And a ledger entry needs to record the corner as well as the
+   frame, because a recycled window id otherwise gets dragged to a dead
+   window's place.
 3. **Many workspaces on one desktop**, behind `workspaces = "virtual"`.
    `space focus` and `space move-window` resolve to a workspace first and a
    desktop second.
@@ -266,9 +393,10 @@ Each is shippable and reversible on its own.
 - **A long park.** If Electron throttles rendering to nothing after an hour off
   screen, showing a workspace could mean a visible repaint stall. Phase 3 needs
   a soak before it is a default.
-- **The crash window.** Between a park and the ledger write there is no state
-  on disk. Write the ledger first, always, and accept a stale entry over a
-  stranded window.
+- **The crash window.** Closed in Phase 2: the ledger is written and fsynced
+  before anything moves, and a write that fails moves nothing. What is left is
+  a crash while parked with `parked.json` itself gone, which nothing can
+  recover from — see the table above.
 - **Two sources of truth for membership.** SLS for the desktop, weft for the
   workspace. Every bug in this design will live in that seam. It is one pure
   function with seven tests, two of which describe several workspaces on one
