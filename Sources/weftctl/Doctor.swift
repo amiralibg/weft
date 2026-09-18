@@ -46,15 +46,12 @@ public enum Doctor {
     /// seven-desktop machine and used on a three-desktop one leaves four names
     /// unassigned — and every keybind and rule naming them fails quietly.
     private static func reportSpaces(_ validated: ValidatedConfig) {
-        struct LiveSpace: Decodable {
-            var label: String
-        }
         guard let response = IPCClient.sendCommand(
                   path: IPCPaths.socketPath(), command: "query spaces"
               ),
               response.ok,
               let data = response.output?.data(using: .utf8),
-              let live = try? JSONDecoder().decode([LiveSpace].self, from: data)
+              let live = try? JSONDecoder().decode([SpaceStatus].self, from: data)
         else {
             print("    - Desktops: weftd is not running, cannot check the space labels")
             return
