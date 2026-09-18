@@ -315,3 +315,120 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(s1.layouts[2]?.windows == [100])
     #expect(fresh == [100])
 }
+
+// MARK: - The workspace seam
+//
+// `reconcileWorkspaces` is where the two owners of membership meet: SLS says
+// which desktop a window is on, weft says which workspace within it. These
+// tests are the specification of that one rule, and two of them describe a
+// configuration nothing creates yet — several workspaces on one desktop —
+// because the whole point of writing the rule now is that it is already right
+// when something does.
+
+private let ws1 = WorkspaceID(1)
+private let ws2 = WorkspaceID(2)
+private let ws3 = WorkspaceID(3)
+
+/// One workspace per desktop — today's model, and the thing Phase 1 must not
+/// change. Whatever SLS reports is what comes out, unchanged.
+@Test func identityMappingReproducesWhatSLSReports() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [3], 12: [5]],
+        membership: [ws1: [10, 11], ws2: [12]],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    #expect(out == [ws1: [10, 11], ws2: [12]])
+}
+
+/// The reconciliation rule's second half. A window weft filed on desktop 3
+/// that SLS now reports on desktop 5 has been moved by something weft did not
+/// do — Mission Control, a rule, the app itself — and it joins whatever is
+/// showing where it landed.
+@Test func aWindowThatChangedDesktopJoinsTheArrivingDesktopsActiveWorkspace() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws1: [10], ws2: []],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    // It joined 5's workspace, and left 3's by simply not being reported there.
+    #expect(out[ws2] == [10])
+    #expect(out[ws1] == nil)
+}
+
+/// The reconciliation rule's first half, and the one that makes a hidden
+/// workspace possible at all.
+///
+/// Two workspaces on desktop 3, `ws2` showing. SLS reports every window on
+/// desktop 3 either way — a parked window is still on its desktop, and still
+/// in the on-screen window list (S9) — so without this half `ws1`'s windows
+/// would be swept into `ws2` on the first sweep after they were hidden, and a
+/// workspace switch would be a one-way trip.
+@Test func aHiddenWorkspaceKeepsItsWindowsWhileAnotherIsShowing() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [3], 12: [3]],
+        membership: [ws1: [10, 11], ws2: [12]],
+        desktopOf: [ws1: 3, ws2: 3],
+        activeOn: [3: ws2]
+    )
+    #expect(out[ws1] == [10, 11])
+    #expect(out[ws2] == [12])
+}
+
+/// A window that is new to a desktop holding several workspaces goes to the
+/// one showing, not to the first one that happens to be on that desktop.
+@Test func aNewWindowLandsInTheShowingWorkspaceNotJustAnyOnThatDesktop() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 99: [3]],
+        membership: [ws1: [10], ws2: []],
+        desktopOf: [ws1: 3, ws2: 3],
+        activeOn: [3: ws2]
+    )
+    #expect(out[ws1] == [10])
+    #expect(out[ws2] == [99])
+}
+
+/// A sticky window is on every desktop at once, so it is resolved once per
+/// desktop and holds a slot in a workspace on each.
+@Test func aStickyWindowLandsInOneWorkspacePerDesktop() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3, 5]],
+        membership: [:],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2]
+    )
+    #expect(out == [ws1: [10], ws2: [10]])
+}
+
+/// A desktop with no active workspace has nowhere to put what arrives, and
+/// drops it silently — there is nothing else a pure function can do.
+///
+/// This is the failure the caller has to make impossible: `evictOrderedOut`
+/// and `refreshDividerZones` both give up quietly on a desktop whose lookup
+/// misses, so the symptom would be closed windows never giving their slot back
+/// and borders vanishing, with nothing in the log. Every live desktop gets an
+/// active workspace before this is ever called.
+@Test func aDesktopWithNoActiveWorkspaceDropsWhatArrivesOnIt() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [3], 11: [7]],
+        membership: [ws1: [10]],
+        desktopOf: [ws1: 3],
+        activeOn: [3: ws1]
+    )
+    #expect(out == [ws1: [10]])
+}
+
+/// A workspace whose desktop weft no longer knows about contributes nothing —
+/// its windows are reconciled against the desktop SLS puts them on, like any
+/// others. An unplugged display must not be able to hold windows hostage in a
+/// workspace that can never be shown again.
+@Test func aWorkspaceWithNoDesktopHoldsNothingBack() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws3: [10], ws2: []],
+        desktopOf: [ws2: 5],
+        activeOn: [5: ws2]
+    )
+    #expect(out == [ws2: [10]])
+}
