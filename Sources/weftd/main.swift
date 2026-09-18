@@ -1929,17 +1929,31 @@ final class Daemon: @unchecked Sendable {
         return filters
     }
 
+    /// The window a command means when it says "the focused window".
+    ///
+    /// Not the layout's focus, which is where every one of these verbs used to
+    /// start. `SpaceLayout.focus` can only ever name a window that layout
+    /// holds, so the moment the user clicks into a float it goes on naming the
+    /// *tile* they were in before — and `float toggle`, `space move-window`
+    /// and `move display` then quietly operated on that tile. From the user's
+    /// side the float could not be acted on at all: the one verb that would
+    /// have tiled it again did something else, to a window somewhere else, and
+    /// reported success.
+    ///
+    /// So the system's focus comes first, and the layout's is the fallback.
+    /// `systemFocusLocked` is what the observers recorded and costs nothing;
+    /// the AX read behind `FocusedWindow.current` covers an event weft missed
+    /// and is only ever reached here, never on the tiling path. Both are
+    /// checked against the WindowServer before they are believed, so a window
+    /// that has since closed or moved off screen cannot be acted on.
     private func activeWindowID() -> WindowID? {
-        if let f = currentLayout().focus { return f }
-        if let frontApp = NSWorkspace.shared.frontmostApplication {
-            let pid = frontApp.processIdentifier
-            let world = WorldReader.snapshot()
-            let floats = core.sync { self.manualFloat }
-            if let w = world.windows.first(where: { $0.pid == pid && floats.contains($0.id) }) {
-                return w.id
-            }
+        let visible = Set(readSpaces().visibleSpaces)
+        func showing(_ wid: WindowID) -> Bool {
+            !Set(SpaceControl.spacesForWindow(wid)).isDisjoint(with: visible)
         }
-        return nil
+        if let sys = systemFocusLock.withLock({ systemFocusLocked }), showing(sys) { return sys }
+        if let sys = FocusedWindow.current(), showing(sys) { return sys }
+        return currentLayout().focus
     }
 
     private func handleFloat(_ mode: StickyMode) -> IPCResponse {
@@ -2449,19 +2463,7 @@ final class Daemon: @unchecked Sendable {
             guard let sid = sp.resolveSpace(target) else {
                 return IPCResponse(ok: false, error: "unknown space '\(target)'")
             }
-            let wid: WindowID
-            if let w = widOpt {
-                wid = w
-            } else if let f = currentLayout().focus {
-                wid = f
-            } else if let f = FocusedWindow.current() {
-                // No layout focus does not mean nothing is focused: a window a
-                // rule unmanaged is in no layout, so it can never be the
-                // layout's focus, and "send this window to another desktop"
-                // came back "nothing focused" for exactly the windows most
-                // likely to need sending. Ask the system what is in front.
-                wid = f
-            } else {
+            guard let wid = widOpt ?? activeWindowID() else {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
             return moveWindow(
@@ -2770,14 +2772,8 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func handleSticky(_ widOpt: WindowID?, _ mode: StickyMode) -> IPCResponse {
-        let wid: WindowID
-        if let w = widOpt {
-            wid = w
-        } else {
-            guard let f = currentLayout().focus else {
-                return IPCResponse(ok: false, error: "nothing focused")
-            }
-            wid = f
+        guard let wid = widOpt ?? activeWindowID() else {
+            return IPCResponse(ok: false, error: "nothing focused")
         }
         let on: Bool
         switch mode {
@@ -2955,11 +2951,11 @@ final class Daemon: @unchecked Sendable {
         guard let sid = sp.currentByDisplay[uuid] else {
             return IPCResponse(ok: false, error: "display \(describe(target)) has no current space")
         }
-        // Same fallback `space move-window` uses: a float, or a window a rule
-        // unmanaged, is in no layout and can never be the layout's focus — so
-        // "send this window to the other monitor" answered "nothing focused"
-        // for exactly the windows most likely to need sending.
-        guard let wid = currentLayout().focus ?? FocusedWindow.current() else {
+        // The same resolution `space move-window` uses: a float, or a window
+        // a rule unmanaged, is in no layout and can never be the layout's
+        // focus — so "send this window to the other monitor" acted on some
+        // tile behind it, for exactly the windows most likely to need sending.
+        guard let wid = activeWindowID() else {
             return IPCResponse(ok: false, error: "nothing focused")
         }
         if displayOf(window: wid) == uuid {
