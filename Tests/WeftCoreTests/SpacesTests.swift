@@ -504,3 +504,49 @@ private let ws3 = WorkspaceID(3)
     )
     #expect(out == [ws2: [10]])
 }
+
+@Test func adoptDesktopsVirtualHostsDeclaredWorkspacesOnAnchor() {
+    var state = SpaceState()
+    state.adoptDesktops(
+        [10, 20],
+        names: ["term", "web", "code", "chat"],
+        mode: .virtual,
+        anchor: 1,
+        anchorCount: 4
+    )
+
+    #expect(state.workspaces.count == 5)
+    #expect(state.wsOrder.count == 5)
+
+    let w1 = state.wsOrder[0]
+    let w2 = state.wsOrder[1]
+    let w3 = state.wsOrder[2]
+    let w4 = state.wsOrder[3]
+    let w5 = state.wsOrder[4]
+
+    #expect(state.workspaces[w1]?.label == "term")
+    #expect(state.workspaces[w1]?.desktop == 10)
+    #expect(state.workspaces[w2]?.label == "web")
+    #expect(state.workspaces[w2]?.desktop == 10)
+    #expect(state.workspaces[w3]?.label == "code")
+    #expect(state.workspaces[w3]?.desktop == 10)
+    #expect(state.workspaces[w4]?.label == "chat")
+    #expect(state.workspaces[w4]?.desktop == 10)
+
+    #expect(state.workspaces[w5]?.label == "5")
+    #expect(state.workspaces[w5]?.desktop == 20)
+
+    #expect(state.active[10] == w1)
+    #expect(state.active[20] == w5)
+
+    #expect(state.resolveWorkspace("term") == w1)
+    #expect(state.resolveWorkspace("web") == w2)
+    #expect(state.resolveWorkspace("1") == w1)
+    #expect(state.resolveWorkspace("4") == w4)
+    #expect(state.resolveWorkspace("5") == w5)
+
+    state.active[10] = w2
+    state.adoptDesktops([10, 20], names: nil, mode: .virtual, anchor: 1, anchorCount: 4)
+    #expect(state.active[10] == w2)
+    #expect(state.wsOrder == [w1, w2, w3, w4, w5])
+}

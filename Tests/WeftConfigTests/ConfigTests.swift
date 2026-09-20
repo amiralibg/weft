@@ -574,3 +574,34 @@ private func exampleText() throws -> String {
         try loadConfig("[general]\nenhanced-ui-exempt = \"com.example.reader\"\n")
     }
 }
+
+@Test func parsesWorkspacesAndWorkspaceAnchor() throws {
+    let cfgNative = try loadConfig("[general]\ninner-gap = 8\n")
+    #expect(cfgNative.general.workspaces == .native)
+    #expect(cfgNative.general.workspaceAnchor == 1)
+    #expect(cfgNative.general.followSpaceRules == false)
+
+    let cfgVirtual = try loadConfig("""
+        [general]
+        workspaces = "virtual"
+        workspace-anchor = 2
+        """)
+    #expect(cfgVirtual.general.workspaces == .virtual)
+    #expect(cfgVirtual.general.workspaceAnchor == 2)
+    // Under virtual, follow-space-rules defaults to true when omitted
+    #expect(cfgVirtual.general.followSpaceRules == true)
+
+    let cfgExplicitFalse = try loadConfig("""
+        [general]
+        workspaces = "virtual"
+        follow-space-rules = false
+        """)
+    #expect(cfgExplicitFalse.general.followSpaceRules == false)
+
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nworkspaces = \"magic\"\n")
+    }
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nworkspace-anchor = 0\n")
+    }
+}

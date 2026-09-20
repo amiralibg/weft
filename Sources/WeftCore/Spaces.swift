@@ -11,6 +11,13 @@ public enum LayoutKind: String, Codable, Sendable, Equatable {
     case float
 }
 
+/// Whether workspaces map 1:1 to native macOS Spaces, or multiple virtual
+/// workspaces are hosted on an anchor desktop.
+public enum WorkspacesMode: String, Codable, Sendable, Equatable {
+    case native
+    case virtual
+}
+
 public enum SpaceLayout: Sendable, Equatable {
     case tiling(Tree)
     case float(FloatState)
@@ -183,7 +190,7 @@ public struct SpaceState: Sendable, Equatable {
     /// removed and re-added the numeric order stops matching the on-screen
     /// order and every label lands one desktop off.
     public var order: [SpaceID]
-    /// The workspace to go back to for `space focus recent`.
+    /// The workspace to go back to for `space focus recent``.
     public var recentWorkspace: WorkspaceID?
 
     public init(
@@ -318,43 +325,139 @@ public struct SpaceState: Sendable, Equatable {
         if let id = active[desktop] { workspaces[id]?.layout = layout }
     }
 
-    /// Make the workspace set match the desktops that exist: one workspace per
-    /// desktop, showing.
-    ///
-    /// **This is the identity mapping, and the one function Phase 3 changes.**
-    /// Everything else in weft asks which workspace, not which desktop, so
-    /// putting several on one desktop is a change here and nowhere else.
+    /// Make the workspace set match the desktops that exist:
+    /// - In `.native` mode: one workspace per desktop, showing.
+    /// - In `.virtual` mode: multiple workspaces on the anchor desktop, one workspace each on others.
     ///
     /// `sids` MUST already be in Mission Control order (display-major) — it is
     /// stored verbatim as `order`, and `wsOrder` is built from it in the same
     /// pass so that the two persistence files, which are keyed by ordinal,
-    /// cannot come back scrambled. `names[i]` labels the i-th desktop; extras
-    /// get numeric defaults. Passing `names: nil` keeps the labels already
-    /// assigned and numbers only the desktops that are new.
-    public mutating func adoptDesktops(_ sids: [SpaceID], names: [String]?) {
+    /// cannot come back scrambled.
+    public mutating func adoptDesktops(
+        _ sids: [SpaceID],
+        names: [String]?,
+        mode: WorkspacesMode = .native,
+        anchor: Int = 1,
+        anchorCount: Int? = nil
+    ) {
         order = sids
         let live = Set(sids)
         // A workspace whose desktop is gone goes with it — an unplugged
         // display must not leave a tree behind for whatever inherits the id.
         workspaces = workspaces.filter { live.contains($0.value.desktop) }
         active = active.filter { live.contains($0.key) }
+        let previousWsOrder = wsOrder
         wsOrder = []
-        for (i, sid) in sids.enumerated() {
-            let fallback = "\(i + 1)"
-            let name: String? = names.map { i < $0.count && !$0[i].isEmpty ? $0[i] : fallback }
-            let id: WorkspaceID
-            if let existing = active[sid] {
-                id = existing
-                if let name { workspaces[id]?.label = name }
-            } else {
-                id = WorkspaceID(nextWorkspaceID)
-                nextWorkspaceID += 1
-                workspaces[id] = Workspace(
-                    id: id, label: name ?? fallback, desktop: sid, layout: .tiling(Tree())
-                )
-                active[sid] = id
+        guard !sids.isEmpty else { return }
+
+        switch mode {
+        case .native:
+            for (i, sid) in sids.enumerated() {
+                let fallback = "\(i + 1)"
+                let name: String? = names.map { i < $0.count && !$0[i].isEmpty ? $0[i] : fallback }
+                let id: WorkspaceID
+                if let existing = active[sid] {
+                    id = existing
+                    if let name { workspaces[id]?.label = name }
+                } else {
+                    id = WorkspaceID(nextWorkspaceID)
+                    nextWorkspaceID += 1
+                    workspaces[id] = Workspace(
+                        id: id, label: name ?? fallback, desktop: sid, layout: .tiling(Tree())
+                    )
+                    active[sid] = id
+                }
+                wsOrder.append(id)
             }
-            wsOrder.append(id)
+
+        case .virtual:
+            let anchorIndex = max(0, min(anchor - 1, sids.count - 1))
+            let anchorSid = sids[anchorIndex]
+
+            // Workspaces existing on anchor before this pass, preserved in order:
+            var existingAnchorWsIDs = previousWsOrder.filter { workspaces[$0]?.desktop == anchorSid }
+            for id in workspaces.keys.sorted() where workspaces[id]?.desktop == anchorSid && !existingAnchorWsIDs.contains(id) {
+                existingAnchorWsIDs.append(id)
+            }
+
+            var finalAnchorWsIDs: [WorkspaceID] = []
+
+            if let names {
+                let count: Int
+                if let anchorCount {
+                    count = max(1, anchorCount)
+                } else {
+                    count = max(1, names.count - max(0, sids.count - 1))
+                }
+
+                for i in 0..<count {
+                    let label = (i < names.count && !names[i].isEmpty) ? names[i] : "\(i + 1)"
+                    if i < existingAnchorWsIDs.count {
+                        let id = existingAnchorWsIDs[i]
+                        workspaces[id]?.label = label
+                        finalAnchorWsIDs.append(id)
+                    } else {
+                        let id = WorkspaceID(nextWorkspaceID)
+                        nextWorkspaceID += 1
+                        workspaces[id] = Workspace(
+                            id: id, label: label, desktop: anchorSid, layout: .tiling(Tree())
+                        )
+                        finalAnchorWsIDs.append(id)
+                    }
+                }
+                for excessId in existingAnchorWsIDs.dropFirst(count) {
+                    workspaces.removeValue(forKey: excessId)
+                }
+            } else {
+                if existingAnchorWsIDs.isEmpty {
+                    let id = WorkspaceID(nextWorkspaceID)
+                    nextWorkspaceID += 1
+                    workspaces[id] = Workspace(
+                        id: id, label: "\(anchorIndex + 1)", desktop: anchorSid, layout: .tiling(Tree())
+                    )
+                    finalAnchorWsIDs.append(id)
+                } else {
+                    finalAnchorWsIDs = existingAnchorWsIDs
+                }
+            }
+
+            if let curActive = active[anchorSid], finalAnchorWsIDs.contains(curActive) {
+                // keep current active
+            } else {
+                active[anchorSid] = finalAnchorWsIDs.first
+            }
+
+            var nonAnchorIndex = 0
+            for sid in sids {
+                if sid == anchorSid {
+                    wsOrder.append(contentsOf: finalAnchorWsIDs)
+                } else {
+                    let ordinal = wsOrder.count + 1
+                    let fallback = "\(ordinal)"
+                    let id: WorkspaceID
+                    let label: String
+                    if let names {
+                        let nameIdx = finalAnchorWsIDs.count + nonAnchorIndex
+                        label = (nameIdx < names.count && !names[nameIdx].isEmpty) ? names[nameIdx] : fallback
+                    } else {
+                        label = fallback
+                    }
+
+                    if let existing = active[sid], workspaces[existing]?.desktop == sid {
+                        id = existing
+                        if names != nil { workspaces[id]?.label = label }
+                    } else {
+                        id = WorkspaceID(nextWorkspaceID)
+                        nextWorkspaceID += 1
+                        workspaces[id] = Workspace(
+                            id: id, label: label, desktop: sid, layout: .tiling(Tree())
+                        )
+                        active[sid] = id
+                    }
+                    nonAnchorIndex += 1
+                    wsOrder.append(id)
+                }
+            }
         }
     }
 

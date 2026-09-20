@@ -71,6 +71,10 @@ public struct GeneralConfig: Sendable, Equatable {
     /// resize goes through a slow, animated relayout. weft turns it off for
     /// the instant of each frame write and back on after. An app whose
     /// assistive tooling misbehaves with that goes here.
+    /// Whether workspaces map 1:1 to native spaces or multiple virtual spaces live on an anchor.
+    public var workspaces: WorkspacesMode
+    /// Which native space hosts virtual workspaces (1-based Mission Control ordinal).
+    public var workspaceAnchor: Int
     public var enhancedUIExempt: [String]
     public var reserve: ScreenReserve
 
@@ -85,10 +89,14 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
+        workspaces: WorkspacesMode = .native,
+        workspaceAnchor: Int = 1,
         followSpaceRules: Bool = false,
         enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
     ) {
+        self.workspaces = workspaces
+        self.workspaceAnchor = workspaceAnchor
         self.innerGap = innerGap
         self.stackOffset = stackOffset
         self.manageMenubarApps = manageMenubarApps
@@ -468,11 +476,23 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     ids.append(id)
                 }
                 general.enhancedUIExempt = ids
+            case "workspaces":
+                guard case .string(let s) = v else { throw err(path, "expected native|virtual") }
+                guard let mode = WorkspacesMode(rawValue: s) else {
+                    throw err(path, "expected native|virtual")
+                }
+                general.workspaces = mode
+            case "workspace-anchor":
+                guard case .int(let n) = v, n >= 1 else { throw err(path, "expected positive int") }
+                general.workspaceAnchor = n
             case "reserve":
                 general.reserve = try parseReserve(v, path: path, lines: doc.lines)
             default:
                 throw err(path, "unknown general key")
             }
+        }
+        if doc.tables["general"]?["follow-space-rules"] == nil && general.workspaces == .virtual {
+            general.followSpaceRules = true
         }
     }
 

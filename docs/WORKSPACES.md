@@ -1,8 +1,7 @@
 # Workspaces — weft's own, inside macOS's
 
-**Status:** Phases 1 and 2 are built; 3 onwards are a plan. S9 in
-`spikes/RESULTS.md` establishes that the mechanism works. Sections marked as
-built describe what is in the tree rather than what was proposed.
+**Status:** Built (Phases 1–4 implemented). S9 in `spikes/RESULTS.md`
+establishes that the mechanism works.
 
 ## The problem, stated once
 
@@ -374,12 +373,12 @@ Each is shippable and reversible on its own.
    window's place.
 3. **Many workspaces on one desktop**, behind `workspaces = "virtual"`.
    `space focus` and `space move-window` resolve to a workspace first and a
-   desktop second.
+   desktop second. **Done.**
 4. **The interactions.** Focus landing on a parked window — ⌘-Tab, a Dock
    click, `app toggle` — shows its workspace; this hooks into `focusChanged`,
    which is already one function. Borders are never drawn on a parked window.
    Divider zones and mouse hit-testing see the active workspace only. A display
-   going away unparks anything parked on it.
+   going away unparks anything parked on it. **Done.**
 5. **Nothing is deleted.** `DragMove`, `DockSwipe` and `SpaceShortcut` stay,
    because native desktops stay supported and a cross-desktop move still needs
    them. That is the price of the mixed model rather than AeroSpace's, and it

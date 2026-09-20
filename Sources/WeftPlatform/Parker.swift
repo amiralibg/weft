@@ -244,6 +244,36 @@ public struct Parker: Sendable {
         }
     }
 
+    /// Every window ID currently recorded as parked.
+    public var parkedWIDs: Set<WindowID> {
+        switch ledger.load() {
+        case .parked(let entries): return Set(entries.map(\.wid))
+        case .nothingParked, .unreadable: return []
+        }
+    }
+
+    /// Whether a window is currently recorded as parked in the ledger.
+    public func isParked(_ wid: WindowID) -> Bool {
+        parkedWIDs.contains(wid)
+    }
+
+    /// Put back any window parked on a display that is no longer present.
+    @discardableResult
+    public func unparkOutside(displays: [Frame]) -> UnparkOutcome {
+        switch ledger.load() {
+        case .parked(let entries):
+            let outside = entries.filter { entry in
+                !displays.contains { $0.contains(x: entry.parkedAt.x, y: entry.parkedAt.y) }
+            }
+            guard !outside.isEmpty else {
+                return UnparkOutcome(restored: [], notOurs: [], refused: [], note: nil)
+            }
+            return unpark(outside.map(\.wid))
+        case .nothingParked, .unreadable:
+            return UnparkOutcome(restored: [], notOurs: [], refused: [], note: nil)
+        }
+    }
+
     /// **The moves land before the ledger is rewritten**, which is the mirror
     /// of `park` and for the same reason. Dropping an entry and then failing
     /// to move the window is the one ordering that produces a window off

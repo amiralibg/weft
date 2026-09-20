@@ -102,3 +102,53 @@ private let deadWID: WindowID = 0xFFFF_FFF0
     #expect(parker.unpark([7, 8]).isEmpty)
     #expect(parker.ledger.load() == .parked([entry]))
 }
+
+@Test func parkerTracksParkedWindowIDs() {
+    let parker = tempParker()
+    #expect(parker.parkedWIDs.isEmpty)
+    #expect(!parker.isParked(42))
+
+    let entry = ParkedWindow(
+        wid: 42,
+        frame: Frame(x: 10, y: 20, width: 800, height: 600),
+        parkedAt: ParkedWindow.Spot(x: 1727, y: 1116)
+    )
+    try! parker.ledger.save([entry])
+
+    #expect(parker.parkedWIDs == [42])
+    #expect(parker.isParked(42))
+    #expect(!parker.isParked(43))
+}
+
+@Test func unparkOutsideLeavesInBoundsWindowsAlone() {
+    let parker = tempParker()
+    let insideEntry = ParkedWindow(
+        wid: deadWID,
+        frame: Frame(x: 10, y: 20, width: 800, height: 600),
+        parkedAt: ParkedWindow.Spot(x: 100, y: 100)
+    )
+    try! parker.ledger.save([insideEntry])
+
+    // Display frame contains (100, 100)
+    let displays = [Frame(x: 0, y: 0, width: 1728, height: 1117)]
+    let outcome = parker.unparkOutside(displays: displays)
+    #expect(outcome.isEmpty)
+    #expect(parker.ledger.load() == .parked([insideEntry]))
+}
+
+@Test func unparkOutsideRestoresWindowsOnRemovedDisplays() {
+    let parker = tempParker()
+    let outsideEntry = ParkedWindow(
+        wid: deadWID,
+        frame: Frame(x: -1000, y: 100, width: 800, height: 600),
+        parkedAt: ParkedWindow.Spot(x: -1, y: 879)
+    )
+    try! parker.ledger.save([outsideEntry])
+
+    // Only primary display remains, outsideEntry was on external display
+    let displays = [Frame(x: 0, y: 0, width: 1728, height: 1117)]
+    let outcome = parker.unparkOutside(displays: displays)
+    // deadWID fails live frame check (notOurs), so it gets purged
+    #expect(outcome.notOurs == [deadWID])
+    #expect(parker.ledger.load() == .nothingParked)
+}
