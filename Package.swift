@@ -1,10 +1,6 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-let skylightLink: [LinkerSetting] = [
-    .unsafeFlags(["-F", "/System/Library/PrivateFrameworks", "-framework", "SkyLight"])
-]
-
 let package = Package(
     name: "weft",
     platforms: [.macOS(.v15)],
@@ -14,7 +10,9 @@ let package = Package(
         .executable(name: "weft-bar", targets: ["weft-bar"]),
     ],
     targets: [
-        // C target: extern decls for private SLS/CGS symbols.
+        // C target: private SLS/CGS/AX symbols, resolved by name at load time
+        // rather than linked, so a symbol a macOS update removes costs the
+        // feature that uses it and never the launch. Nothing links SkyLight.
         // Public header is Sources/SkyLightShim/include/SkyLightShim.h
         .target(
             name: "SkyLightShim",
@@ -28,8 +26,7 @@ let package = Package(
         // Platform: AX, SkyLight, spaces, displays. Behind protocols.
         .target(
             name: "WeftPlatform",
-            dependencies: ["WeftCore", "SkyLightShim"],
-            linkerSettings: skylightLink
+            dependencies: ["WeftCore", "SkyLightShim"]
         ),
         // Stubs for later milestones (M2/M6). Exist so the layout is final in M1.
         .target(name: "WeftConfig", dependencies: ["WeftCore", "WeftInput"]),
@@ -52,16 +49,14 @@ let package = Package(
                 // the user has commented, and this is the only round-trip in
                 // the tree that does not throw those comments away.
                 "WeftBarConfig", "SkyLightShim",
-            ],
-            linkerSettings: skylightLink
+            ]
         ),
-                .executableTarget(
+        .executableTarget(
             name: "weft-bar",
             dependencies: [
                 "WeftCore", "WeftPlatform", "WeftIPC", "WeftConfig",
                 "WeftBarConfig", "SkyLightShim",
-            ],
-            linkerSettings: skylightLink
+            ]
         ),
         .testTarget(
             name: "WeftCoreTests",
@@ -88,8 +83,7 @@ let package = Package(
         // up as windows left at the corner of the screen.
         .testTarget(
             name: "WeftPlatformTests",
-            dependencies: ["WeftPlatform", "WeftCore"],
-            linkerSettings: skylightLink
+            dependencies: ["WeftPlatform", "WeftCore"]
         ),
         .testTarget(
             name: "WeftBarConfigTests",

@@ -295,13 +295,30 @@ public enum Doctor {
             print("    \(UpdateCheck.installCommand)")
         }
 
-        // 2. SkyLight Connection
-        let cid = SLSMainConnectionID()
-        if cid != 0 {
-            print("[\u{2713}] SkyLight WindowServer: Connected (CID \(cid))")
+        // 2. The private macOS calls weft uses. Run fresh in this process:
+        // what a symbol does is the same for every process on the Mac, and a
+        // doctor that only repeated the daemon's startup answer could not be
+        // run to check an update before starting the daemon on it.
+        let privateAPI = PrivateAPI.selfTest()
+        let found = privateAPI.symbols.count - privateAPI.missing.count
+        if privateAPI.missing.isEmpty, privateAPI.failed.isEmpty {
+            print("[\u{2713}] Private macOS calls: all \(found) found, self-test passed")
+            print("    \(privateAPI.macOS)")
         } else {
-            print("[\u{2717}] SkyLight WindowServer: Failed to connect")
-            allOk = false
+            let essentialLost = privateAPI.missing.contains { PrivateAPI.essential.contains($0) }
+                || !privateAPI.passed(.connection) || !privateAPI.passed(.topology)
+            print("[\(essentialLost ? "\u{2717}" : "!")] Private macOS calls: \(found) of "
+                + "\(privateAPI.symbols.count) found, \(privateAPI.failed.count) self-test(s) failed")
+            print("    \(privateAPI.macOS)")
+            for name in privateAPI.missing {
+                print("    - \(name) is missing: \(PrivateAPI.impact[name] ?? "a minor feature") stops working")
+            }
+            for check in privateAPI.failed {
+                print("    - \(check.name) failed: \(check.detail)")
+            }
+            print("    A macOS update changed something weft relies on. Nothing else is")
+            print("    affected, and weft keeps running; please report this with the lines above.")
+            if essentialLost { allOk = false }
         }
 
         // 3. Moving a window to another desktop. No scripting addition, no SIP

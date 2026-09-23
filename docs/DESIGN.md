@@ -108,7 +108,7 @@ The socket accept loop therefore runs on a background thread and `main` ends in 
 
 | Target | Kind | Contents |
 | --- | --- | --- |
-| `SkyLightShim` | C, modulemap | `extern` decls for private SLS/CGS symbols, `_AXUIElementGetWindow`, small inline helpers |
+| `SkyLightShim` | C, modulemap | private SLS/CGS symbols and `_AXUIElementGetWindow`, resolved by name at load and called through inline wrappers (nothing links SkyLight); small inline helpers |
 | `WeftCore` | Swift, **no I/O** | geometry, layout tree, stack, reducer, command grammar |
 | `WeftPlatform` | Swift | AX, SkyLight, spaces, displays, process tracking — behind protocols |
 | `WeftConfig` | Swift | TOML → typed config, FSEvents hot reload, validation with line numbers |
@@ -642,6 +642,13 @@ should ship as a *separate* client binary reading `weftctl subscribe` — never 
 11. yabai is MIT-licensed; where we adapt its SkyLight/SA techniques, attribute it.
 12. sketchybar's mach wire format is not a public API — if S5 says it's unstable, the fork
     fallback is the supported path and the mach path stays an opt-in fast lane.
+13. **A macOS update removes or neuters a private symbol.** Until 0.9.13 every one was a
+    strong link against SkyLight, so a single removal stopped `weftd` launching. Now
+    `SkyLightShim.c` looks each one up at load and a missing one fails its own call;
+    `PrivateAPI.swift` reports presence and self-tests the calls that matter on a window
+    of weft's own, `weftd` logs the result on its second line, `weftctl doctor` prints
+    it, and parking refuses outright when the move test fails. CI rejects any binary
+    that links SkyLight again. See REDESIGN.md, phase 1.
 
 ## 12. Open questions
 

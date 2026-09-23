@@ -63,5 +63,18 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
+      # Private symbols are looked up at runtime (SkyLightShim.c). Linking
+      # SkyLight again would bring back the failure this prevents: one symbol
+      # dropped by a macOS update and dyld refuses to launch weftd at all.
+      - name: Nothing links SkyLight
+        run: |
+          set -euo pipefail
+          for b in weftd weftctl weft-bar; do
+            if otool -L ".build/debug/$b" | grep -q SkyLight; then
+              echo "::error::$b links SkyLight. Declare the symbol in SkyLightShim.h with WEFT_PRIVATE_FN instead."
+              exit 1
+            fi
+          done
+
       - name: Test
         run: swift test --skip-build

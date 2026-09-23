@@ -67,11 +67,19 @@ public struct Parker: Sendable {
         /// top of that would make the windows already hidden unrecoverable.
         case ledgerUnreadable(String)
         case ledgerUnwritable(ParkLedger.WriteError)
+        /// This macOS no longer moves a window through the WindowServer the
+        /// way weft relies on — the launch self-test moved one of weft's own
+        /// windows and did not read it back where it was put. Hiding nothing
+        /// is the safe answer: a workspace that stays visible is a nuisance, a
+        /// window moved somewhere unverified can be a lost one.
+        case unsupported(String)
 
         public var description: String {
             switch self {
             case .ledgerUnreadable(let why): return "park refused — \(why)"
             case .ledgerUnwritable(let e): return "park refused — \(e)"
+            case .unsupported(let why):
+                return "park refused — this macOS failed weft's window-move self-test (\(why))"
             }
         }
     }
@@ -144,6 +152,12 @@ public struct Parker: Sendable {
             )
         }
         guard !fresh.isEmpty else { return outcome }
+        // Checked here rather than on entry: only a park that would move
+        // something needs the answer, and asking is what runs the self-test.
+        guard PrivateAPI.canMoveWindows else {
+            let check = PrivateAPI.report.checks.first { $0.name == PrivateAPI.CheckName.windowMove.rawValue }
+            throw ParkError.unsupported(check?.detail ?? "not run")
+        }
 
         do {
             try ledger.save(held + fresh)

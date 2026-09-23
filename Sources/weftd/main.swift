@@ -4488,6 +4488,16 @@ setlinebuf(stderr)  // launchd/log captures must see lines instantly, not on exi
 // shipped two releases ago.
 fputs("weftd: \(WeftVersion.full) starting (pid \(ProcessInfo.processInfo.processIdentifier))\n", stderr)
 
+// Before the daemon exists, so the answer is settled before anything could
+// park, and the second line of every log says whether this macOS still does
+// what weft relies on. A missing symbol no longer stops the launch; this is
+// where it is said instead.
+let privateAPI = PrivateAPI.report
+fputs("weftd: \(privateAPI.macOS) — \(privateAPI.summary)\n", stderr)
+if let lost = privateAPI.missing.first(where: { PrivateAPI.essential.contains($0) }) {
+    fputs("weftd: \(lost) is missing on this macOS — windows cannot be tiled until weft is updated\n", stderr)
+}
+
 // Check Accessibility without triggering a macOS modal prompt
 if !Permissions.accessibility() {
     fputs("weftd: accessibility permission missing\n", stderr)

@@ -81,6 +81,16 @@ jobs:
           # land here.
           echo "PRODUCT_DIR=$PWD/.build/apple/Products/Release" >> "$GITHUB_ENV"
 
+      - name: Nothing links SkyLight
+        run: |
+          set -euo pipefail
+          for b in weftd weftctl weft-bar; do
+            if otool -L "$PRODUCT_DIR/$b" | grep -q SkyLight; then
+              echo "::error::$b links SkyLight — a macOS that drops one private symbol would refuse to launch it."
+              exit 1
+            fi
+          done
+
       - name: Set up signing (skipped when no certificate secret is present)
         id: signing
         env:
