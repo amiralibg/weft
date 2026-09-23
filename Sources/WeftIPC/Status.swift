@@ -69,7 +69,7 @@ extension SpaceStatus {
             id: sid,
             label: label,
             layout: layout.rawValue,
-            windows: ws?.layout.windows.sorted() ?? fallbackWindows,
+            windows: ws?.members.sorted() ?? fallbackWindows,
             current: current,
             display: display
         )

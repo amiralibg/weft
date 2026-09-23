@@ -1,8 +1,8 @@
 # Redesign — weft owns workspaces, macOS owns nothing weft needs
 
 **Status:** Proposal, 2026-09-23, against 0.9.12. Supersedes the "nest, do
-not replace" decision in `WORKSPACES.md`. Phase 1 shipped in 0.9.13; the rest
-is not built yet.
+not replace" decision in `WORKSPACES.md`. Phase 1 shipped in 0.9.13 and phase 2
+in 0.9.14; the rest is not built yet.
 
 ## Requirements
 
@@ -446,7 +446,23 @@ Each phase can ship on its own as the next 0.9.x release.
    - Not done: caching the result per macOS build. It costs less to run the
      test than to read a cache.
 2. **Membership separate from layout.** Floats and unmanaged windows hide
-   with their workspace. Fixes defect 3 on the current code.
+   with their workspace. Fixes defect 3 on the current code. **Done in
+   0.9.14:**
+   - `Workspace.loose` holds members that are not laid out: floated by hand,
+     `manage = false` rules, quirk strikes, and apps weft always floats.
+     `members` is the layout's windows, then the loose ones.
+   - The sweep reconciles both kinds together against `members`, so a window
+     keeps its workspace across float and tile, and a float in a hidden
+     workspace stays in it. Panels and popovers are still in no workspace:
+     a menu-bar extra's popover is not the workspace's to hide.
+   - `SpaceState.file(_:in:laidOut:)` is the one way a command moves a window
+     between workspaces. It is used by `space move-window`, moves to another
+     display, rule placement and `float toggle`, so a float that is sent
+     somewhere arrives floating instead of being tiled by the move.
+   - Switching parks and unparks `members`. Focusing a float in a hidden
+     workspace (⌘-Tab, the switcher) shows that workspace and focuses the
+     float. `query spaces` and `query bar-state` list floats under their
+     workspace.
 3. **One mode, one managed desktop per display.** Delete the native-desktop
    layer. Space focus and move are state plus hide/show. Add the paused state
    for other desktops. This is the release that fixes switching and moving.

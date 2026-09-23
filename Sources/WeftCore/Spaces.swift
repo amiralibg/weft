@@ -128,19 +128,44 @@ public struct Workspace: Sendable, Equatable {
     /// without the record, the next config reload, the next empty sweep and
     /// the next restart all quietly undo the choice.
     public var overrideKind: LayoutKind?
+    /// Members that are not laid out: floated by hand, unmanaged by a rule,
+    /// struck out as a quirk, or an app weft always floats. They belong to the
+    /// workspace all the same — hidden with it, shown with it, followed to it
+    /// by focus — and only the layout ignores them.
+    ///
+    /// Membership used to be the layout, so every one of these windows was in
+    /// no workspace at all and stayed on screen whichever workspace was
+    /// showing (REDESIGN.md, defect 3). Panels and popovers are deliberately
+    /// not here: a menu-bar extra's popover belongs to the menu bar, not to
+    /// whatever workspace was showing when it opened.
+    public var loose: Set<WindowID>
 
     public init(
         id: WorkspaceID,
         label: String,
         desktop: SpaceID,
         layout: SpaceLayout,
-        overrideKind: LayoutKind? = nil
+        overrideKind: LayoutKind? = nil,
+        loose: Set<WindowID> = []
     ) {
         self.id = id
         self.label = label
         self.desktop = desktop
         self.layout = layout
         self.overrideKind = overrideKind
+        self.loose = loose
+    }
+
+    /// Every window in the workspace: the laid-out ones in layout order, then
+    /// the loose ones by id. What hiding and showing a workspace acts on.
+    public var members: [WindowID] {
+        let tiled = layout.windows
+        let placed = Set(tiled)
+        return tiled + loose.subtracting(placed).sorted()
+    }
+
+    public func contains(_ wid: WindowID) -> Bool {
+        loose.contains(wid) || layout.windows.contains(wid)
     }
 }
 
@@ -312,10 +337,75 @@ public struct SpaceState: Sendable, Equatable {
         order.firstIndex(of: sid).map { $0 + 1 }
     }
 
+    /// The workspace a window is a member of, laid out or loose. Searched in
+    /// `wsOrder` so the answer does not depend on dictionary order — a sticky
+    /// window can be a member of one workspace per desktop.
+    public func workspace(holding wid: WindowID) -> WorkspaceID? {
+        wsOrder.first { workspaces[$0]?.contains(wid) == true }
+            ?? workspaces.keys.sorted().first { workspaces[$0]?.contains(wid) == true }
+    }
+
     // MARK: - Writing a workspace
 
     public mutating func setLayout(_ layout: SpaceLayout, of id: WorkspaceID) {
         workspaces[id]?.layout = layout
+    }
+
+    /// Take a window out of every workspace but `keep`: out of each layout and
+    /// out of each loose set. The one way a window leaves a workspace other
+    /// than the sweep noticing it has gone.
+    public mutating func removeWindow(_ wid: WindowID, except keep: WorkspaceID? = nil) {
+        for (id, ws) in workspaces where id != keep {
+            switch ws.layout {
+            case .tiling(let t) where t.windows.contains(wid):
+                workspaces[id]?.layout = .tiling(t.removing(wid))
+            case .float(let f) where f.windows.contains(wid):
+                workspaces[id]?.layout = .float(f.removing(wid))
+            default:
+                break
+            }
+            workspaces[id]?.loose.remove(wid)
+        }
+    }
+
+    /// Make `target` the one workspace holding `wid`: in its layout when weft
+    /// lays the window out, in its loose set when it does not. Every command
+    /// that moves a window between workspaces ends here, so a floating window
+    /// sent somewhere arrives floating instead of being tiled by the move.
+    ///
+    /// `screen` decides the split axis of a tree insertion, as it does in a
+    /// sweep; `focus` makes the window the layout's focus when it is laid out.
+    public mutating func file(
+        _ wid: WindowID,
+        in target: WorkspaceID,
+        laidOut: Bool,
+        screen: Frame? = nil,
+        config: TilingConfig = TilingConfig(),
+        focus: Bool = false
+    ) {
+        guard var ws = workspaces[target] else { return }
+        removeWindow(wid, except: target)
+        switch (laidOut, ws.layout) {
+        case (false, .tiling(let t)):
+            if t.windows.contains(wid) { ws.layout = .tiling(t.removing(wid)) }
+            ws.loose.insert(wid)
+        case (false, .float(let f)):
+            if f.windows.contains(wid) { ws.layout = .float(f.removing(wid)) }
+            ws.loose.insert(wid)
+        case (true, .tiling(var t)):
+            ws.loose.remove(wid)
+            if !t.windows.contains(wid) {
+                t = screen.map { t.inserting(wid, in: $0, config: config) } ?? t.inserting(wid)
+            }
+            if focus { t = t.focusing(wid) }
+            ws.layout = .tiling(t)
+        case (true, .float(var f)):
+            ws.loose.remove(wid)
+            if !f.windows.contains(wid) { f = f.inserting(wid) }
+            if focus { f = f.focusing(wid) }
+            ws.layout = .float(f)
+        }
+        workspaces[target] = ws
     }
 
     /// Edit the layout showing on a desktop. The replacement for

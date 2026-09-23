@@ -1433,7 +1433,15 @@ final class Daemon: @unchecked Sendable {
             self.spaceMoveDeferredLogged = self.spaceMoveDeferredLogged.intersection(worldWids)
             var windowDesktops: [WindowID: [SpaceID]] = [:]
             var unmanagedNow: Set<WindowID> = []
+            // Unmanaged windows that still belong to a workspace: out of the
+            // layout, not out of the workspace. Everything unmanaged except a
+            // panel or popover, which belongs to whatever opened it — often
+            // the menu bar — and not to the workspace showing at the time.
+            var looseDesktops: [WindowID: [SpaceID]] = [:]
             let showing = Set(sp.currentByDisplay.values)
+            func fileLoose(_ w: WindowInfo) {
+                if screenLocked || w.isTileable(visibleSpaces: showing) { looseDesktops[w.id] = w.spaces }
+            }
             for w in world.windows {
                 self.pids[w.id] = w.pid
                 self.appNames[w.id] = w.app
@@ -1452,6 +1460,7 @@ final class Daemon: @unchecked Sendable {
                 // one that did not.
                 if self.manualFloat.contains(w.id) {
                     unmanagedNow.insert(w.id)
+                    fileLoose(w)
                     continue
                 }
                 // Closed but kept: on a showing desktop, not on screen. Not
@@ -1470,6 +1479,7 @@ final class Daemon: @unchecked Sendable {
                 let bundle = bundles[w.pid] ?? nil
                 if let b = bundle, Daemon.autoFloatBundles.contains(b) {
                     unmanagedNow.insert(w.id)
+                    fileLoose(w)
                     continue
                 }
                 if let outcome = matchRules(cfg.rules, app: w.app, bundleID: bundle, title: w.title) {
@@ -1534,11 +1544,13 @@ final class Daemon: @unchecked Sendable {
                     }
                     if !outcome.manage {
                         unmanagedNow.insert(w.id)
+                        fileLoose(w)
                         continue
                     }
                 }
                 if self.strikes[w.id, default: 0] >= 2 {
                     unmanagedNow.insert(w.id)
+                    fileLoose(w)
                     continue
                 }
                 windowDesktops[w.id] = w.spaces
@@ -1555,13 +1567,24 @@ final class Daemon: @unchecked Sendable {
             // on", verbatim. `reconcileWorkspaces` turns that into "which
             // workspace", which is weft's own answer and the only part of
             // membership macOS does not own.
+            //
+            // Laid-out and loose windows go through it together, against the
+            // workspaces' whole membership, so a window keeps its workspace
+            // across being floated and tiled again — and a float in a hidden
+            // workspace stays in it rather than joining whatever is showing.
+            // The answer is then split back by which of the two it is.
             let live = sp.liveWorkspaces(desktops: liveSids)
-            let membership = reconcileWorkspaces(
-                windowDesktops: windowDesktops,
-                membership: sp.workspaces.mapValues { $0.layout.windows },
+            let reconciled = reconcileWorkspaces(
+                windowDesktops: windowDesktops.merging(looseDesktops) { tiled, _ in tiled },
+                membership: sp.workspaces.mapValues { $0.members },
                 desktopOf: sp.workspaces.mapValues { $0.desktop },
                 activeOn: sp.active
             )
+            let looseIDs = Set(looseDesktops.keys)
+            let membership = reconciled.mapValues { $0.filter { !looseIDs.contains($0) } }
+            for id in live {
+                sp.workspaces[id]?.loose = Set((reconciled[id] ?? []).filter { looseIDs.contains($0) })
+            }
             var screens: [WorkspaceID: Frame] = [:]
             for id in live {
                 screens[id] = sp.desktop(of: id).flatMap { usableBySpace[$0] }
@@ -1706,18 +1729,7 @@ final class Daemon: @unchecked Sendable {
     /// Waiting for the next sweep left the survivors holding the dead
     /// window's half of the split for as long as the sweep took.
     private func forgetWindow(_ wid: WindowID) {
-        updateSpaces { sp in
-            for (id, ws) in sp.workspaces {
-                switch ws.layout {
-                case .tiling(let t) where t.windows.contains(wid):
-                    sp.setLayout(.tiling(t.removing(wid)), of: id)
-                case .float(let f) where f.windows.contains(wid):
-                    sp.setLayout(.float(f.removing(wid)), of: id)
-                default:
-                    break
-                }
-            }
-        }
+        updateSpaces { sp in sp.removeWindow(wid) }
         core.sync {
             self.pids.removeValue(forKey: wid)
             self.appNames.removeValue(forKey: wid)
@@ -1960,12 +1972,13 @@ final class Daemon: @unchecked Sendable {
         }) else {
             // If the window belongs to an inactive workspace on a visible desktop,
             // switch to that workspace immediately (Phase 4).
-            if let targetWs = sp0.workspaces.values.first(where: { $0.layout.windows.contains(wid) }),
-               let sid = sp0.desktop(of: targetWs.id),
+            // A float counts: it is a member of its workspace, not of none.
+            if let targetID = sp0.workspace(holding: wid),
+               let sid = sp0.desktop(of: targetID),
                sp0.visibleSpaces.contains(sid),
-               sp0.active[sid] != targetWs.id
+               sp0.active[sid] != targetID
             {
-                switchWorkspace(on: sid, to: targetWs.id, focusWindow: wid, stealFocus: false)
+                switchWorkspace(on: sid, to: targetID, focusWindow: wid, stealFocus: false)
                 bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
                 return
             }
@@ -2207,7 +2220,8 @@ final class Daemon: @unchecked Sendable {
         // the window was then centred on a screen it was not on, so it jumped
         // monitors on its way to floating.
         let sp0 = readSpaces()
-        let home = sp0.workspaces.values.first { $0.layout.windows.contains(wid) }?.desktop
+        let holder = sp0.workspace(holding: wid)
+        let home = holder.flatMap { sp0.desktop(of: $0) }
             ?? SpaceControl.spacesForWindow(wid).first(where: { sp0.active[$0] != nil })
             ?? currentSID()
         if isFloating {
@@ -2227,16 +2241,11 @@ final class Daemon: @unchecked Sendable {
                 self.unbindableSince.removeValue(forKey: wid)
                 self.negativeVerdict.removeValue(forKey: wid)
                 if self.standardWindow[wid] == false { self.standardWindow[wid] = true }
-                if let sid = home {
-                    self.updateSpaces { sp in
-                        switch sp.layout(on: sid) ?? self.resolvedInitialLayout(for: sid, in: sp) {
-                        case .tiling(var t):
-                            t = t.inserting(wid)
-                            sp.setLayout(.tiling(t), on: sid)
-                        case .float(var f):
-                            f = f.inserting(wid)
-                            sp.setLayout(.float(f), on: sid)
-                        }
+                // Back into the layout of the workspace it floated in — which
+                // is not the one showing when it floated in a hidden one.
+                self.updateSpaces { sp in
+                    if let id = holder ?? home.flatMap({ sp.active[$0] }) {
+                        sp.file(wid, in: id, laidOut: true)
                     }
                 }
             }
@@ -2253,16 +2262,11 @@ final class Daemon: @unchecked Sendable {
             let target: Frame = core.sync {
                 self.manualFloat.insert(wid)
                 self.unmanaged.insert(wid)
-                if let sid = home {
-                    self.updateSpaces { sp in
-                        switch sp.layout(on: sid) ?? self.resolvedInitialLayout(for: sid, in: sp) {
-                        case .tiling(var t):
-                            t = t.removing(wid)
-                            sp.setLayout(.tiling(t), on: sid)
-                        case .float(var f):
-                            f = f.removing(wid)
-                            sp.setLayout(.float(f), on: sid)
-                        }
+                // Out of the layout, not out of the workspace: it hides and
+                // shows with the windows it floated among.
+                self.updateSpaces { sp in
+                    if let id = holder ?? home.flatMap({ sp.active[$0] }) {
+                        sp.file(wid, in: id, laidOut: false)
                     }
                 }
                 return self.floatFrames[wid].flatMap { remembered -> Frame? in
@@ -2299,7 +2303,7 @@ final class Daemon: @unchecked Sendable {
         let sp = readSpaces()
         // Which space holds it: layouts first (cheap), then the WindowServer
         // for windows weft does not manage.
-        let targetWs = sp.workspaces.values.first { $0.layout.windows.contains(wid) }
+        let targetWs = sp.workspace(holding: wid).flatMap { sp.workspaces[$0] }
         var home: SpaceID? = targetWs?.desktop
         if home == nil {
             home = WorldReader.snapshot().windows
@@ -2730,7 +2734,7 @@ final class Daemon: @unchecked Sendable {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
             let label = sp.label(of: id) ?? "\(sid)"
-            let sourceWsID = sp.workspaces.first(where: { $0.value.layout.windows.contains(wid) })?.key
+            let sourceWsID = sp.workspace(holding: wid)
             let sourceSid = sourceWsID.flatMap { sp.desktop(of: $0) } ?? currentSID()
 
             if sourceSid == sid {
@@ -2836,7 +2840,9 @@ final class Daemon: @unchecked Sendable {
         }
 
         // 1. Park windows of the old active workspace
-        let toPark = sp.workspaces[currentActive]?.layout.windows ?? []
+        // Every member, not just the laid-out ones: a float left behind
+        // would sit over the next workspace's tiles.
+        let toPark = sp.workspaces[currentActive]?.members ?? []
         let screenBounds = displayBounds(for: sid)
         if !toPark.isEmpty {
             do {
@@ -2847,7 +2853,7 @@ final class Daemon: @unchecked Sendable {
         }
 
         // 2. Unpark windows of the target workspace
-        let toUnpark = sp.workspaces[targetWsID]?.layout.windows ?? []
+        let toUnpark = sp.workspaces[targetWsID]?.members ?? []
         if !toUnpark.isEmpty {
             parker.unpark(toUnpark)
         }
@@ -2871,6 +2877,12 @@ final class Daemon: @unchecked Sendable {
 
         // 4. Apply layout
         applySpaceLayout(sid, stealFocus: stealFocus)
+        // The layout focuses its own focus. A window focus was asked for that
+        // is not laid out — a float — has to be focused by name.
+        if let wid = focusWindow, readSpaces().workspaces[targetWsID]?.loose.contains(wid) == true,
+           let pid = pid(of: wid) {
+            applier.focusWindow(wid, pid: pid)
+        }
         bus.emit(stateChangedEvent())
     }
 
@@ -2885,26 +2897,10 @@ final class Daemon: @unchecked Sendable {
         let tile = currentConfig().general.asTilingConfig()
 
         updateSpaces { sp in
-            for (id, ws) in sp.workspaces where id != targetWsID {
-                switch ws.layout {
-                case .tiling(let t) where t.windows.contains(wid):
-                    sp.setLayout(.tiling(t.removing(wid)), of: id)
-                case .float(let f) where f.windows.contains(wid):
-                    sp.setLayout(.float(f.removing(wid)), of: id)
-                default:
-                    break
-                }
-            }
-            switch sp.workspaces[targetWsID]?.layout ?? .tiling(Tree()) {
-            case .tiling(var t):
-                if !t.windows.contains(wid) { t = t.inserting(wid, in: targetScreen, config: tile) }
-                if follow { t = t.focusing(wid) }
-                sp.setLayout(.tiling(t), of: targetWsID)
-            case .float(var f):
-                if !f.windows.contains(wid) { f = f.inserting(wid) }
-                if follow { f = f.focusing(wid) }
-                sp.setLayout(.float(f), of: targetWsID)
-            }
+            sp.file(
+                wid, in: targetWsID, laidOut: !self.unmanaged.contains(wid),
+                screen: targetScreen, config: tile, focus: follow
+            )
         }
 
         if follow {
@@ -3057,28 +3053,13 @@ final class Daemon: @unchecked Sendable {
         let targetScreen = usableScreen(for: sid)
         let tile = currentConfig().general.asTilingConfig()
         updateSpaces { sp in
-            let destination = targetWorkspace ?? sp.active[sid]
-            for (id, ws) in sp.workspaces where id != destination {
-                switch ws.layout {
-                case .tiling(let t) where t.windows.contains(wid):
-                    sp.setLayout(.tiling(t.removing(wid)), of: id)
-                case .float(let f) where f.windows.contains(wid):
-                    sp.setLayout(.float(f.removing(wid)), of: id)
-                default:
-                    break
-                }
-            }
-            if let destWsID = destination, let ws = sp.workspaces[destWsID] {
-                switch ws.layout {
-                case .tiling(var t):
-                    if !t.windows.contains(wid) { t = t.inserting(wid, in: targetScreen, config: tile) }
-                    if follow { t = t.focusing(wid) }
-                    sp.setLayout(.tiling(t), of: destWsID)
-                case .float(var f):
-                    if !f.windows.contains(wid) { f = f.inserting(wid) }
-                    if follow { f = f.focusing(wid) }
-                    sp.setLayout(.float(f), of: destWsID)
-                }
+            if let destination = targetWorkspace ?? sp.active[sid] {
+                sp.file(
+                    wid, in: destination, laidOut: !self.unmanaged.contains(wid),
+                    screen: targetScreen, config: tile, focus: follow
+                )
+            } else {
+                sp.removeWindow(wid)
             }
         }
         if let cur = currentSID(), cur != sid {
@@ -3845,7 +3826,7 @@ final class Daemon: @unchecked Sendable {
                         id: sid,
                         label: ws.label.isEmpty ? "\(wsid.raw)" : ws.label,
                         layout: layout.rawValue,
-                        windows: ws.layout.windows.sorted(),
+                        windows: ws.members.sorted(),
                         current: current,
                         display: display
                     )
@@ -4034,7 +4015,7 @@ final class Daemon: @unchecked Sendable {
                         id: sid,
                         label: label,
                         layout: layout.rawValue,
-                        windows: ws.layout.windows.sorted(),
+                        windows: ws.members.sorted(),
                         current: current,
                         display: display
                     )
@@ -4305,7 +4286,7 @@ final class Daemon: @unchecked Sendable {
     ) -> Bool {
         let sp = readSpaces()
         let currentSid = currentSID()
-        if sid == currentSid || sp.workspace(on: sid)?.layout.windows.contains(wid) == true {
+        if sid == currentSid || sp.workspace(on: sid)?.contains(wid) == true {
             if sp.active[sid] != targetWsID {
                 let bounds = displayBounds(for: sid)
                 do {
@@ -4313,19 +4294,10 @@ final class Daemon: @unchecked Sendable {
                 } catch {
                     fputs("weftd: failed to park \(wid) for rule: \(error)\n", stderr)
                 }
+                // A `manage = false` rule with a `space =` files the window
+                // loose: hidden with that workspace, never tiled by it.
                 updateSpaces { s in
-                    if let curActive = s.active[sid], let ws = s.workspaces[curActive] {
-                        switch ws.layout {
-                        case .tiling(let t): s.workspaces[curActive]?.layout = .tiling(t.removing(wid))
-                        case .float(let f): s.workspaces[curActive]?.layout = .float(f.removing(wid))
-                        }
-                    }
-                    if let ws = s.workspaces[targetWsID] {
-                        switch ws.layout {
-                        case .tiling(let t): s.workspaces[targetWsID]?.layout = .tiling(t.inserting(wid))
-                        case .float(let f): s.workspaces[targetWsID]?.layout = .float(f.inserting(wid))
-                        }
-                    }
+                    s.file(wid, in: targetWsID, laidOut: !self.unmanaged.contains(wid))
                 }
                 fputs("weftd: rule parked \(app) (\(wid)) on hidden workspace \(label)\n", stderr)
                 return true
