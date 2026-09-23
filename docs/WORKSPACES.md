@@ -1,6 +1,7 @@
 # Workspaces — weft's own, inside macOS's
 
-**Status:** Built (Phases 1–4 implemented). S9 in `spikes/RESULTS.md`
+**Status:** Built (Phases 1–5), released in 0.9.11, and the default for new
+installs since 0.9.12 — see "The default" below. S9 in `spikes/RESULTS.md`
 establishes that the mechanism works.
 
 ## The problem, stated once
@@ -318,10 +319,13 @@ this phase changes no shipped command's behaviour.
 
 ```toml
 [general]
-workspaces = "native"      # default — today's behaviour, one workspace per desktop
-# workspaces = "virtual"   # every [[space]] becomes a workspace on the anchor desktop
-# workspace-anchor = 1     # which desktop hosts them, by Mission Control ordinal
+workspaces = "virtual"     # default since 0.9.12 — every [[space]] is a workspace on the anchor desktop
+# workspaces = "native"    # one workspace per macOS desktop, the behaviour before 0.9.12
+workspace-anchor = 1       # which desktop hosts them, by Mission Control ordinal
 ```
+
+Both keys are in Settings › Workspaces, which also shows which mode the running
+engine is in, and the anchor picker only offers desktops that exist.
 
 An existing config works unchanged: eight `[[space]]` labels become eight
 workspaces, the `alt-1`…`alt-9` and `alt-i`/`alt-c`/`alt-b` keybinds keep
@@ -335,6 +339,48 @@ Two things get better on their own under `virtual`:
 - `sticky` starts working. It has never worked — the WindowServer accepts the
   tag from an ordinary connection and drops it (S8) — and as weft's own state
   it is simply "a window that is never parked".
+
+## The default
+
+0.9.12 made `virtual` the parser's default. Upgrading must not change what
+`alt-2` means under someone, so the three installers run
+
+```sh
+weftctl config pin-workspaces native
+```
+
+on the "kept your existing weft.toml" branch and after a yabai migration. It
+writes `workspaces = "native"` into `[general]` only when the key is absent,
+through the same comment-preserving `TomlDocument` Settings uses, and does
+nothing at all when there is no file. A fresh install copies
+`examples/weft.toml`, which says `virtual`. Setup's two workspace pages end in
+a mode chooser that runs the same command, and they stay reachable afterwards
+from the menu's **How Weft Works…**.
+
+Four defects had to go before the flip was safe:
+
+- **Changing mode stranded windows.** A reload never diffed `workspaces` or
+  `workspace-anchor`, so virtual → native left every hidden workspace parked
+  with no verb to bring it back — `rescue()` cannot see a parked window, see
+  above. A reload that changes either key now unparks everything and calls
+  `SpaceState.resetWorkspaces()`, so the next sweep re-seeds from `[[space]]`.
+  Trees are lost; the workspace set is being rebuilt, so that is correct.
+- **The window switcher labelled every anchor window alike.** Every anchor
+  workspace reports the anchor's space id, and a `[SpaceID: String]` map is
+  last-wins. It now looks a window up in its own workspace's `windows` list.
+- **`labels.json` ratcheted the count up.** `persistedNames()` writes one name
+  per workspace, including one per non-anchor desktop, and the sweep fed that
+  back as the anchor count: three labels, five workspaces, seven. With nothing
+  declared the sweep now passes no anchor count, and `adoptDesktops` derives
+  it as the exact inverse of `persistedNames()`.
+- **An anchor past the last desktop clamped silently.** weftd logs it once,
+  `query workspaces` reports the requested and the effective anchor, and
+  `weftctl doctor` prints both.
+
+Two smaller ones rode along: Settings wrote `follow-space-rules = false` on
+every save, cancelling the mode-aware default — it now writes the key only once
+the toggle is touched — and a config with no `[general]` table never reached
+that default at all.
 
 ## Migration
 
@@ -390,8 +436,9 @@ Each is shippable and reversible on its own.
 - **The anchor desktop's Mission Control.** The residual cost, and the one
   thing this design cannot fix. Hidden windows show as slivers.
 - **A long park.** If Electron throttles rendering to nothing after an hour off
-  screen, showing a workspace could mean a visible repaint stall. Phase 3 needs
-  a soak before it is a default.
+  screen, showing a workspace could mean a visible repaint stall. It became the
+  default in 0.9.12 with the one-hour soak still to be run on a release build;
+  a stall found there is a finding against the default.
 - **The crash window.** Closed in Phase 2: the ledger is written and fsynced
   before anything moves, and a write that fails moves nothing. What is left is
   a crash while parked with `parked.json` itself gone, which nothing can

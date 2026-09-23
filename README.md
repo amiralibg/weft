@@ -164,6 +164,43 @@ installer replacing it — and reopens on its own.
 Turn the check off with `check-for-updates = false` under `[general]`. Updating
 by hand is always the one-liner at the top of this file.
 
+## Workspaces
+
+A **workspace** is weft's: a named set of windows with its own layout. A
+**desktop** is macOS's: what Mission Control shows and a swipe switches. Weft
+has two ways of putting one inside the other, set in **Settings › Workspaces**
+or under `[general]`:
+
+```toml
+[general]
+workspaces = "virtual"   # several workspaces on one desktop — the default
+workspace-anchor = 1     # which desktop hosts them, by Mission Control order
+```
+
+- **`virtual`** (the default for new installs). Every `[[space]]` is a
+  workspace on the anchor desktop, and each of your other desktops keeps one of
+  its own. Switching parks the outgoing windows just off screen and brings the
+  incoming ones back — no desktop animation, and sending a window to another
+  workspace works for any window, including one with no title bar to hold. A
+  rule's `space = "…"` places windows by default. The cost: Mission Control on
+  the anchor desktop shows a thin sliver for each hidden window.
+- **`native`**. One workspace per macOS desktop, the behaviour before 0.9.12.
+  Switching is macOS's own; sending a window elsewhere is the title-bar carry
+  described under [System Integrity Protection](#system-integrity-protection),
+  which plays two desktop animations and cannot hold a window without a title
+  bar.
+
+**Upgrading does not change your mode.** An install that finds an existing
+`weft.toml` without the key writes `workspaces = "native"` into it, so `⌥2`
+means what it meant yesterday. Switch in Settings when you want to; the engine
+picks it up live and puts every parked window back on screen first, so nothing
+is left hidden by the change.
+
+Setup explains both before asking which you want, and the menu's **How Weft
+Works…** reopens that explanation any time. `weftctl doctor` prints the mode
+the engine is actually running and the host desktop it settled on. The design,
+and what it measured, is in [`docs/WORKSPACES.md`](docs/WORKSPACES.md).
+
 ## Permissions
 
 Weft needs three macOS privacy permissions, and **all belong to `weftd`** — the
@@ -216,7 +253,7 @@ loads no code into any other process.
 | Tiling, focus, shortcuts, rules, stacks, borders, the switcher | Yes |
 | Switching desktops (`space focus`) | Yes — instant, weft's own Dock swipe, macOS 26.6 or later |
 | Sending a window to another desktop (`space move-window`, `alt-shift-1…5` in the shipped config) | Yes — see below |
-| A rule's `space = "…"` | Yes, opt-in: `follow-space-rules = true` under `[general]` |
+| A rule's `space = "…"` | Yes — on by default under `virtual`; under `native`, opt-in with `follow-space-rules = true` |
 | Keeping a window on every desktop (`sticky`) | macOS can, per application; weft does not drive it — see below |
 
 This was going to need a scripting addition injected into Dock, the way yabai
@@ -241,8 +278,9 @@ stay put:
 ```
 
 It is not fine unprompted — a rule fires when an app opens, which may be while
-you are typing in something else — so a rule's `space =` does nothing until you
-set `follow-space-rules = true`.
+you are typing in something else — so under `native` a rule's `space =` does
+nothing until you set `follow-space-rules = true`. Under `virtual` a rule's move
+is a park, which nobody sees, so it is on unless you turn it off.
 
 Weft reads whichever keys you have bound to "Move left/right a space" rather
 than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
@@ -274,9 +312,9 @@ QWERTY, Colemak and Dvorak.
 |---|---|
 | `⌥H` `⌥J` `⌥K` `⌥L` | Focus the window left / down / up / right |
 | `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Move the focused window that way |
-| `⌥1`…`⌥5` | Go to desktop 1–5 |
-| `⌥⇧1`…`⌥⇧5` | Send the focused window to that desktop |
-| `⌥Tab` | Back to the desktop you came from |
+| `⌥1`…`⌥5` | Go to workspace 1–5 (desktop 1–5 under `native`) |
+| `⌥⇧1`…`⌥⇧5` | Send the focused window to that workspace |
+| `⌥Tab` | Back to the workspace you came from |
 | `⌥F` | Zoom the window to fill the space; again to restore |
 | `⌥⇧Space` | Float the window, or put it back in the tiling |
 | `⌥V` / `⌥⇧V` | Next window splits vertically / horizontally |

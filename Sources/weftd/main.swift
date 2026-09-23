@@ -45,6 +45,10 @@ final class Daemon: @unchecked Sendable {
     /// hidden — but the ledger is read at startup regardless, so the recovery
     /// path is not first exercised by the first crash that needs it.
     private let parker = Parker()
+    /// The last `anchor/desktops` pair complained about, so a clamped
+    /// `workspace-anchor` is said once rather than on every sweep. Nil when
+    /// the anchor currently names a real desktop.
+    private var warnedAnchorClamp: String?
     private let input = InputManager()
     /// Per-space tiling + labels (M4). Single-space `State` values are built
     /// on demand from the current space's tree for the pure reducer.
@@ -1302,6 +1306,26 @@ final class Daemon: @unchecked Sendable {
             let label: String
         }
         var pendingMoves: [RuleMove] = []
+        // `adoptDesktops` clamps an anchor that names no desktop, because a
+        // sweep has to produce a usable state whatever the file says. Clamping
+        // silently is the problem: `workspace-anchor = 3` on a one-desktop Mac
+        // simply behaves as 1, and nothing anywhere says so. The config parser
+        // cannot catch it — it has no WindowServer — so it is said here, once
+        // per distinct (anchor, desktop count) pair rather than every sweep.
+        if cfg.general.workspaces == .virtual, cfg.general.workspaceAnchor > allSids.count {
+            let complaint = "\(cfg.general.workspaceAnchor)/\(allSids.count)"
+            if warnedAnchorClamp != complaint {
+                warnedAnchorClamp = complaint
+                fputs(
+                    "weft: workspace-anchor = \(cfg.general.workspaceAnchor)"
+                        + " but there are only \(allSids.count) desktop(s)"
+                        + " — hosting workspaces on desktop \(allSids.count)\n",
+                    stderr
+                )
+            }
+        } else {
+            warnedAnchorClamp = nil
+        }
         let (currentSids, visible, total) = core.sync { () -> (Set<SpaceID>, [WindowInfo], Int) in
             var sp = self.spaces
             // Which workspaces already existed, taken before `adoptDesktops`
@@ -1312,7 +1336,16 @@ final class Daemon: @unchecked Sendable {
             let declared = cfg.spaces.map { $0.label }
             let loadedLabels = Daemon.loadLabels()
             let initialNames = !declared.isEmpty ? declared : loadedLabels
-            let initialAnchorCount = !declared.isEmpty ? declared.count : (loadedLabels.isEmpty ? nil : loadedLabels.count)
+            // Only the config's own list says how many workspaces the anchor
+            // hosts. `labels.json` cannot: `persistedNames()` writes one entry
+            // per `wsOrder` slot, which under `virtual` is the anchor's
+            // workspaces *plus* one per other desktop. Feeding that count back
+            // as the anchor count ratcheted — three labels on a three-desktop
+            // machine became five workspaces, which saved as five labels,
+            // which came back as seven. Passing nil lets `adoptDesktops`
+            // subtract the other desktops itself, which is the exact inverse
+            // of what was written.
+            let initialAnchorCount = declared.isEmpty ? nil : declared.count
             if sp.workspaces.isEmpty {
                 // Fresh launch: seed names from weft.toml [[space]] decls so a
                 // first config just works; falls back to labels.json, then numerics.
@@ -3546,7 +3579,42 @@ final class Daemon: @unchecked Sendable {
         // old values, so every change showed up one step behind.
         let reshaped = previous.general.asTilingConfig() != next.general.asTilingConfig()
             || previous.general.reserve != next.general.reserve
-        if !initial, reshaped {
+        // Which workspaces exist, and which desktop hosts them, is the one
+        // thing a reload cannot leave to the next sweep. The sweep's ordinary
+        // branch passes `names: nil`, which means "keep what is already
+        // named" — so turning `virtual` on changed nothing but the shape of
+        // `query spaces`, and turning it off left every hidden workspace's
+        // windows parked off screen with no verb that would bring them back.
+        // `rescue` cannot: a parked window keeps one point on screen, which is
+        // exactly what `rescue` reads as "this window is on a display".
+        //
+        // So unpark everything first and rebuild the set from the config.
+        let remapped = previous.general.workspaces != next.general.workspaces
+            || previous.general.workspaceAnchor != next.general.workspaceAnchor
+        if !initial, remapped {
+            fputs(
+                "weft: workspaces \(previous.general.workspaces.rawValue)"
+                    + " → \(next.general.workspaces.rawValue)"
+                    + " (anchor \(next.general.workspaceAnchor)) — rebuilding\n",
+                stderr
+            )
+            syncQueue.async { [weak self] in
+                guard let self else { return }
+                let outcome = self.parker.unparkAll()
+                if !outcome.refused.isEmpty {
+                    // The entries are kept, so the next launch tries again —
+                    // but the user is looking at the screen now, and a window
+                    // that did not come back is the loudest possible symptom.
+                    fputs(
+                        "weft: \(outcome.refused.count) window(s) refused an unpark"
+                            + " and are still off screen: \(outcome.refused)\n",
+                        stderr
+                    )
+                }
+                self.updateSpaces { $0.resetWorkspaces() }
+                self.syncFromSnapshot()
+            }
+        } else if !initial, reshaped {
             syncQueue.async { [weak self] in self?.syncFromSnapshot() }
         }
         fputs("weft: config loaded (\(next.spaces.count) spaces, \(next.rules.count) rules, \(next.keymap.modes.count) modes)\n", stderr)
@@ -3735,7 +3803,7 @@ final class Daemon: @unchecked Sendable {
         // to answer an AX query on every focus change, for nothing.
         let noAX = parts.count == 3 && parts[2] == "--no-ax"
         guard parts.count == 2 || noAX else {
-            return IPCResponse(ok: false, error: "usage: query <displays|spaces|windows|world|state|tree|trace|capability|permissions> [--no-ax]")
+            return IPCResponse(ok: false, error: "usage: query <displays|spaces|workspaces|windows|world|state|tree|trace|capability|permissions> [--no-ax]")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -3847,6 +3915,25 @@ final class Daemon: @unchecked Sendable {
             }
         case "capability":
             return emit(PlatformCapability.current)
+        case "workspaces":
+            // Which model the daemon is *in*, which is not always what the
+            // file says: a mode change is applied by a reload that may not
+            // have landed, and the anchor is clamped when it names no desktop.
+            // Settings shows the difference rather than assuming the file won,
+            // and doctor names the clamp nobody else can see.
+            let sp = readSpaces()
+            let cfg = currentConfig()
+            let desktops = sp.order.count
+            let anchor = cfg.general.workspaces == .virtual
+                ? max(1, min(cfg.general.workspaceAnchor, max(1, desktops)))
+                : cfg.general.workspaceAnchor
+            return emit(WorkspacesStatus(
+                mode: cfg.general.workspaces.rawValue,
+                anchor: anchor,
+                requestedAnchor: cfg.general.workspaceAnchor,
+                desktops: desktops,
+                workspaces: sp.wsOrder.count
+            ))
         case "permissions":
             // The daemon's OWN grants. TCC is per binary, so weftctl and
             // WeftBar asking on their own behalf answer a different question
@@ -3931,10 +4018,21 @@ final class Daemon: @unchecked Sendable {
                           let display = sp.displayBySpace[sid]
                     else { return nil }
                     let current = (sp.active[sid] == wsid) && (sp.currentByDisplay[display] == sid)
-                    let layout = ws.layout.kind
+                    let label = ws.label.isEmpty ? "\(wsid.raw)" : ws.label
+                    // Same fallback chain as the native branch. A workspace
+                    // weft has not shown yet holds an empty tree, whose `kind`
+                    // is `bsp` — so reporting it flatly told the Settings
+                    // window `bsp` for a workspace the file declares
+                    // `layout = "float"`, and the picker showed the wrong one
+                    // until the workspace was first visited.
+                    let layout = ws.layout.windows.isEmpty
+                        ? (ws.overrideKind
+                            ?? cfg.spaces.first(where: { $0.label == label })?.layout
+                            ?? cfg.general.defaultLayout)
+                        : ws.layout.kind
                     return SpaceStatus(
                         id: sid,
-                        label: ws.label.isEmpty ? "\(wsid.raw)" : ws.label,
+                        label: label,
                         layout: layout.rawValue,
                         windows: ws.layout.windows.sorted(),
                         current: current,

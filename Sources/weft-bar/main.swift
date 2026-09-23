@@ -402,6 +402,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cheatItem.image = NSImage(systemSymbolName: "command", accessibilityDescription: nil)
         menu.addItem(cheatItem)
 
+        // How Weft Works — always present, unlike Setup below. It is the one
+        // row that teaches rather than reports, and what it teaches (what a
+        // workspace is, and that weft's are not macOS's desktops) is exactly
+        // what someone goes looking for weeks after Setup ran once.
+        let guideItem = NSMenuItem(
+            title: "How Weft Works…", action: #selector(openWorkspacesGuide), keyEquivalent: ""
+        )
+        guideItem.target = self
+        guideItem.image = NSImage(
+            systemSymbolName: "rectangle.3.group", accessibilityDescription: nil
+        )
+        menu.addItem(guideItem)
+
         // Setup & Permissions — only while a permission is still missing.
         // A granted permission is settled; the menu is for what needs doing
         // now, and a row that says "everything is fine" every time you open it
@@ -502,6 +515,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func openOnboarding() {
         OnboardingWindowController.shared.show()
+    }
+
+    @objc private func openWorkspacesGuide() {
+        OnboardingWindowController.shared.showWorkspaces()
     }
 
     @objc private func openStageManagerSettings() {

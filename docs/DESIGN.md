@@ -26,8 +26,13 @@ Four layouts, selectable **per macOS space**:
 
 Hard constraints:
 
-- **Native macOS Spaces only.** No virtual/emulated workspaces. Space identity comes from
-  SkyLight; we never fake it by parking windows off-screen to simulate a workspace.
+- **Native macOS Spaces are never faked away.** Space identity comes from SkyLight, Mission
+  Control and native fullscreen keep working, and weft does not take a Mac down to one desktop
+  the way AeroSpace does. Since 0.9.11 it *also* offers its own workspaces, several to a
+  desktop, switched by parking windows off screen — nested inside macOS's model rather than
+  replacing it, and the default since 0.9.12. `docs/WORKSPACES.md` is the whole argument;
+  the constraint that survived it is this one, which is why `DragMove`, `DockSwipe` and
+  `SpaceShortcut` all still exist.
 - **No animations, anywhere.** No interpolation, no `NSAnimationContext`, no easing. Frame
   changes are single writes. Interpolating a retile means an AX write per window per frame —
   a cross-process round trip an app can be slow at — so the layout falls behind whatever is

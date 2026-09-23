@@ -338,16 +338,32 @@ import Testing
     #expect(throws: ConfigError.self) { try loadConfig("[integrations.borders]\nbackend = \"quartz\"") }
 }
 
-/// Honouring a rule's `space = "…"` means holding the window and switching
-/// desktops, which takes the screen over while the user is doing something
-/// else. It is the one option whose default is deliberately not the useful
-/// behaviour, so the default is pinned here.
-@Test func followSpaceRulesIsOffUntilAskedFor() throws {
-    #expect(try loadConfig("[general]\ninner-gap = 8").general.followSpaceRules == false)
+/// The one option whose default follows another option.
+///
+/// Under `native`, honouring a rule's `space = "…"` means holding the window
+/// and switching desktops, which takes the screen over while the user is doing
+/// something else — so it is off unless asked for. Under `virtual` the same
+/// move is a park, costing nothing visible, so it is on unless refused.
+@Test func followSpaceRulesFollowsTheWorkspacesMode() throws {
+    #expect(
+        try loadConfig("[general]\nworkspaces = \"native\"").general.followSpaceRules == false
+    )
     #expect(try loadConfig("[general]\nfollow-space-rules = true").general.followSpaceRules)
     #expect(throws: ConfigError.self) {
         try loadConfig("[general]\nfollow-space-rules = \"yes\"")
     }
+}
+
+/// The virtual default has to survive a config that never opens `[general]`.
+///
+/// It used to be decided inside the `if let general` branch, so a file with no
+/// `[general]` table skipped it entirely — and that is precisely the file most
+/// likely to be in virtual mode now that virtual is what an unset key means.
+@Test func virtualDefaultsSurviveAConfigWithNoGeneralTable() throws {
+    let bare = try loadConfig("[keys]\n\"alt-h\" = \"focus west\"\n")
+    #expect(bare.general.workspaces == .virtual)
+    #expect(bare.general.followSpaceRules == true)
+    #expect(try loadConfig("").general.workspaces == .virtual)
 }
 
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
@@ -576,9 +592,16 @@ private func exampleText() throws -> String {
 }
 
 @Test func parsesWorkspacesAndWorkspaceAnchor() throws {
-    let cfgNative = try loadConfig("[general]\ninner-gap = 8\n")
+    // Unset means virtual as of 0.9.12. An existing install keeps `native`
+    // because the installer writes it into the file, not because the parser
+    // assumes it — see `weftctl config pin-workspaces`.
+    let cfgDefault = try loadConfig("[general]\ninner-gap = 8\n")
+    #expect(cfgDefault.general.workspaces == .virtual)
+    #expect(cfgDefault.general.workspaceAnchor == 1)
+    #expect(cfgDefault.general.followSpaceRules == true)
+
+    let cfgNative = try loadConfig("[general]\nworkspaces = \"native\"\n")
     #expect(cfgNative.general.workspaces == .native)
-    #expect(cfgNative.general.workspaceAnchor == 1)
     #expect(cfgNative.general.followSpaceRules == false)
 
     let cfgVirtual = try loadConfig("""

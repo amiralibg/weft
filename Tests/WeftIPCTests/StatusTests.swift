@@ -121,3 +121,39 @@ private func status(_ s: SpaceState, _ sid: SpaceID, fallback: [WindowID] = []) 
     // And it comes back the way it went out.
     #expect(try JSONDecoder().decode(BarStateStatus.self, from: data) == payload)
 }
+
+// MARK: - `query workspaces`
+
+// The Settings window and doctor both decide what to *say* from this, so a
+// field that decodes into the wrong answer shows up as confident wrong advice
+// rather than as a decode failure.
+
+@Test func workspacesStatusRoundTrips() throws {
+    let sent = WorkspacesStatus(
+        mode: "virtual", anchor: 1, requestedAnchor: 3, desktops: 1, workspaces: 5
+    )
+    let data = try JSONEncoder().encode(sent)
+    let back = try JSONDecoder().decode(WorkspacesStatus.self, from: data)
+    #expect(back == sent)
+}
+
+/// The clamp is only visible as a difference between two fields, so the rule
+/// that reads it is pinned here rather than left to each caller.
+@Test func anchorClampedOnlyWhenVirtualAndDifferent() {
+    #expect(
+        WorkspacesStatus(
+            mode: "virtual", anchor: 1, requestedAnchor: 3, desktops: 1, workspaces: 4
+        ).anchorClamped
+    )
+    #expect(
+        !WorkspacesStatus(
+            mode: "virtual", anchor: 2, requestedAnchor: 2, desktops: 3, workspaces: 4
+        ).anchorClamped
+    )
+    // Under native the anchor means nothing, so it cannot be wrong.
+    #expect(
+        !WorkspacesStatus(
+            mode: "native", anchor: 1, requestedAnchor: 9, desktops: 3, workspaces: 3
+        ).anchorClamped
+    )
+}

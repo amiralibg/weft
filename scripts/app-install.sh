@@ -79,11 +79,19 @@ say "Setting up your config"
 mkdir -p "$HOME/.config/weft"
 if [ -e "$HOME/.config/weft/weft.toml" ]; then
     echo "    kept your existing ~/.config/weft/weft.toml"
+    # weft 0.9.12 made `workspaces = "virtual"` the default. An upgrade must
+    # not change what alt-2 means under someone mid-session, so a config that
+    # predates the key gets `native` written into it explicitly. No-op if the
+    # key is already there.
+    "$BINDIR/weftctl" config pin-workspaces native || true
 elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
     # Their own setup is the only config that will feel right; the generic
     # example would put their keybinds on the wrong keys.
     echo "    found a yabai/skhd config — migrating it"
     "$BINDIR/weftctl" migrate --write || cp "$RES/weft.toml" "$HOME/.config/weft/weft.toml"
+    # Migrated binds switch native desktops one-to-one; virtual would redirect
+    # all of them onto desktop 1.
+    "$BINDIR/weftctl" config pin-workspaces native || true
 else
     cp "$RES/weft.toml" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml"

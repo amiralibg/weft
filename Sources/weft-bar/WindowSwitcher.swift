@@ -201,15 +201,32 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
               let wins = try? JSONDecoder().decode([WindowStatus].self, from: data)
         else { return [] }
 
+        // Two maps, and the window one is consulted first.
+        //
+        // `SpaceStatus.id` is the *desktop's* space id by design, so under
+        // `workspaces = "virtual"` every workspace on the anchor reports the
+        // same id and keying by it meant last-wins: every window on that
+        // desktop was labelled with whichever workspace came last. `windows`
+        // is per workspace in both modes, so asking which list a window is in
+        // answers the question the label is actually for.
+        //
+        // The id map stays as the fallback, for a window weft holds no
+        // membership for — one that has just opened, or one on a desktop the
+        // daemon has not swept yet.
         var spacesMap: [SpaceID: String] = [:]
+        var windowMap: [WindowID: String] = [:]
         if let sJson = BarIPC.send("query spaces"),
            let sData = sJson.data(using: .utf8),
            let parsed = try? JSONDecoder().decode([SpaceStatus].self, from: sData)
         {
-            for s in parsed { spacesMap[s.id] = s.label.isEmpty ? "\(s.id)" : s.label }
+            for s in parsed {
+                let label = s.label.isEmpty ? "\(s.id)" : s.label
+                spacesMap[s.id] = label
+                for wid in s.windows { windowMap[wid] = label }
+            }
         }
         return wins.filter { !$0.app.isEmpty }.map {
-            let sLabel = $0.spaces.first.flatMap { spacesMap[$0] } ?? "space"
+            let sLabel = windowMap[$0.id] ?? $0.spaces.first.flatMap { spacesMap[$0] } ?? "space"
             return SwitcherItem(
                 wid: $0.id, pid: $0.pid, app: $0.app, title: $0.title, spaceLabel: sLabel
             )

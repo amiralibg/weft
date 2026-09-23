@@ -4,6 +4,7 @@ import Combine
 import CoreGraphics
 import Foundation
 import SwiftUI
+import WeftBarConfig
 
 // First-run Setup: the permissions gate, as a three-page flow.
 //
@@ -151,7 +152,14 @@ final class SetupModel: ObservableObject {
     @Published var installing = false
     @Published var installError: String?
 
-    enum Page: Int { case welcome, permissions, done, install }
+    enum Page: Int {
+        case welcome, workspacesIntro, workspacesChoice, permissions, done, install
+    }
+
+    /// The mode the chooser is showing. Seeded from the file so re-opening the
+    /// explainer later starts on the answer already in force rather than on
+    /// the recommendation.
+    @Published var workspacesChoice = "virtual"
 
     private var timer: Timer?
     private var stepStarted: Date?
@@ -387,6 +395,45 @@ final class SetupModel: ObservableObject {
         }
     }
 
+    /// Welcome → the workspaces explainer. Permissions come after it, because
+    /// the model is what every later screen is about and the permission panes
+    /// take the user out to System Settings and back.
+    func beginWorkspaces() {
+        workspacesChoice = Self.currentWorkspacesMode()
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+            page = .workspacesIntro
+        }
+    }
+
+    func goTo(_ next: Page) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { page = next }
+    }
+
+    /// Write the chosen mode, then carry on into permissions.
+    ///
+    /// Through `weftctl config pin-workspaces` rather than by editing TOML
+    /// here: that command is what the installers already call, it preserves
+    /// every comment in the file, and it has tests. Two code paths that write
+    /// the same key is how the two answers start disagreeing.
+    func chooseWorkspaces() {
+        let mode = workspacesChoice
+        Task.detached(priority: .userInitiated) {
+            ConfigEditorWindowController.runWeftctl(["config", "pin-workspaces", mode])
+            await MainActor.run { self.beginPermissions() }
+        }
+    }
+
+    /// What the file says right now, for seeding the chooser.
+    static func currentWorkspacesMode() -> String {
+        guard let text = try? String(contentsOfFile: ConfigStore.configPath, encoding: .utf8)
+        else { return "virtual" }
+        let document = TomlDocument(text)
+        guard let i = document.firstIndex(ofHeader: "[general]"),
+              let declared = document.sections[i].string("workspaces")
+        else { return "virtual" }
+        return declared == "native" ? "native" : "virtual"
+    }
+
     func beginPermissions() {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
             page = requiredGranted ? .done : .permissions
@@ -580,6 +627,10 @@ struct SetupView: View {
                 switch model.page {
                 case .install: InstallPage(model: model, onClose: onClose).transition(pageTransition)
                 case .welcome: WelcomePage(model: model, onClose: onClose).transition(pageTransition)
+                case .workspacesIntro:
+                    WorkspacesIntroPage(model: model).transition(pageTransition)
+                case .workspacesChoice:
+                    WorkspacesChoicePage(model: model).transition(pageTransition)
                 case .permissions:
                     PermissionsPage(model: model, onClose: onClose).transition(pageTransition)
                 case .done:
@@ -772,8 +823,8 @@ private struct WelcomePage: View {
             Spacer()
 
             VStack(spacing: 14) {
-                Button(action: model.beginPermissions) {
-                    Text(model.requiredGranted ? "Review permissions" : "Get started")
+                Button(action: model.beginWorkspaces) {
+                    Text(model.requiredGranted ? "Review setup" : "Get started")
                         .frame(width: 190)
                 }
                 .buttonStyle(.borderedProminent)
@@ -836,6 +887,227 @@ private struct Bullet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+// MARK: - Page 1b: what a workspace is
+
+/// The one concept weft cannot be used without understanding.
+///
+/// Everything else in Setup is a switch to flip. This is the model: what a
+/// workspace is, and the fact that weft's own workspaces are not macOS's
+/// desktops. Without it, "workspace" and "desktop" read as synonyms, and the
+/// choice on the next page is a coin toss between two words.
+private struct WorkspacesIntroPage: View {
+    @ObservedObject var model: SetupModel
+    @State private var appeared = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            Image(systemName: "rectangle.3.group.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(Color.weft)
+                .scaleEffect(appeared ? 1 : 0.7)
+                .opacity(appeared ? 1 : 0)
+
+            Text("Workspaces")
+                .font(.system(size: 30, weight: .semibold))
+                .padding(.top, 20)
+                .opacity(appeared ? 1 : 0)
+                .offset(y: appeared ? 0 : 10)
+
+            Text("A named set of windows, with a layout of its own.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+                .multilineTextAlignment(.center)
+                .opacity(appeared ? 1 : 0)
+                .offset(y: appeared ? 0 : 10)
+
+            VStack(alignment: .leading, spacing: 16) {
+                Bullet(
+                    symbol: "number",
+                    title: "One per job",
+                    text: "`alt-1` for your editor, `alt-2` for the browser, `alt-3` for chat. "
+                        + "Each keeps its own windows, arranged its own way."
+                )
+                Bullet(
+                    symbol: "bolt.fill",
+                    title: "Weft's own, not macOS's",
+                    text: "Weft can keep them all on **one** macOS desktop and switch between "
+                        + "them by moving windows just off the edge of the screen. "
+                        + "No desktop change, so nothing animates."
+                )
+                Bullet(
+                    symbol: "macwindow.on.rectangle",
+                    title: "Every window can move",
+                    text: "Sending a window to another *desktop* means weft drags it by the "
+                        + "title bar — which some terminals do not have. Sending it to another "
+                        + "*workspace* is just bookkeeping, so it always works."
+                )
+            }
+            .padding(.top, 30)
+            .frame(maxWidth: 460, alignment: .leading)
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 14)
+
+            Spacer()
+
+            VStack(spacing: 12) {
+                Button { model.goTo(.workspacesChoice) } label: {
+                    Text("Continue").frame(width: 190)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+
+                Button("Back") { model.goTo(.welcome) }
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 44)
+            .opacity(appeared ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) { appeared = true }
+        }
+    }
+}
+
+// MARK: - Page 1c: which model
+
+/// The choice, with both costs written down.
+///
+/// Neither option is free and the pane says so on both cards, because the one
+/// thing that cannot be undone quietly is a user picking virtual, meeting
+/// Mission Control's slivers a week later, and reading it as a bug.
+private struct WorkspacesChoicePage: View {
+    @ObservedObject var model: SetupModel
+    @State private var appeared = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            Text("How should they work?")
+                .font(.system(size: 28, weight: .semibold))
+                .opacity(appeared ? 1 : 0)
+                .offset(y: appeared ? 0 : 10)
+
+            Text("You can change this any time in Settings → Workspaces.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+                .opacity(appeared ? 1 : 0)
+
+            VStack(spacing: 14) {
+                ChoiceCard(
+                    symbol: "rectangle.3.group.fill",
+                    title: "All on one desktop",
+                    badge: "Recommended",
+                    summary: "Switching is instant and any window can move between them.",
+                    cost: "Mission Control shows a sliver for each hidden window on that desktop.",
+                    selected: model.workspacesChoice == "virtual"
+                ) { model.workspacesChoice = "virtual" }
+
+                ChoiceCard(
+                    symbol: "macwindow.on.rectangle",
+                    title: "One per macOS desktop",
+                    badge: nil,
+                    summary: "Each workspace is one of macOS's own desktops. Mission Control "
+                        + "and swipes behave exactly as they always have.",
+                    cost: "Switching animates, and a window with no title bar cannot be moved.",
+                    selected: model.workspacesChoice == "native"
+                ) { model.workspacesChoice = "native" }
+            }
+            .padding(.top, 26)
+            .frame(maxWidth: 480)
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 14)
+
+            Spacer()
+
+            VStack(spacing: 12) {
+                Button(action: model.chooseWorkspaces) {
+                    Text("Continue").frame(width: 190)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+
+                Button("Back") { model.goTo(.workspacesIntro) }
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 44)
+            .opacity(appeared ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) { appeared = true }
+        }
+    }
+}
+
+private struct ChoiceCard: View {
+    let symbol: String
+    let title: String
+    let badge: String?
+    let summary: String
+    let cost: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.system(size: 20))
+                    .foregroundStyle(selected ? Color.weft : .secondary)
+                    .frame(width: 26)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text(title).font(.system(size: 15, weight: .semibold))
+                        if let badge { Chip(text: badge, tint: .weft) }
+                    }
+                    Text(.init(summary))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // Named on both cards, not only on the one being talked
+                    // out of. A trade-off listed under one option reads as a
+                    // warning; listed under both, it reads as a choice.
+                    Label(cost, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17))
+                    .foregroundStyle(selected ? Color.weft : Color.secondary.opacity(0.4))
+                    .padding(.top, 2)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(selected ? 0.07 : 0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(selected ? Color.weft : Color.primary.opacity(0.12),
+                        lineWidth: selected ? 2 : 1)
+        )
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: selected)
     }
 }
 
@@ -1640,6 +1912,19 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     /// after an app update failed.
     func showInstall() {
         model.page = .install
+        show()
+    }
+
+    /// Open on the workspaces explainer, for someone who wants to read it
+    /// again or change their mind.
+    ///
+    /// Setup is otherwise a one-time flow — it is gated by `.onboarded`, and
+    /// the menu only offers it while a permission is missing — so without this
+    /// the only real explanation of the model in the whole app would be
+    /// unreachable the moment it had been read once.
+    func showWorkspaces() {
+        model.workspacesChoice = SetupModel.currentWorkspacesMode()
+        model.page = .workspacesIntro
         show()
     }
 

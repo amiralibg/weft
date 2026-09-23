@@ -27,7 +27,7 @@ import WeftPlatform
 // MARK: - Sections
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
-    case general, appearance, shortcuts, apps, desktops, advanced
+    case general, appearance, workspaces, shortcuts, apps, desktops, advanced
 
     var id: String { rawValue }
 
@@ -35,6 +35,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .general: return "General"
         case .appearance: return "Appearance"
+        case .workspaces: return "Workspaces"
         case .shortcuts: return "Shortcuts"
         case .apps: return "Apps"
         case .desktops: return "Desktops"
@@ -42,10 +43,22 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// The Desktops pane lists whatever the workspaces mode makes: named
+    /// desktops under `native`, named workspaces under `virtual`. One pane
+    /// either way — it is the same `[[space]]` list — but calling it
+    /// "Desktops" under virtual names the wrong thing, and the wrong noun in
+    /// the sidebar is what sends someone to Mission Control to fix a setting
+    /// that lives in this window.
+    func title(virtual: Bool) -> String {
+        guard virtual, self == .desktops else { return title }
+        return "Workspace List"
+    }
+
     var symbol: String {
         switch self {
         case .general: return "gearshape"
         case .appearance: return "paintbrush"
+        case .workspaces: return "rectangle.3.group"
         case .shortcuts: return "command"
         case .apps: return "square.on.square"
         case .desktops: return "menubar.dock.rectangle"
@@ -61,6 +74,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case "rules": self = .apps
         case "spaces": self = .desktops
         case "integrations": self = .advanced
+        case "workspace": self = .workspaces
         default:
             guard let section = SettingsSection(rawValue: launchName) else { return nil }
             self = section
@@ -85,7 +99,9 @@ struct SettingsView: View {
         NavigationSplitView {
             List(selection: $section) {
                 ForEach(SettingsSection.allCases) { item in
-                    Label(item.title, systemImage: item.symbol).tag(item)
+                    Label(item.title(virtual: store.workspacesMode == "virtual"),
+                          systemImage: item.symbol)
+                        .tag(item)
                 }
             }
             .listStyle(.sidebar)
@@ -95,7 +111,9 @@ struct SettingsView: View {
             }
         } detail: {
             detail(section ?? .general)
-                .navigationTitle((section ?? .general).title)
+                .navigationTitle(
+                    (section ?? .general).title(virtual: store.workspacesMode == "virtual")
+                )
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) { SaveStateBadge(store: store) }
                 }
@@ -110,6 +128,7 @@ struct SettingsView: View {
         switch section {
         case .general: GeneralPane(store: store, health: health)
         case .appearance: AppearancePane(store: store)
+        case .workspaces: WorkspacesPane(store: store, health: health)
         case .shortcuts: ShortcutsPane(store: store)
         case .apps: AppsPane(store: store)
         case .desktops: DesktopsPane(store: store, health: health)
@@ -412,6 +431,267 @@ private struct MiniWindow: View {
     }
 }
 
+// MARK: - Workspaces
+
+/// Where workspaces live: inside one macOS desktop, or one per desktop.
+///
+/// This is the pane that decides what "space" means everywhere else in weft,
+/// so it leads with a picture rather than a switch. The two models are hard to
+/// tell apart from prose — both give you named groups of windows you switch
+/// between with alt-N — and the difference that matters is entirely mechanical:
+/// one changes desktop and one does not.
+private struct WorkspacesPane: View {
+    @ObservedObject var store: ConfigStore
+    @ObservedObject var health: EngineHealth
+
+    private var virtual: Bool { store.workspacesMode == "virtual" }
+
+    /// The file and the running daemon can disagree: a reload is in flight, or
+    /// the engine has not been restarted. weftd rebuilds its workspace set
+    /// when the mode changes, so this usually clears itself within a second —
+    /// but while it is true, everything else in this window describes a model
+    /// the user is not looking at.
+    private var pending: Bool {
+        guard health.running, let live = health.workspacesMode else { return false }
+        return live != store.workspacesMode
+            || (virtual && health.anchorDesktop != store.workspaceAnchor)
+    }
+
+    var body: some View {
+        Form {
+            if pending {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(.orange)
+                        Text("Weft is still running in **\(health.workspacesMode ?? "?")** mode. "
+                            + "It picks the change up on its own; restart the engine if it does not.")
+                            .font(.callout)
+                        Spacer()
+                        Button("Restart") { health.restart() }
+                            .buttonStyle(.borderless)
+                    }
+                }
+            }
+
+            Section {
+                WorkspacesHero(virtual: virtual, anchor: store.workspaceAnchor,
+                               desktops: max(1, health.desktopCount))
+                    .frame(height: 210)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+
+            Section {
+                Picker("", selection: Binding(
+                    get: { store.workspacesMode },
+                    set: { store.setWorkspacesMode($0) }
+                )) {
+                    Text("All on one desktop").tag("virtual")
+                    Text("One per macOS desktop").tag("native")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if virtual {
+                    // Only desktops that exist are offered, which is the UI
+                    // half of "an anchor naming no desktop is silently
+                    // clamped": this window cannot produce that value at all.
+                    Picker("Host desktop", selection: Binding(
+                        get: { min(store.workspaceAnchor, max(1, health.desktopCount)) },
+                        set: { store.workspaceAnchor = $0; store.markDirty() }
+                    )) {
+                        ForEach(1...max(1, health.desktopCount), id: \.self) { n in
+                            Text("Desktop \(n)").tag(n)
+                        }
+                    }
+                    .disabled(health.desktopCount <= 1)
+                }
+            } header: {
+                Text("Where your workspaces live")
+            } footer: {
+                Text(virtual ? Self.virtualFooter : Self.nativeFooter)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+
+            Section {
+                ComparisonRow(
+                    symbol: "bolt.fill",
+                    title: "Switching",
+                    virtual: "Instant. Nothing animates.",
+                    native: "About half a second of desktop animation.",
+                    showingVirtual: virtual
+                )
+                ComparisonRow(
+                    symbol: "arrow.left.arrow.right",
+                    title: "Moving a window",
+                    virtual: "Works for every window, including one with no title bar.",
+                    native: "Weft holds the title bar, so a window without one cannot move.",
+                    showingVirtual: virtual
+                )
+                ComparisonRow(
+                    symbol: "square.grid.3x3",
+                    title: "Mission Control",
+                    virtual: "Hidden windows show as a sliver on the host desktop.",
+                    native: "Unchanged — every desktop looks the way macOS made it.",
+                    showingVirtual: virtual
+                )
+            } header: {
+                Text("What changes")
+            } footer: {
+                Text("Your other macOS desktops keep working either way: full-screen apps "
+                    + "make their own, swipes and Mission Control still switch them, and weft "
+                    + "tiles whatever is on them.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private static let virtualFooter =
+        "Your workspaces all sit on one macOS desktop. Switching between them hides the "
+        + "windows you are not using just off the edge of the screen and puts the others back "
+        + "— no desktop change, nothing to animate, and it works on any window. "
+        + "Add and name them in the Workspace List."
+
+    private static let nativeFooter =
+        "Each workspace is one of macOS's own desktops, the way weft worked before 0.9.12. "
+        + "Switching is a real desktop change, so it animates, and moving a window to another "
+        + "one means weft holds it by the title bar and presses your \"move a space\" shortcut "
+        + "— which a window with no title bar does not have."
+}
+
+/// One row of the virtual/native comparison. Both answers are written down;
+/// only the live one is emphasised, so the pane reads as a comparison rather
+/// than as a list of whichever facts happen to apply right now.
+private struct ComparisonRow: View {
+    let symbol: String
+    let title: String
+    let virtual: String
+    let native: String
+    let showingVirtual: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: symbol)
+                .frame(width: 20)
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                Text(showingVirtual ? virtual : native)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// The two models, drawn.
+///
+/// `DesktopPreview` next door draws one screen and the windows inside it;
+/// this draws the screens themselves and where workspaces sit relative to
+/// them, which is the only thing the two modes actually disagree about. It
+/// springs between the two arrangements so switching the picker shows the
+/// change rather than replacing one static picture with another.
+private struct WorkspacesHero: View {
+    let virtual: Bool
+    let anchor: Int
+    let desktops: Int
+
+    var body: some View {
+        GeometryReader { geo in
+            let count = max(1, min(desktops, 3))
+            let gap: CGFloat = 14
+            let w = (geo.size.width - gap * CGFloat(count - 1)) / CGFloat(count)
+            let h = min(geo.size.height, w * 0.62)
+            HStack(spacing: gap) {
+                ForEach(1...count, id: \.self) { n in
+                    MiniScreen(
+                        number: n,
+                        // Under native every desktop carries exactly one
+                        // workspace; under virtual the host carries the stack
+                        // and the rest carry one each, which is the whole
+                        // shape of the model in one number.
+                        chips: virtual ? (n == min(anchor, count) ? 4 : 1) : 1,
+                        highlighted: virtual && n == min(anchor, count)
+                    )
+                    .frame(width: w, height: h)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: virtual)
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: anchor)
+        }
+        .padding(.vertical, 10)
+    }
+}
+
+/// One screen: wallpaper, menu bar, and a chip per workspace it holds. The
+/// front chip is the one showing; the ones behind it are parked.
+private struct MiniScreen: View {
+    let number: Int
+    let chips: Int
+    let highlighted: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            ZStack(alignment: .topLeading) {
+                Wallpaper().clipShape(shape)
+                Rectangle()
+                    .fill(Color.black.opacity(0.28))
+                    .frame(height: 8)
+                VStack {
+                    Spacer()
+                    ZStack {
+                        // Drawn back to front, so the stack reads as depth.
+                        ForEach((0..<chips).reversed(), id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.white.opacity(i == 0 ? 0.30 : 0.12))
+                                .frame(
+                                    width: geo.size.width * (0.62 - CGFloat(i) * 0.06),
+                                    height: geo.size.height * 0.42
+                                )
+                                .offset(x: CGFloat(i) * 7, y: CGFloat(i) * -5)
+                                .overlay {
+                                    if i == 0 {
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .stroke(Color.white.opacity(0.45), lineWidth: 1)
+                                            .frame(
+                                                width: geo.size.width * 0.62,
+                                                height: geo.size.height * 0.42
+                                            )
+                                    }
+                                }
+                        }
+                    }
+                    Spacer()
+                    Text("Desktop \(number)")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .padding(.bottom, 6)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .clipShape(shape)
+            .overlay {
+                shape.stroke(
+                    highlighted ? Color.accentColor : Color.white.opacity(0.18),
+                    lineWidth: highlighted ? 2 : 1
+                )
+            }
+        }
+    }
+}
+
 // MARK: - Appearance
 
 private struct AppearancePane: View {
@@ -553,7 +833,9 @@ private struct ShortcutsPane: View {
             buckets[Self.category(of: row), default: []].append(row)
         }
         let known = Self.order.compactMap { name in
-            buckets[name].map { Group(name: name == "Spaces" ? "Desktops" : name, rows: $0) }
+            buckets[name].map {
+                Group(name: name == "Spaces" ? WorkspaceVocabulary.plural : name, rows: $0)
+            }
         }
         let rest = buckets.keys.filter { !Self.order.contains($0) }.sorted().compactMap { name in
             buckets[name].map { Group(name: name, rows: $0) }
@@ -611,11 +893,10 @@ private struct ShortcutRowView: View {
     @State private var hovering = false
 
     /// What the shortcut does, in words — "space" said the way the rest of
-    /// this window says it.
+    /// this window says it, which depends on the workspaces mode.
     static func summary(for command: String) -> String {
         guard !command.isEmpty else { return "" }
-        return CheatsheetModel.describe(command).1
-            .replacingOccurrences(of: "space", with: "desktop")
+        return WorkspaceVocabulary.rephrase(CheatsheetModel.describe(command).1)
     }
 
     var body: some View {
@@ -686,7 +967,7 @@ private struct ActionPicker: View {
                     ForEach(CommandCatalog.groups, id: \.name) { group in
                         let hits = group.commands.filter(matches)
                         if !hits.isEmpty {
-                            Text(group.name == "Spaces" ? "Desktops" : group.name)
+                            Text(group.name == "Spaces" ? WorkspaceVocabulary.plural : group.name)
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 14)
@@ -970,7 +1251,7 @@ private struct AppRuleRow: View {
                 .labelsHidden()
                 .fixedSize()
                 Picker("", selection: $rule.space) {
-                    Text("Any desktop").tag("")
+                    Text("Any \(WorkspaceVocabulary.noun)").tag("")
                     ForEach(labels, id: \.self) { Text($0).tag($0) }
                     if !rule.space.isEmpty, !labels.contains(rule.space) {
                         Text(rule.space).tag(rule.space)
@@ -1082,28 +1363,56 @@ private struct DesktopsPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
 
+    private var virtual: Bool { store.workspacesMode == "virtual" }
+
     /// Rows past this have no desktop to land on: names go out in Mission
     /// Control order, so it is purely a count.
-    private var landing: Int { health.running ? health.liveSpaces.count : store.spaces.count }
+    ///
+    /// Under `virtual` every row lands — the host desktop takes as many
+    /// workspaces as are named, and that is the entire point of the mode — so
+    /// the question does not arise and every row is marked live.
+    private var landing: Int {
+        if virtual { return store.spaces.count }
+        return health.running ? health.desktopCount : store.spaces.count
+    }
 
     var body: some View {
         Form {
-            if health.running, store.spaces.count > health.liveSpaces.count {
+            // Native only. Under `virtual` more names than desktops is the
+            // configuration working, not a mistake — and the count it used to
+            // compare against was `liveSpaces.count`, which in that mode is
+            // the workspace count, so the test compared a number with itself.
+            if !virtual, health.running, store.spaces.count > health.desktopCount {
                 Section {
                     Label(
-                        "You have \(health.liveSpaces.count) desktop(s), but \(store.spaces.count) names. Add desktops in Mission Control, or remove the extra names.",
+                        "You have \(health.desktopCount) desktop(s), but \(store.spaces.count) names. Add desktops in Mission Control, remove the extra names, or switch to virtual workspaces under Workspaces.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .foregroundStyle(.orange)
                 }
             }
 
+            if virtual, health.running {
+                Section {
+                    let others = max(0, health.desktopCount - 1)
+                    Label(
+                        others == 0
+                            ? "\(store.spaces.count) workspace(s), all on desktop \(health.anchorDesktop)."
+                            : "\(store.spaces.count) workspace(s) on desktop \(health.anchorDesktop), plus one on each of your other \(others) desktop(s).",
+                        systemImage: "rectangle.3.group"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+            }
+
             Section {
                 if store.spaces.isEmpty {
                     EmptyState(
-                        symbol: "menubar.dock.rectangle",
-                        title: "No named desktops",
-                        text: "Every desktop uses the default layout. Name one to give it a layout of its own, or to send apps to it."
+                        symbol: virtual ? "rectangle.3.group" : "menubar.dock.rectangle",
+                        title: virtual ? "No workspaces yet" : "No named desktops",
+                        text: virtual
+                            ? "Add a few and give them names. Each one is a separate set of windows you switch between instantly, all on the same macOS desktop."
+                            : "Every desktop uses the default layout. Name one to give it a layout of its own, or to send apps to it."
                     )
                 }
                 ForEach(Array(store.spaces.enumerated()), id: \.element.id) { index, space in
@@ -1111,6 +1420,7 @@ private struct DesktopsPane: View {
                         number: index + 1,
                         space: binding(space.id),
                         hasDesktop: index < landing,
+                        virtual: virtual,
                         canMoveUp: index > 0,
                         canMoveDown: index < store.spaces.count - 1,
                         onMove: { move(space.id, by: $0) },
@@ -1123,11 +1433,15 @@ private struct DesktopsPane: View {
                 Button {
                     store.addSpace()
                 } label: {
-                    Label("Add Desktop", systemImage: "plus")
+                    Label(virtual ? "Add Workspace" : "Add Desktop", systemImage: "plus")
                 }
                 .buttonStyle(.borderless)
             } footer: {
-                Text("Names follow Mission Control order — the first name is your first desktop. Shortcuts and apps can refer to a desktop by its name.")
+                Text(
+                    virtual
+                        ? "The order here is the order alt-1, alt-2 and so on count in. Shortcuts and apps can refer to a workspace by its name. Adding one costs nothing — there is no macOS desktop to create."
+                        : "Names follow Mission Control order — the first name is your first desktop. Shortcuts and apps can refer to a desktop by its name."
+                )
             }
         }
         .formStyle(.grouped)
@@ -1157,6 +1471,7 @@ private struct DesktopRow: View {
     let number: Int
     @Binding var space: SpaceRow
     let hasDesktop: Bool
+    let virtual: Bool
     let canMoveUp: Bool
     let canMoveDown: Bool
     let onMove: (Int) -> Void
@@ -1173,7 +1488,7 @@ private struct DesktopRow: View {
             TextField("Name", text: $space.label)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 220)
-            if !hasDesktop {
+            if !hasDesktop, !virtual {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .help("There is no desktop for this name yet.")
@@ -1423,6 +1738,17 @@ private struct AdvancedPane: View {
                     Text(s.detail)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    if store.workspacesMode == "virtual" {
+                        // The capability above is about macOS desktops, and
+                        // under virtual most switching never touches one. Left
+                        // alone it read as a verdict on alt-1..9, which it is
+                        // not, and a red "Not available" next to shortcuts
+                        // that work perfectly is the worst kind of wrong.
+                        Text("This is about moving between macOS desktops. Switching between "
+                            + "your workspaces does not use it — that is instant and needs nothing.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
                     if !s.works {
                         Button("Open Keyboard Shortcuts") {
                             if let url = URL(string:
@@ -1439,13 +1765,22 @@ private struct AdvancedPane: View {
                     }
                 }
                 Toggle(
-                    "Let a rule send a window to its desktop when it opens",
-                    isOn: store.bind(\.followSpaceRules)
+                    store.workspacesMode == "virtual"
+                        ? "Let a rule send a window to its workspace when it opens"
+                        : "Let a rule send a window to its desktop when it opens",
+                    isOn: Binding(
+                        get: { store.followSpaceRules },
+                        set: { store.setFollowSpaceRules($0) }
+                    )
                 )
             } header: {
-                Text("Desktops")
+                Text(store.workspacesMode == "virtual" ? "Desktops & rules" : "Desktops")
             } footer: {
-                Text("Weft never asks you to change System Integrity Protection. Switching desktops is instant. Sending a window to another desktop works by holding the window and pressing your “move a space” shortcut, so the screen changes desktop and changes back — bind that shortcut under Mission Control above.\n\nThat visible movement is why the rule setting is off by default: you asked for it when you press a shortcut, but a rule fires whenever a matching app opens, which may be while you are typing somewhere else.\n\nKeeping a window on every desktop is macOS’s own setting rather than weft’s: right-click the app in the Dock → Options → All Desktops.")
+                Text(
+                    store.workspacesMode == "virtual"
+                        ? "Weft never asks you to change System Integrity Protection.\n\nWith workspaces on one desktop, a rule placing a window is instant and invisible, so this is on by default — there is nothing to interrupt. It only takes the screen over for a rule naming a workspace on a *different* macOS desktop, which weft still has to switch to the old way.\n\nKeeping a window on every desktop is macOS’s own setting rather than weft’s: right-click the app in the Dock → Options → All Desktops."
+                        : "Weft never asks you to change System Integrity Protection. Switching desktops is instant. Sending a window to another desktop works by holding the window and pressing your “move a space” shortcut, so the screen changes desktop and changes back — bind that shortcut under Mission Control above.\n\nThat visible movement is why the rule setting is off by default: you asked for it when you press a shortcut, but a rule fires whenever a matching app opens, which may be while you are typing somewhere else.\n\nKeeping a window on every desktop is macOS’s own setting rather than weft’s: right-click the app in the Dock → Options → All Desktops."
+                )
             }
 
             Section("Border drawing") {
@@ -2015,7 +2350,22 @@ final class EngineHealth: ObservableObject {
     /// Running with grants it cannot use, because they came after it started.
     @Published var needsRestart = false
     /// Labels of the desktops that exist right now.
+    ///
+    /// Under `workspaces = "virtual"` this is one entry per *workspace*, not
+    /// per desktop — `query spaces` reports the model weft runs, not macOS's.
+    /// Anything that needs the desktop count wants `desktopCount`.
     @Published var liveSpaces: [String] = []
+    /// The mode the daemon is actually running, which is not always what the
+    /// file says: a mode change is applied by a reload that may not have
+    /// landed. Nil until the daemon has answered once, or when it is too old
+    /// to know the question.
+    @Published var workspacesMode: String?
+    /// The desktop actually hosting virtual workspaces — already clamped, so
+    /// it always names a desktop that exists.
+    @Published var anchorDesktop = 1
+    /// Live native desktops, i.e. what Mission Control shows. Equal to
+    /// `liveSpaces.count` under `native` and smaller under `virtual`.
+    @Published var desktopCount = 1
     /// Whether `space focus` has any way at all to change desktop, and what
     /// it would use. Nil until the daemon has answered once.
     @Published var spaceSwitching: SpaceSwitching?
@@ -2143,6 +2493,12 @@ final class EngineHealth: ObservableObject {
                 else { return [] }
                 return decoded.map(\.label)
             }()
+            let workspaces: WorkspacesStatus? = {
+                guard let json = BarIPC.send("query workspaces"),
+                      let data = json.data(using: .utf8)
+                else { return nil }
+                return try? JSONDecoder().decode(WorkspacesStatus.self, from: data)
+            }()
             // The cached answer only — a file read, no network. The window
             // polls every five seconds and must not turn that into traffic.
             let cachedUpdate = UpdateCheck.cached()
@@ -2152,6 +2508,13 @@ final class EngineHealth: ObservableObject {
                 self.keybindsLive = perms?.tapLive ?? false
                 self.needsRestart = perms?.mustRestart ?? false
                 self.liveSpaces = spaces
+                self.workspacesMode = workspaces?.mode
+                self.anchorDesktop = workspaces?.anchor ?? 1
+                // Falling back to the space count keeps every "how many
+                // desktops" reader right against a daemon too old to answer —
+                // which is exactly the daemon that is also always in native
+                // mode, where the two numbers are the same.
+                self.desktopCount = workspaces?.desktops ?? spaces.count
                 self.spaceSwitching = switching
                 if !self.checkingForUpdate { self.update = cachedUpdate }
             }

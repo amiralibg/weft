@@ -183,3 +183,71 @@ private func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .newlines
     #expect(lastSpace < keys)
     #expect(lines[lastSpace + 1] == "label = \"b\"")
 }
+
+// MARK: - `weftctl config pin-workspaces`
+
+// The installers run this on every upgrade, over a config the user has
+// hand-commented. It is the same edit Setup's mode chooser makes, so these
+// pin the document half of it: the read that decides whether to write at all,
+// and the write that must not disturb anything around it.
+
+/// An existing config gets the key written, and keeps everything else.
+///
+/// This is the grandfathering path: `workspaces` defaults to `virtual` as of
+/// 0.9.12, and a config that predates the key must be pinned to `native` so an
+/// upgrade does not change what alt-2 means under someone mid-session.
+@Test func pinningWorkspacesAddsTheKeyAndTouchesNothingElse() throws {
+    let before = try reference()
+    var doc = TomlDocument(before)
+
+    let i = doc.firstIndex(ofHeader: "[general]")
+    #expect(i != nil)
+    #expect(doc.sections[i!].string("workspaces") == nil, "fixture must predate the key")
+
+    let index = doc.ensureSection("[general]")
+    var section = doc.sections[index]
+    section.set("workspaces", string: "native")
+    doc.sections[index] = section
+    let after = doc.render()
+
+    #expect(after.contains("workspaces = \"native\""))
+    // Every non-blank line of the original survives, with one line added.
+    let removed = before.split(separator: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .filter { !after.contains($0) }
+    #expect(removed.isEmpty, "pinning dropped: \(removed)")
+    #expect(after.split(separator: "\n").count == before.split(separator: "\n").count + 1)
+}
+
+/// Run twice, it writes once. The installers call it on every upgrade, so a
+/// second run that overwrote would undo the user's choice once per update.
+@Test func pinningWorkspacesIsIdempotent() throws {
+    var doc = TomlDocument(try reference())
+    let index = doc.ensureSection("[general]")
+    var section = doc.sections[index]
+    section.set("workspaces", string: "native")
+    doc.sections[index] = section
+    let once = doc.render()
+
+    // Second run: the guard sees the key and does nothing.
+    let second = TomlDocument(once)
+    let j = try #require(second.firstIndex(ofHeader: "[general]"))
+    #expect(second.sections[j].string("workspaces") == "native")
+    #expect(second.render() == once)
+}
+
+/// A config with no `[general]` table at all — the one most likely to be on
+/// the new default, and the one `ensureSection` has to build a home in.
+@Test func pinningWorkspacesCreatesGeneralWhenAbsent() throws {
+    var doc = TomlDocument("# my keys\n[keys]\n\"alt-h\" = \"focus west\"\n")
+    let index = doc.ensureSection("[general]")
+    var section = doc.sections[index]
+    section.set("workspaces", string: "virtual")
+    doc.sections[index] = section
+    let after = doc.render()
+
+    #expect(after.contains("[general]"))
+    #expect(after.contains("workspaces = \"virtual\""))
+    #expect(after.contains("# my keys"))
+    #expect(after.contains("\"alt-h\" = \"focus west\""))
+}

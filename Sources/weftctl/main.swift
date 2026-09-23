@@ -21,6 +21,7 @@ func usage() -> Never {
           weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
           weftctl trace reset          # clear the daemon's phase samples
           weftctl migrate [--write]    # migrate yabai/skhd configuration
+          weftctl config pin-workspaces <native|virtual>  # set the mode, if unset
           weftctl service <install|uninstall|start|stop|restart|status>
           weftctl --version
         """,
@@ -93,6 +94,11 @@ if args[0] == "service" {
         exit(2)
     }
     exit(0)
+}
+
+// 2b. Config command
+if args[0] == "config" {
+    ConfigCommand.run(args)
 }
 
 // 3. Migrate command

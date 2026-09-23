@@ -461,6 +461,29 @@ public struct SpaceState: Sendable, Equatable {
         }
     }
 
+    /// Throw the whole workspace set away, keeping the desktop facts.
+    ///
+    /// For one caller: `workspaces` or `workspace-anchor` changed under a
+    /// running daemon, so which workspaces exist and which desktop hosts them
+    /// is no longer derivable from what is here — an anchor that moved leaves
+    /// workspaces on a desktop that no longer hosts any, and `.virtual` →
+    /// `.native` leaves the anchor's hidden workspaces holding windows that
+    /// nothing will ever unpark again.
+    ///
+    /// Emptying `workspaces` is what makes the next sweep take its seeding
+    /// branch, which re-reads the `[[space]]` names and the saved overrides.
+    /// Trees do not survive it, and that is the honest outcome: the set they
+    /// described has been replaced.
+    ///
+    /// `order`, `displays`, `displayBySpace` and `currentByDisplay` are
+    /// macOS's facts, not weft's, so they stay.
+    public mutating func resetWorkspaces() {
+        workspaces = [:]
+        active = [:]
+        wsOrder = []
+        recentWorkspace = nil
+    }
+
     /// Ordered label names for persistence (ordinal → label).
     public func persistedNames() -> [String] {
         wsOrder.map { workspaces[$0]?.label ?? "" }

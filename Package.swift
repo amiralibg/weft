@@ -46,7 +46,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "weftctl",
-            dependencies: ["WeftCore", "WeftPlatform", "WeftIPC", "WeftConfig", "SkyLightShim"],
+            dependencies: [
+                "WeftCore", "WeftPlatform", "WeftIPC", "WeftConfig",
+                // For `config pin-workspaces`: the installers edit a config
+                // the user has commented, and this is the only round-trip in
+                // the tree that does not throw those comments away.
+                "WeftBarConfig", "SkyLightShim",
+            ],
             linkerSettings: skylightLink
         ),
                 .executableTarget(

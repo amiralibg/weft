@@ -550,3 +550,81 @@ private let ws3 = WorkspaceID(3)
     #expect(state.active[10] == w2)
     #expect(state.wsOrder == [w1, w2, w3, w4, w5])
 }
+
+// MARK: - Virtual mode: the restart round trip
+
+/// What `labels.json` records has to survive being read back.
+///
+/// `persistedNames()` writes one entry per `wsOrder` slot, which under
+/// `virtual` is the anchor's workspaces *plus* one for every other desktop.
+/// weftd used to feed that count straight back as `anchorCount`, so three
+/// labels on a three-desktop machine became five workspaces, saved as five
+/// labels, and came back as seven — the count grew by `desktops - 1` on every
+/// restart. Passing `nil` lets `adoptDesktops` subtract the other desktops
+/// itself, which is the exact inverse of what was written.
+@Test func virtualWorkspaceCountSurvivesARestart() {
+    var first = SpaceState()
+    first.adoptDesktops([10, 20, 30], names: ["one", "two", "three"], mode: .virtual, anchor: 1)
+    let afterFirstLaunch = first.persistedNames()
+    #expect(first.wsOrder.count == 3)
+
+    // Second launch: fresh state, no [[space]] decls, names from the file.
+    var second = SpaceState()
+    second.adoptDesktops([10, 20, 30], names: afterFirstLaunch, mode: .virtual, anchor: 1)
+    #expect(second.wsOrder.count == 3)
+    #expect(second.persistedNames() == afterFirstLaunch)
+
+    // And a third, because a ratchet needs two steps to show itself.
+    var third = SpaceState()
+    third.adoptDesktops([10, 20, 30], names: second.persistedNames(), mode: .virtual, anchor: 1)
+    #expect(third.wsOrder.count == 3)
+    #expect(third.persistedNames() == afterFirstLaunch)
+}
+
+/// Declared `[[space]]` labels still say how many workspaces the anchor hosts,
+/// which is the case `anchorCount` exists for.
+@Test func declaredSpacesSetTheAnchorCount() {
+    var s = SpaceState()
+    s.adoptDesktops(
+        [10, 20], names: ["a", "b", "c", "d"], mode: .virtual, anchor: 1, anchorCount: 4
+    )
+    // Four on the anchor, plus the one desktop 20 holds on its own.
+    #expect(s.wsOrder.count == 5)
+    #expect(s.workspaces.values.filter { $0.desktop == 10 }.count == 4)
+    #expect(s.workspaces.values.filter { $0.desktop == 20 }.count == 1)
+}
+
+/// A mode change cannot be left to the ordinary sweep: that path passes
+/// `names: nil`, meaning "keep what is already named", so turning `virtual`
+/// off left the anchor's hidden workspaces in place holding windows nothing
+/// would ever unpark. Clearing the set is what makes the next sweep re-seed.
+@Test func resetWorkspacesClearsTheSetButKeepsMacOSsFacts() {
+    var s = SpaceState()
+    s.adoptDesktops([10, 20], names: ["a", "b", "c"], mode: .virtual, anchor: 1, anchorCount: 2)
+    s.recentWorkspace = s.wsOrder.first
+    #expect(!s.workspaces.isEmpty)
+
+    s.resetWorkspaces()
+    #expect(s.workspaces.isEmpty)
+    #expect(s.active.isEmpty)
+    #expect(s.wsOrder.isEmpty)
+    #expect(s.recentWorkspace == nil)
+    // Which desktops exist is macOS's fact, not weft's, so it stays.
+    #expect(s.order == [10, 20])
+
+    // And the next adopt rebuilds from the config, in the other mode.
+    s.adoptDesktops([10, 20], names: ["a", "b"], mode: .native)
+    #expect(s.wsOrder.count == 2)
+    #expect(s.workspaces.values.filter { $0.desktop == 10 }.count == 1)
+}
+
+/// An anchor naming no desktop is clamped rather than refused — a sweep has to
+/// produce a usable state whatever the file says. This pins that it clamps to
+/// a real desktop, which is what lets `query workspaces` report the difference
+/// between what was asked for and what happened.
+@Test func anchorPastTheLastDesktopClampsToIt() {
+    var s = SpaceState()
+    s.adoptDesktops([10], names: ["a", "b"], mode: .virtual, anchor: 3, anchorCount: 2)
+    #expect(s.wsOrder.count == 2)
+    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
+}

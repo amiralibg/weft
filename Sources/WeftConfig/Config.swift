@@ -72,6 +72,11 @@ public struct GeneralConfig: Sendable, Equatable {
     /// the instant of each frame write and back on after. An app whose
     /// assistive tooling misbehaves with that goes here.
     /// Whether workspaces map 1:1 to native spaces or multiple virtual spaces live on an anchor.
+    ///
+    /// `virtual` since 0.9.12. Installing over an existing config writes
+    /// `native` into it explicitly (`weftctl config pin-workspaces`), so the
+    /// flip reaches new installs only and nobody's `alt-2` changes meaning
+    /// under them on an upgrade.
     public var workspaces: WorkspacesMode
     /// Which native space hosts virtual workspaces (1-based Mission Control ordinal).
     public var workspaceAnchor: Int
@@ -89,7 +94,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
-        workspaces: WorkspacesMode = .native,
+        workspaces: WorkspacesMode = .virtual,
         workspaceAnchor: Int = 1,
         followSpaceRules: Bool = false,
         enhancedUIExempt: [String] = [],
@@ -491,9 +496,15 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 throw err(path, "unknown general key")
             }
         }
-        if doc.tables["general"]?["follow-space-rules"] == nil && general.workspaces == .virtual {
-            general.followSpaceRules = true
-        }
+    }
+    // Outside the `[general]` block on purpose. Under `virtual` a rule's
+    // `space = "…"` is a park, not two desktop animations, so there is nothing
+    // left for the opt-in to defend against and it defaults on. That has to
+    // hold for a config with no `[general]` table at all — which, now that
+    // `virtual` is the default, is exactly the config most likely to be in
+    // virtual mode. Inside the block it was skipped for precisely those users.
+    if doc.tables["general"]?["follow-space-rules"] == nil, general.workspaces == .virtual {
+        general.followSpaceRules = true
     }
 
     // [[space]]

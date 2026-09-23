@@ -270,6 +270,11 @@ say "seeding config"
 mkdir -p "$HOME/.config/weft"
 if [ -e "$HOME/.config/weft/weft.toml" ]; then
     echo "    kept your existing ~/.config/weft/weft.toml"
+    # weft 0.9.12 made `workspaces = "virtual"` the default. An upgrade must
+    # not change what alt-2 means under someone mid-session, so a config that
+    # predates the key gets `native` written into it explicitly. Turning it on
+    # is then a choice, in Settings → Workspaces. No-op if the key is there.
+    "$BINDIR/weftctl" config pin-workspaces native || true
 elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
     # Their own setup is the only config that will feel right. Seeding the
     # generic example over a yabai user hands them keybinds on the wrong keys
@@ -277,6 +282,10 @@ elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ];
     # exactly as configured.
     echo "    found yabai/skhd config — migrating it"
     "$BINDIR/weftctl" migrate --write
+    # Their keybinds switch native desktops today, and the migration maps them
+    # one-to-one. Landing them in virtual would silently redirect every one of
+    # those binds to a workspace on desktop 1.
+    "$BINDIR/weftctl" config pin-workspaces native || true
 elif [ -e "$STAGE/weft.toml.example" ]; then
     cp "$STAGE/weft.toml.example" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml — a generic starting point:"

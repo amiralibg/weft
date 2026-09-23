@@ -141,3 +141,47 @@ public struct WindowStatus: Codable, Sendable, Equatable {
         self.floating = floating
     }
 }
+
+/// `query workspaces`: which model the running daemon is actually in.
+///
+/// The file is not the answer. weftd rebuilds its workspace set when
+/// `workspaces` or `workspace-anchor` changes, but a reload that has not
+/// landed yet — or a daemon that has not been restarted — leaves the two
+/// disagreeing, and both the Settings window and `doctor` have to be able to
+/// say which one the user is looking at.
+///
+/// `anchor` is the desktop actually hosting the workspaces, which is not
+/// necessarily `requestedAnchor`: `adoptDesktops` clamps an anchor that names
+/// no desktop, because a sweep has to produce a usable state whatever the file
+/// says. The two fields differing is the only evidence that happened.
+public struct WorkspacesStatus: Codable, Sendable, Equatable {
+    /// `native` or `virtual` — the mode the daemon is running, not the file's.
+    public var mode: String
+    /// Mission Control ordinal of the desktop hosting virtual workspaces.
+    /// Meaningless under `native`, where every desktop hosts its own.
+    public var anchor: Int
+    /// What `workspace-anchor` asked for. Differs from `anchor` when it named
+    /// a desktop that does not exist.
+    public var requestedAnchor: Int
+    /// Live native desktops, i.e. what Mission Control shows.
+    public var desktops: Int
+    /// Live workspaces. Equals `desktops` under `native`.
+    public var workspaces: Int
+
+    public init(
+        mode: String,
+        anchor: Int,
+        requestedAnchor: Int,
+        desktops: Int,
+        workspaces: Int
+    ) {
+        self.mode = mode
+        self.anchor = anchor
+        self.requestedAnchor = requestedAnchor
+        self.desktops = desktops
+        self.workspaces = workspaces
+    }
+
+    /// Whether the anchor the daemon used is not the one that was asked for.
+    public var anchorClamped: Bool { mode == "virtual" && anchor != requestedAnchor }
+}

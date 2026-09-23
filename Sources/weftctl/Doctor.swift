@@ -41,11 +41,66 @@ public enum Doctor {
         return "\(shown), and \(items.count - limit) more"
     }
 
+    /// Which workspace model the daemon is actually in, and whether the anchor
+    /// it used is the one that was asked for.
+    ///
+    /// Returns the live status so `reportSpaces` can pick its nouns from it.
+    /// Nothing else in weft can report the clamp: `adoptDesktops` has to
+    /// produce a usable state whatever `workspace-anchor` says, the config
+    /// parser has no WindowServer to check it against, and the daemon's own
+    /// warning goes to a log nobody reads until something is already wrong.
+    @discardableResult
+    private static func reportWorkspaces(_ validated: ValidatedConfig) -> WorkspacesStatus? {
+        guard let response = IPCClient.sendCommand(
+                  path: IPCPaths.socketPath(), command: "query workspaces"
+              ),
+              response.ok,
+              let data = response.output?.data(using: .utf8),
+              let live = try? JSONDecoder().decode(WorkspacesStatus.self, from: data)
+        else {
+            // An older daemon has no such query. Say what the file asks for
+            // rather than nothing — it is still the more useful half.
+            print("    - Workspaces: \(validated.general.workspaces.rawValue) (weftd did not answer)")
+            return nil
+        }
+
+        if live.mode == "virtual" {
+            print(
+                "    - Workspaces: virtual — \(live.workspaces) on"
+                    + " \(live.desktops) macOS desktop(s), hosted on desktop \(live.anchor)"
+            )
+        } else {
+            print("    - Workspaces: native — one per macOS desktop (\(live.desktops))")
+        }
+
+        if live.anchorClamped {
+            print(
+                "    [!] workspace-anchor = \(live.requestedAnchor) names no desktop;"
+                    + " using desktop \(live.anchor)"
+            )
+        }
+        // The file and the daemon disagreeing is normal for a second — a
+        // reload is in flight — and a bug if it lasts. Either way it explains
+        // the symptom the user came here with.
+        if live.mode != validated.general.workspaces.rawValue {
+            print(
+                "    [!] weft.toml says \(validated.general.workspaces.rawValue)"
+                    + " but weftd is running \(live.mode) — restart the engine"
+            )
+        }
+        return live
+    }
+
     /// Cross-check the `[[space]]` declarations against the desktops that
     /// actually exist. Labels are assigned by ordinal, so a config written on a
     /// seven-desktop machine and used on a three-desktop one leaves four names
     /// unassigned — and every keybind and rule naming them fails quietly.
-    private static func reportSpaces(_ validated: ValidatedConfig) {
+    ///
+    /// `mode` decides the nouns and one piece of advice. Under `virtual`,
+    /// `query spaces` returns one entry per *workspace*, so "N desktops exist"
+    /// was counting the wrong thing, and "add desktops in Mission Control" was
+    /// the wrong fix — the fix is another `[[space]]`.
+    private static func reportSpaces(_ validated: ValidatedConfig, mode: String) {
         guard let response = IPCClient.sendCommand(
                   path: IPCPaths.socketPath(), command: "query spaces"
               ),
@@ -56,6 +111,9 @@ public enum Doctor {
             print("    - Desktops: weftd is not running, cannot check the space labels")
             return
         }
+        let virtual = mode == "virtual"
+        let noun = virtual ? "workspace" : "desktop"
+        let nouns = virtual ? "workspaces" : "desktops"
 
         // Ask the daemon which labels actually landed rather than re-deriving
         // the ordinal assignment here. It is the same answer for a fresh
@@ -94,14 +152,14 @@ public enum Doctor {
         ).sorted()
 
         guard !unassignedLabels.isEmpty || !orphanedRules.isEmpty || !orphanedKeys.isEmpty else {
-            print("    - Desktops: \(live.count) on screen; every space reference resolves")
+            print("    - \(nouns.capitalized): \(live.count) live; every space reference resolves")
             return
         }
 
         if unassignedLabels.isEmpty {
-            print("[\u{25CB}] Spaces: \(live.count) desktop(s) exist; some binds point past that.")
+            print("[\u{25CB}] Spaces: \(live.count) \(noun)(s) exist; some binds point past that.")
         } else {
-            print("[\u{25CB}] Spaces: \(declared.count) declared but only \(live.count) desktop(s) exist.")
+            print("[\u{25CB}] Spaces: \(declared.count) declared but only \(live.count) \(noun)(s) exist.")
             print("    Unassigned labels: \(summarise(unassignedLabels, limit: 10))")
         }
         print("    These resolve to nothing, and fail silently when used:")
@@ -111,7 +169,11 @@ public enum Doctor {
         if !orphanedKeys.isEmpty {
             print("      keybinds: \(summarise(orphanedKeys))")
         }
-        print("    Add desktops in Mission Control, or drop the references.")
+        print(
+            virtual
+                ? "    Add a [[space]] to weft.toml, or drop the references."
+                : "    Add desktops in Mission Control, or drop the references."
+        )
     }
 
     public static func run() {
@@ -327,6 +389,7 @@ public enum Doctor {
                 print("    - Keybindings: \(keyCount)")
                 print("    - Window rules: \(validated.rules.count)")
                 print("    - Spaces configured: \(validated.spaces.count)")
+                let workspaces = reportWorkspaces(validated)
 
                 if !reportHelper(
                     name: "JankyBorders", binary: "borders", found: bordersFound,
@@ -343,7 +406,10 @@ public enum Doctor {
                     setting: "[integrations.sketchybar]"
                 ) { allOk = false }
 
-                reportSpaces(validated)
+                reportSpaces(
+                    validated,
+                    mode: workspaces?.mode ?? validated.general.workspaces.rawValue
+                )
             } catch {
                 print("[\u{2717}] Configuration: Parse error in \(configURL.path): \(error)")
                 allOk = false

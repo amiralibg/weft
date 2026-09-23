@@ -92,7 +92,12 @@ final class CheatsheetModel: ObservableObject {
             return
         }
         var out: [KeybindEntry] = []
-        for section in TomlDocument(text).sections {
+        let document = TomlDocument(text)
+        // The cheatsheet is its own window and may open before Settings ever
+        // has, so it refreshes the vocabulary from the same file rather than
+        // trusting that something else already did.
+        WorkspaceVocabulary.refresh(from: document)
+        for section in document.sections {
             guard let header = section.header else { continue }
             let mode: String
             if header == "[keys]" { mode = "Default" }
@@ -102,7 +107,14 @@ final class CheatsheetModel: ObservableObject {
             for entry in section.entries {
                 guard case .pair(let key, let value) = entry else { continue }
                 let command = TomlValue.unquote(value)
-                let (category, summary) = Self.describe(command)
+                var (category, summary) = Self.describe(command)
+                // `describe` speaks weft's own vocabulary — every command is
+                // spelled `space …`. What the user calls it depends on the
+                // mode, and this is the single place that translates.
+                if category == "Spaces" {
+                    category = WorkspaceVocabulary.plural
+                    summary = WorkspaceVocabulary.rephrase(summary)
+                }
                 out.append(KeybindEntry(
                     chord: TomlValue.unquote(key),
                     command: command,

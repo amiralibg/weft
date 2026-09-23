@@ -19,6 +19,35 @@
 
 [general]
 
+# ---------------------------------------------------------------- workspaces
+#
+# A workspace is a named set of windows with a layout of its own — what
+# `alt-1`, `alt-2` and the [[space]] blocks below refer to. This says where
+# they live.
+#
+#   "virtual"  All of your workspaces sit on ONE macOS desktop. Switching
+#              between them moves the windows you are not using just off the
+#              edge of the screen and puts the others back: instant, nothing
+#              animates, and it works on any window — including a terminal
+#              with its title bar hidden, which the other mode cannot move.
+#              The cost: Mission Control shows a sliver for every hidden
+#              window on that one desktop.
+#
+#   "native"   Each workspace IS one of macOS's own desktops, the way weft
+#              worked before 0.9.12. Mission Control and swipes are untouched.
+#              The cost: switching animates, and weft moves a window between
+#              desktops by dragging its title bar — so a window without one
+#              cannot be moved at all.
+#
+# Your other macOS desktops keep working either way: full-screen apps still
+# make their own, swipes still switch them, and weft tiles what is on them.
+workspaces = "virtual"
+
+# Which desktop hosts them, by Mission Control number. Ignored under "native".
+# An anchor naming a desktop you do not have falls back to your last one —
+# `weftctl doctor` says so when that happens.
+workspace-anchor = 1
+
 # Gap between neighbouring tiled windows, in pixels.
 inner-gap = 8
 
@@ -44,20 +73,26 @@ manage-menubar-apps = false
 
 # Whether a rule's `space = "..."` may take the screen over to place a window.
 #
-# Off, and this is the one setting whose default is deliberately not the useful
-# behaviour. macOS refuses every API for moving another app's window to another
-# desktop, so weft does it the way you would: it holds the window by the title
-# bar and presses your "move a space" shortcut, which means the screen visibly
-# changes desktop and changes back, about a second per desktop travelled.
+# This is the one setting whose default follows another setting, because what
+# it costs depends entirely on `workspaces` above.
 #
-# That is fine for `space move-window`, which you just typed and are watching —
-# and because you see it either way, that command follows the window by default
-# (add `--no-follow` to stay where you are).
+# Under "virtual", placing a window in another workspace on the same desktop is
+# bookkeeping plus a fraction of a millisecond. Nothing is visible, so there is
+# nothing to protect you from, and leaving this key out means ON.
 #
-# A rule fires when an app opens — possibly while you are typing in something
-# else — and having the desktop switch underneath you is worse than the window
-# landing on the wrong one. Turn this on if you would rather have the placement.
-follow-space-rules = false
+# Under "native" it is the opposite. macOS refuses every API for moving another
+# app's window to another desktop, so weft does it the way you would: it holds
+# the window by the title bar and presses your "move a space" shortcut, which
+# means the screen visibly changes desktop and changes back, about a second per
+# desktop travelled. That is fine for `space move-window`, which you just typed
+# and are watching — and because you see it either way, that command follows
+# the window by default (add `--no-follow` to stay where you are). But a rule
+# fires when an app opens, possibly while you are typing in something else, and
+# having the desktop switch underneath you is worse than the window landing on
+# the wrong one. So under "native", leaving this key out means OFF.
+#
+# Setting it here pins it either way.
+# follow-space-rules = true
 
 # Ask GitHub once a day whether a newer weft has been released, and show a
 # menu-bar item when there is one. weft installs from a script or a clone, so
