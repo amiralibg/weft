@@ -19,6 +19,7 @@
 #   WEFT_BUNDLE     path to WeftBar.app (required)
 #   PREFIX          binaries go to $PREFIX/bin (default ~/.local)
 #   WEFT_PAUSE_WM=1 pause a running yabai/skhd first (uninstall restarts it)
+#   WEFT_MIGRATE=1  seed the config from yabai/skhd, not weft's example
 set -euo pipefail
 
 BUNDLE="${WEFT_BUNDLE:?WEFT_BUNDLE must point at WeftBar.app}"
@@ -82,14 +83,14 @@ if [ -e "$HOME/.config/weft/weft.toml" ]; then
     # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
     # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
     "$BINDIR/weftctl" config tidy || true
-elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
-    # Their own setup is the only config that will feel right; the generic
-    # example would put their keybinds on the wrong keys.
-    echo "    found a yabai/skhd config — migrating it"
+elif [ "${WEFT_MIGRATE:-0}" = 1 ]; then
+    # Migrating is opt-in. Doing it whenever a yabairc existed gave every
+    # yabai user, the maintainer included, their old desktops, apps and binds
+    # instead of weft's own starting point, often with no idea where they
+    # came from. The example is what weft is designed around; the migration
+    # is one command away and says so.
+    echo "    migrating your yabai/skhd config (WEFT_MIGRATE=1)"
     "$BINDIR/weftctl" migrate --write || cp "$RES/weft.toml" "$HOME/.config/weft/weft.toml"
-    # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
-    # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
-    "$BINDIR/weftctl" config tidy || true
 else
     cp "$RES/weft.toml" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml"

@@ -2901,6 +2901,26 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
+    /// Give keyboard focus to the desktop, as clicking it does: Finder comes
+    /// forward with no window of its own.
+    ///
+    /// For a workspace that has just been left with nothing in it. Otherwise
+    /// focus stays on the window just hidden, and typing goes to a window the
+    /// user cannot see.
+    ///
+    /// Only while Finder has no window weft knows of. Activating Finder with
+    /// one would make that window key, and if it is in a hidden workspace the
+    /// focus would bring that workspace straight back — or, worse, keystrokes
+    /// would go to a hidden Finder window. The desktop itself is not in that
+    /// set: weft reads only ordinary windows, and the desktop is not one.
+    private func focusDesktop() {
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
+        else { return }
+        let pid = finder.processIdentifier
+        guard !allPids().values.contains(pid) else { return }
+        applier.activate(pid: pid)
+    }
+
     /// One re-hide pass shortly after a switch or a move, replacing any
     /// pass already waiting. Long enough for an app's frame write to finish:
     /// one attempt and one retry, each bounded by the 150 ms AX timeout.
@@ -3001,8 +3021,10 @@ final class Daemon: @unchecked Sendable {
             }
         }
 
-        // 5. Lay it out.
+        // 5. Lay it out. Nothing to lay out leaves focus on a window just
+        //    hidden, so the desktop takes it.
         applySpaceLayout(sid, stealFocus: stealFocus)
+        if stealFocus, incoming.isEmpty { focusDesktop() }
         // The layout focuses its own focus. A window focus was asked for that
         // is not laid out — a float — has to be focused by name.
         if let wid = focusWindow, readSpaces().workspaces[targetWsID]?.loose.contains(wid) == true,
@@ -3161,6 +3183,11 @@ final class Daemon: @unchecked Sendable {
         }
         if sourceShowing, let sourceDesktop, sourceDesktop != targetDesktop || targetShowingOn == nil {
             applySpaceLayout(sourceDesktop, raiseFocus: !follow)
+            // The last window sent away, staying put: the workspace on screen
+            // is empty and focus is on the window that just left it.
+            if !follow, let source, readSpaces().workspaces[source]?.members.isEmpty == true {
+                focusDesktop()
+            }
         }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())

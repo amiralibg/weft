@@ -15,6 +15,7 @@
 #   PREFIX=/opt/homebrew  binaries go to $PREFIX/bin        (default ~/.local)
 #   WEFT_APP_DIR=...      WeftBar.app goes here             (default ~/Applications)
 #   WEFT_PAUSE_WM=1       pause a running yabai/skhd first  (uninstall restarts it)
+#   WEFT_MIGRATE=1        seed the config from yabai/skhd, not weft's example
 #   WEFT_NO_SERVICE=1     install the files but do not register the launchd job
 #   WEFT_NO_OPEN=1        do not open Setup at the end
 set -euo pipefail
@@ -273,20 +274,21 @@ if [ -e "$HOME/.config/weft/weft.toml" ]; then
     # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
     # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
     "$BINDIR/weftctl" config tidy || true
-elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
-    # Their own setup is the only config that will feel right. Seeding the
-    # generic example over a yabai user hands them keybinds on the wrong keys
-    # and layouts they never chose — everything looks broken while working
-    # exactly as configured.
-    echo "    found yabai/skhd config — migrating it"
+elif [ "${WEFT_MIGRATE:-0}" = 1 ]; then
+    # Migrating is opt-in. Doing it whenever a yabairc existed gave every
+    # yabai user, the maintainer included, their old desktops, apps and binds
+    # instead of weft's own starting point, often with no idea where they
+    # came from. The example is what weft is designed around; the migration
+    # is one command away and says so.
+    echo "    migrating your yabai/skhd config (WEFT_MIGRATE=1)"
     "$BINDIR/weftctl" migrate --write
-    # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
-    # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
-    "$BINDIR/weftctl" config tidy || true
 elif [ -e "$STAGE/weft.toml.example" ]; then
     cp "$STAGE/weft.toml.example" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml — a generic starting point:"
-    echo "      alt-hjkl focus, alt-shift-hjkl swap, alt-1..5 spaces, alt-shift-r resize mode"
+    echo "      alt-hjkl focus, alt-shift-hjkl move, alt-1..5 workspaces, alt-shift-r resize mode"
+    if [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
+        echo "    Coming from yabai/skhd? weftctl migrate shows your setup as weft config."
+    fi
 fi
 
 # ----------------------------------------------------------- other managers

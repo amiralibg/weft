@@ -151,7 +151,7 @@ final class ConfigStore: ObservableObject {
         defer { loading = false; isDirty = false; validationError = nil }
 
         guard let text = try? String(contentsOfFile: Self.configPath, encoding: .utf8) else {
-            document = TomlDocument(defaultSkeleton)
+            document = TomlDocument(Self.shippedDefault ?? defaultSkeleton)
             readAll()
             status = .idle("No config yet — showing defaults. Save to create the file.")
             return
@@ -637,6 +637,15 @@ final class ConfigStore: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: Self.configPath))
     }
 
+    /// The example the installers write, bundled in the app. With no config
+    /// yet, Settings shows and saves this: the same starting point whichever
+    /// way weft was installed, rather than a shorter one of its own.
+    static var shippedDefault: String? {
+        Bundle.main.url(forResource: "weft", withExtension: "toml")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+    }
+
+    /// Only for a build with no bundled example: `swift run` from a checkout.
     private var defaultSkeleton: String {
         """
         # weft.toml — created by the Weft Settings window.

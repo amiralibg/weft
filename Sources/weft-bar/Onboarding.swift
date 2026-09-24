@@ -677,7 +677,7 @@ private struct InstallPage: View {
                 Bullet(
                     symbol: "doc.text",
                     title: "A starting config",
-                    text: "Written to `~/.config/weft/weft.toml`, or migrated from your yabai/skhd setup. A config you already have is kept."
+                    text: "weft's own defaults, written to `~/.config/weft/weft.toml`. A config you already have is kept. Coming from yabai? `weftctl migrate` converts yours."
                 )
                 Bullet(
                     symbol: "power",
