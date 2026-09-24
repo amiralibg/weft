@@ -285,7 +285,7 @@ elif [ "${WEFT_MIGRATE:-0}" = 1 ]; then
 elif [ -e "$STAGE/weft.toml.example" ]; then
     cp "$STAGE/weft.toml.example" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml — a generic starting point:"
-    echo "      alt-hjkl focus, alt-shift-hjkl move, alt-1..5 workspaces, alt-shift-r resize mode"
+    echo "      alt-hjkl focus, alt-shift-hjkl move, alt-1..8 workspaces (6-8 on a second display), alt-shift-r resize mode"
     if [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
         echo "    Coming from yabai/skhd? weftctl migrate shows your setup as weft config."
     fi

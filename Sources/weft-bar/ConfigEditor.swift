@@ -542,6 +542,7 @@ private struct ShortcutsPane: View {
                 let duplicates = Self.duplicates(in: mode)
                 if mode.isDefault {
                     Section {
+                        ShortcutGuide()
                         Button {
                             store.addKey(to: mode.id)
                         } label: {
@@ -649,6 +650,41 @@ private struct ShortcutsPane: View {
     }
 }
 
+/// How to make a shortcut, said once at the top of the pane. A new row is two
+/// blank controls, and neither says that a command can be typed or that the
+/// keys are recorded by pressing them.
+private struct ShortcutGuide: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Make a shortcut").font(.headline)
+            step(1, "Click **Add Shortcut**. A new row appears under **New**.")
+            step(2, "Click **Choose what this does…** and pick an action. **Apps** opens an app, "
+                + "goes to its window, or hides it. You can also type any weft command, "
+                + "like `space focus 3` or `exec open ~/Downloads`.")
+            step(3, "Click **Record keys** and press the combination. Esc cancels.")
+            Text("⌥ combinations are the safest: most apps leave them free. A shortcut weft "
+                + "uses never reaches the app, so ⌥H moves focus instead of typing ˙. "
+                + "A ⚠ means two shortcuts share the same keys, and only one of them works. "
+                + "The full list of commands is in the README.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// `text` is Markdown, for the bold control names and the code.
+    private func step(_ n: Int, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("\(n)")
+                .font(.caption.weight(.bold))
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(Color.accentColor.opacity(0.18)))
+            Text(LocalizedStringKey(text)).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct ShortcutRowView: View {
     @Binding var row: KeyRow
     let duplicate: Bool
@@ -746,6 +782,16 @@ private struct ActionPicker: View {
                 .padding(.bottom, 8)
             }
             Divider()
+            Button {
+                if let id = Self.chooseApp() { onPick("app toggle \(id)") }
+            } label: {
+                Label("Choose an app…", systemImage: "app.badge")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .help("Open it, go to its window, or hide it when it is in front")
             HStack(spacing: 8) {
                 TextField("Custom command", text: $custom)
                     .textFieldStyle(.roundedBorder)
@@ -756,10 +802,23 @@ private struct ActionPicker: View {
             }
             .padding(12)
         }
-        .frame(width: 360, height: 440)
+        .frame(width: 360, height: 480)
         .onAppear {
             if !current.isEmpty, !CommandCatalog.contains(current) { custom = current }
         }
+    }
+
+    /// Any app on disk, as the bundle id `app toggle` takes. A panel rather
+    /// than a list: an app weft has never seen is exactly the one someone
+    /// wants a key for.
+    private static func chooseApp() -> String? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "Choose"
+        panel.message = "Choose the app this shortcut opens"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return Bundle(url: url)?.bundleIdentifier
     }
 
     private func useCustom() {
@@ -1855,7 +1914,7 @@ enum CommandCatalog {
         ]),
         Group(name: "Window", commands: [
             "window toggle zoom-fullscreen", "window toggle split",
-            "float toggle", "balance",
+            "float toggle", "sticky", "balance",
             "split vertical", "split horizontal",
         ]),
         Group(name: "Stacks", commands: [
@@ -1865,8 +1924,10 @@ enum CommandCatalog {
         ]),
         Group(name: "Spaces", commands: [
             "space focus 1", "space focus 2", "space focus 3", "space focus 4", "space focus 5",
+            "space focus 6", "space focus 7", "space focus 8",
             "space focus recent",
-            "space move-window 1", "space move-window 2", "space move-window 3",
+            "space move-window 1", "space move-window 2", "space move-window 3", "space move-window 4",
+            "space move-window 5", "space move-window 6", "space move-window 7", "space move-window 8",
             // The plain form follows the window to its workspace; this is for
             // a bind that means to stay put.
             "space move-window 1 --no-follow", "space move-window 2 --no-follow",
@@ -1877,6 +1938,13 @@ enum CommandCatalog {
             "resize left 120", "resize right 120", "resize up 120", "resize down 120",
         ]),
         Group(name: "Modes", commands: ["mode default", "mode resize"]),
+        // Apps on every Mac. "Choose an app…" below the list reaches the rest.
+        Group(name: "Apps", commands: [
+            "app toggle com.apple.Terminal", "app toggle com.apple.finder", "app toggle com.apple.Safari",
+            "app toggle com.apple.mail", "app toggle com.apple.Notes", "app toggle com.apple.iCal",
+            "app toggle com.apple.MobileSMS", "app toggle com.apple.Music",
+            "app toggle com.apple.systempreferences", "app toggle com.apple.ActivityMonitor",
+        ]),
         // Starting points, not a menu: the argument is a shell command, so
         // these are meant to be picked and then edited.
         Group(name: "Run a command", commands: [

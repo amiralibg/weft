@@ -97,3 +97,39 @@ private func adopt(_ s: inout SpaceState, _ uuids: [String], names: [String]? = 
     adopt(&s, ["A", "B"])
     #expect(s.active[20] == code)
 }
+
+/// A laptop with its lid open under a monitor that has the menu bar: "main"
+/// is the monitor, and "built-in" and "external" name the displays by what
+/// they are. "external" used to mean "not main", which on this arrangement
+/// is the laptop.
+@Test func builtInAndExternalNameTheDisplayNotItsRole() {
+    let desk = [
+        DisplayIdentity(uuid: "M", name: "SAMSUNG", isMain: true),
+        DisplayIdentity(uuid: "L", name: "Built-in Retina Display", isMain: false, isBuiltIn: true),
+    ]
+    #expect(resolvePin(DisplayPin("main"), among: desk) == "M")
+    #expect(resolvePin(DisplayPin("built-in"), among: desk) == "L")
+    #expect(resolvePin(DisplayPin("external"), among: desk) == "M")
+    #expect(resolvePin(DisplayPin("secondary"), among: desk) == "L")
+}
+
+/// Asked of the display, so a built-in screen whose name was not read (or is
+/// localized) still resolves.
+@Test func builtInDoesNotNeedTheName() {
+    let ids = [
+        DisplayIdentity(uuid: "E", name: "", isMain: false),
+        DisplayIdentity(uuid: "L", name: "", isMain: true, isBuiltIn: true),
+    ]
+    #expect(resolvePin(DisplayPin("built-in"), among: ids) == "L")
+    #expect(resolvePin(DisplayPin("external"), among: ids) == "E")
+}
+
+/// A Mac with no screen of its own: "external" is the first that is not main.
+@Test func externalOnADesktopMacIsTheOneWithoutTheMenuBar() {
+    let ids = [
+        DisplayIdentity(uuid: "A", name: "Dell", isMain: true),
+        DisplayIdentity(uuid: "B", name: "LG", isMain: false),
+    ]
+    #expect(resolvePin(DisplayPin("external"), among: ids) == "B")
+    #expect(resolvePin(DisplayPin("built-in"), among: ids) == nil)
+}

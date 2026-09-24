@@ -423,14 +423,17 @@ import Testing
     #expect(validated.integrations.sketchybar.enabled == false)
 }
 
-/// Labels are handed out in Mission Control order, so a declared space with no
-/// desktop behind it is dead weight — and every rule and keybind naming it dies
-/// with it. A shipped default cannot know how many desktops anyone has, so it
-/// declares none and lets the numeric fallback do the work.
-@Test func exampleDeclaresNoSpacesAndBindsOnlyNumbers() throws {
+/// Workspaces are weft's own, so the shipped file can declare some: numbered,
+/// so ⌥N and the label agree, and pinned by role rather than by name, so they
+/// mean the same thing on any Mac. "secondary" names nothing on one display,
+/// and those workspaces then live on the main one.
+@Test func exampleDeclaresNumberedWorkspacesPinnedByRole() throws {
     let validated = try loadConfig(try exampleText())
-    #expect(validated.spaces.isEmpty)
+    #expect(validated.spaces.map(\.label) == (1...8).map(String.init))
+    #expect(validated.spaces.prefix(5).allSatisfy { $0.display == .main })
+    #expect(validated.spaces.suffix(3).allSatisfy { $0.display == .secondary })
 
+    let declared = Set(validated.spaces.map(\.label))
     for binds in validated.keymap.modes.values {
         for case .send(let command) in binds.values {
             let parts = command.split(separator: " ").map(String.init)
@@ -438,8 +441,8 @@ import Testing
                   parts[1] == "focus" || parts[1] == "move-window"
             else { continue }
             #expect(
-                Int(parts[2]) != nil || parts[2] == "recent",
-                "'\(command)' names a space the shipped config does not declare"
+                declared.contains(parts[2]) || parts[2] == "recent",
+                "'\(command)' names a workspace the shipped config does not declare"
             )
         }
     }

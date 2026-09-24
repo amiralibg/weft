@@ -106,16 +106,17 @@ overlap after tile, or focus jumps spaces on its own during sync.
 ## E. Functional matrix
 
 Keybindings below are the `examples/weft.toml` defaults (`alt-*`). That file is
-deliberately generic — no named spaces, no per-app placement, both integrations
-off — so it behaves the same on any Mac. If you are testing against a migrated
+deliberately generic — workspaces 1–8 pinned by role (1–5 main display, 6–8
+second display), no per-app placement, both integrations off — so it behaves
+the same on any Mac. If you are testing against a migrated
 yabai/skhd config instead, the chords will be that config's, not these:
 
 | Area | Action | Expect |
 |---|---|---|
 | Focus | `alt-h/j/k/l` | focus moves directionally, cursor warps if `mouse-follows-focus` |
 | Move | `alt-shift-h/j/k/l` | the window steps that way and **keeps its size**; a half-screen window must not come back a quarter. Single re-tile |
-| Spaces | `alt-1..5` | one switch, layouts apply on arrival, no double-jump |
-| Move to space | `alt-shift-1..5` | window leaves current tree, appears on target |
+| Spaces | `alt-1..8` | one switch, layouts apply on arrival, no double-jump |
+| Move to space | `alt-shift-1..8` | window leaves current tree, appears on target |
 | Zoom | `alt-f` | window covers usable screen, toggle restores |
 | Float | `alt-shift-space` | window centers at 70%, drag freely; toggle re-tiles |
 | Stack | `alt-w`, `alt-bracketright/left`, `alt-u` | wrap / next / prev / unstack, one shared frame |

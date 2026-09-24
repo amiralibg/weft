@@ -24,10 +24,15 @@ struct CanvasDisplay: Identifiable, Equatable {
     var index: Int
     var name: String
     var isMain: Bool
+    var isBuiltIn: Bool = false
     /// Global, top-left origin, in points.
     var frame: CGRect
-    /// What `display = …` should say to mean this display: "main" for the
-    /// main one, its name when no other display shares it, else its number.
+    /// What `display = …` should say to mean this display. What the display
+    /// *is* rather than where it sits: "built-in" for the Mac's own screen,
+    /// "external" for the only other one, then "main", its name when no other
+    /// display shares it, else its number. "main" follows the menu bar, so it
+    /// is never written for a laptop screen: moving the menu bar to a monitor
+    /// would move every workspace pinned there with it.
     var pinValue: String
 }
 
@@ -36,17 +41,30 @@ enum DisplayCatalog {
         let identities = SpaceControl.displayIdentities()
         var nameCount: [String: Int] = [:]
         for i in identities { nameCount[i.name, default: 0] += 1 }
+        let hasBuiltIn = identities.contains { $0.isBuiltIn }
+        let externals = identities.filter { !$0.isBuiltIn }.count
         return SpaceControl.displayLayout().enumerated().map { i, d in
             let identity = identities.first { $0.uuid == d.uuid }
             let name = identity?.name.isEmpty == false ? identity!.name : "Display \(i + 1)"
-            let unique = nameCount[name] == 1
+            let builtIn = identity?.isBuiltIn ?? false
+            let pin: String
+            if builtIn {
+                pin = "built-in"
+            } else if hasBuiltIn, externals == 1 {
+                pin = "external"
+            } else if identity?.isMain == true {
+                pin = "main"
+            } else {
+                pin = nameCount[name] == 1 ? name : "\(i + 1)"
+            }
             return CanvasDisplay(
                 id: d.uuid,
                 index: i + 1,
                 name: name,
                 isMain: identity?.isMain ?? false,
+                isBuiltIn: builtIn,
                 frame: CGRect(x: d.frame.x, y: d.frame.y, width: d.frame.width, height: d.frame.height),
-                pinValue: identity?.isMain == true ? "main" : (unique ? name : "\(i + 1)")
+                pinValue: pin
             )
         }
     }
@@ -55,7 +73,7 @@ enum DisplayCatalog {
     /// weftd resolves it.
     static func resolve(_ value: String, in displays: [CanvasDisplay]) -> CanvasDisplay? {
         guard !value.isEmpty else { return nil }
-        let ids = displays.map { DisplayIdentity(uuid: $0.id, name: $0.name, isMain: $0.isMain) }
+        let ids = displays.map { DisplayIdentity(uuid: $0.id, name: $0.name, isMain: $0.isMain, isBuiltIn: $0.isBuiltIn) }
         let uuid = resolvePin(DisplayPin(value), among: ids)
         return displays.first { $0.id == uuid }
     }
@@ -650,15 +668,19 @@ private struct WorkspaceInspector: View {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 8) {
                         FieldTitle("Display")
+                        // Selected by the display the value means, not by the
+                        // string: "main", "1" or a name written by hand shows
+                        // as the display it resolves to.
+                        let resolved = DisplayCatalog.resolve(row.display, in: displays)
                         Picker("Display", selection: Binding(
-                            get: { row.display },
+                            get: { resolved?.pinValue ?? row.display },
                             set: { store.pinSpace(row.id, to: $0) }
                         )) {
                             Text("Whichever display I'm on").tag("")
                             ForEach(displays) { d in
                                 Text(d.isMain ? "\(d.name) (main)" : d.name).tag(d.pinValue)
                             }
-                            if !row.display.isEmpty, !displays.contains(where: { $0.pinValue == row.display }) {
+                            if !row.display.isEmpty, resolved == nil {
                                 Text("\(row.display) (as written)").tag(row.display)
                             }
                         }

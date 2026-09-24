@@ -708,3 +708,38 @@ private let ws3 = WorkspaceID(3)
     #expect(s.isPaused("A"))
     #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
 }
+
+/// Reordering in Settings moves workspaces, not names. By position, every
+/// name after the move landed on another workspace's windows.
+@Test func relabelFollowsAReorderByName() {
+    var s = desktops([10], names: ["a", "b", "c"])
+    let b = s.wsOrder[1]
+    s.file(42, in: b, laidOut: true)
+    s.relabel(["b", "a", "c"])
+    #expect(s.persistedNames() == ["b", "a", "c"])
+    #expect(s.wsOrder[0] == b)
+    #expect(s.workspaces[b]?.contains(42) == true)
+}
+
+/// Deleting a workspace in the middle leaves the ones after it alone. By
+/// position, "c" was renamed onto the deleted one's windows and the real "c"
+/// kept its name too, so two workspaces answered to it.
+@Test func relabelDropsTheDeletedWorkspaceNotItsNeighbour() {
+    var s = desktops([10], names: ["a", "b", "c"])
+    let c = s.wsOrder[2]
+    s.file(42, in: c, laidOut: true)
+    s.relabel(["a", "c"])
+    #expect(s.persistedNames() == ["a", "c"])
+    #expect(s.workspaces[c]?.contains(42) == true)
+}
+
+/// A name changed in place is a rename: same workspace, same windows.
+@Test func relabelTreatsANewNameInPlaceAsARename() {
+    var s = desktops([10], names: ["a", "b", "c"])
+    let b = s.wsOrder[1]
+    s.file(42, in: b, laidOut: true)
+    s.relabel(["a", "web", "c"])
+    #expect(s.persistedNames() == ["a", "web", "c"])
+    #expect(s.wsOrder[1] == b)
+    #expect(s.workspaces[b]?.contains(42) == true)
+}

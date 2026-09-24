@@ -148,9 +148,15 @@ reserve = 0
 # Even out every split on this space.
 "alt-b" = "balance"
 
+# Keep the focused window on every workspace (a video, a chat), and again to
+# put it back in this one.
+"alt-shift-p" = "sticky"
+
 # Stacks: several windows sharing one slot, one visible at a time.
 # Toggle: stacks the focused window's neighbours, and takes it back out.
 "alt-w" = "stack toggle"
+# Every window on this workspace in one stack, and back out.
+"alt-shift-w" = "stack all"
 "alt-bracketright" = "stack next"
 "alt-bracketleft" = "stack prev"
 "alt-n" = "stack next"
@@ -161,14 +167,17 @@ reserve = 0
 "alt-shift-b" = "space layout bsp"
 "alt-shift-f" = "space layout float"
 
-# Workspaces by number. A number that does not exist yet is created the first
-# time you use it, so these work with no [[space]] blocks at all — and keep
-# working if you name your workspaces below. Add 6-9 the same way.
+# Workspaces by number: 1–5 on the main display, 6–8 on a second one (see
+# [[space]] below). A number past 8 is created the first time you use it, so
+# add 9 the same way if you want it.
 "alt-1" = "space focus 1"
 "alt-2" = "space focus 2"
 "alt-3" = "space focus 3"
 "alt-4" = "space focus 4"
 "alt-5" = "space focus 5"
+"alt-6" = "space focus 6"
+"alt-7" = "space focus 7"
+"alt-8" = "space focus 8"
 
 # Send the focused window to a workspace, and go with it. Add `--no-follow`
 # to a bind that should send the window and leave you where you are.
@@ -177,6 +186,9 @@ reserve = 0
 "alt-shift-3" = "space move-window 3"
 "alt-shift-4" = "space move-window 4"
 "alt-shift-5" = "space move-window 5"
+"alt-shift-6" = "space move-window 6"
+"alt-shift-7" = "space move-window 7"
+"alt-shift-8" = "space move-window 8"
 
 # Back to the space you came from.
 "alt-tab" = "space focus recent"
@@ -186,6 +198,8 @@ reserve = 0
 # Harmless on a single display — it reports "already there".
 "alt-ctrl-h" = "focus display west"
 "alt-ctrl-l" = "focus display east"
+# Or step through them in turn.
+"alt-grave" = "focus display cycle"
 # --follow sends the window AND goes with it; drop it to send without leaving.
 "alt-ctrl-shift-h" = "move display west --follow"
 "alt-ctrl-shift-l" = "move display east --follow"
@@ -193,13 +207,30 @@ reserve = 0
 # Enter the resize layer defined below. Escape or Return leaves it.
 "alt-shift-r" = "mode resize"
 
+# Apps. `app toggle` opens an app, goes to the workspace holding its window
+# when it is already open, and hides it when it is already in front — so one
+# key brings an app up and puts it away. It takes a bundle id; Settings ›
+# Shortcuts › Choose an app… finds it for any app you have. These three are on
+# every Mac; swap in your own terminal, browser and so on.
+"alt-return" = "app toggle com.apple.Terminal"
+"alt-e" = "app toggle com.apple.finder"
+"alt-s" = "app toggle com.apple.Safari"
+#
+# Others worth a key, all built in:
+#   com.apple.mail  com.apple.Notes  com.apple.iCal (Calendar)
+#   com.apple.MobileSMS (Messages)  com.apple.Music  com.apple.systempreferences
+# And common ones you may have installed:
+#   com.mitchellh.ghostty  net.kovidgoyal.kitty  com.github.wez.wezterm
+#   com.google.Chrome  company.thebrowser.Browser (Arc)  com.microsoft.VSCode
+#   com.tinyspeck.slackmacgap (Slack)  com.hnc.Discord  md.obsidian
+
 # Run anything. `exec` hands the rest of the line to /bin/sh, so pipes, quotes
 # and $VARIABLES all mean what they mean in a shell — this is the half of skhd
 # that is not about windows. Nothing is bound by default because the right
 # commands are yours; these are the shapes.
 #
-# "alt-return"      = "exec open -a Ghostty"
-# "alt-shift-4"     = "exec screencapture -i -c"
+# "alt-shift-return" = "exec open -a Terminal ~"   # a new Terminal window
+# "alt-shift-s"     = "exec screencapture -i -c"
 # "alt-shift-slash" = "exec open 'https://github.com/amiralibg/weft'"
 #
 # Your command also gets weft's state in its environment, so a script never has
@@ -264,41 +295,67 @@ manage = false
 title = "Picture.in.Picture"
 manage = false
 
-# Sending apps to a named space needs the [[space]] blocks below — a rule that
-# names a space you have not declared does nothing, and `weftctl doctor` says so.
+# Send an app to a workspace when it opens. `space` names a workspace from
+# the [[space]] list below; `weftctl doctor` says when it names none.
 #
 # [[rule]]
 # app = "Ghostty|Alacritty|kitty|WezTerm"
-# space = "term"
+# space = "2"
 #
 # [[rule]]
 # app = "Safari|Firefox|Google Chrome|Brave Browser"
-# space = "web"
+# space = "6"
 
 # ------------------------------------------------------------------------------
 # Spaces
 # ------------------------------------------------------------------------------
-# Optional. With no [[space]] blocks — the default — workspaces are numbered,
-# which is what the alt-1..5 binds use, and a number is created when first used.
+# Workspaces are weft's, not macOS desktops, so declare as many as you like.
+# The order here is what `space focus 1`, `2`, … count in, and `label` is the
+# name rules and keybinds use.
 #
-# Declaring them gives each workspace a name you can use in rules and keybinds,
-# and a layout of its own. The order here is what `space focus 1`, `2`, … count
-# in. Declare as many as you like: they are weft's, not macOS desktops.
+# `display` keeps a workspace on one display:
+#   "main"       the display with the menu bar (System Settings › Displays)
+#   "secondary"  the first other display, counted west to east
+#   "built-in"   the Mac's own screen      "external"  the first other one
+#   2            a number, west to east    "LG"        part of the name
+# A workspace pinned to a display that is not connected shows on the main
+# one until it is back. With no `display`, a workspace shows on whichever
+# display you are on when you switch to it.
 #
-# [[space]]
-# label = "main"
-# layout = "bsp"
-#
-# [[space]]
-# label = "web"
-# layout = "float"
-# display = "secondary"   # always on this display: "main", "secondary", a
-#                         # number counted west to east, or part of its name
+# On one display, all eight live on it. Plug in a second and 6–8 move there.
+# Settings › Workspaces edits these by dragging workspaces onto displays.
 
-#
-# [[space]]
-# label = "term"
-# layout = "bsp"
+[[space]]
+label = "1"
+display = "main"
+
+[[space]]
+label = "2"
+display = "main"
+
+[[space]]
+label = "3"
+display = "main"
+
+[[space]]
+label = "4"
+display = "main"
+
+[[space]]
+label = "5"
+display = "main"
+
+[[space]]
+label = "6"
+display = "secondary"
+
+[[space]]
+label = "7"
+display = "secondary"
+
+[[space]]
+label = "8"
+display = "secondary"
 
 # ------------------------------------------------------------------------------
 # Integrations

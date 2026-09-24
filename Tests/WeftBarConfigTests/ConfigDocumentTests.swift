@@ -55,8 +55,8 @@ private func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .newlines
     #expect(after.subtracting(before) == ["inner-gap = 12"])
     // The commented-out blocks are the part most at risk: they are not TOML,
     // so anything that reconstructs the file from a parsed model loses them.
-    #expect(saved.contains("# [[space]]"))
-    #expect(saved.contains("# label = \"main\""))
+    #expect(saved.contains("#   \"main\"       the display with the menu bar"))
+    #expect(saved.contains("label = \"6\"\ndisplay = \"secondary\""))
     #expect(saved.contains("# app = \"Ghostty|Alacritty|kitty|WezTerm\""))
     #expect(saved.hasPrefix("# ="))
 }

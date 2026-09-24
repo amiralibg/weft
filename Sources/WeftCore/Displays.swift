@@ -73,6 +73,12 @@ public enum DisplayPin: Sendable, Equatable {
     case main
     /// The first display that is not the main one, west to east.
     case secondary
+    /// The Mac's own screen. Asked of the display itself, so it holds
+    /// whichever display has the menu bar.
+    case builtIn
+    /// The first display that is not the Mac's own screen, west to east. On
+    /// a Mac with no screen of its own, the first that is not the main one.
+    case external
     /// 1-based, west to east — what `focus display N` counts.
     case index(Int)
     /// A display whose name contains this, ignoring case ("Studio", "LG").
@@ -81,7 +87,9 @@ public enum DisplayPin: Sendable, Equatable {
     public init(_ text: String) {
         switch text.lowercased() {
         case "main", "primary": self = .main
-        case "secondary", "external": self = .secondary
+        case "secondary": self = .secondary
+        case "built-in", "builtin", "internal", "laptop": self = .builtIn
+        case "external": self = .external
         default:
             if let n = Int(text), n >= 1 { self = .index(n) } else { self = .named(text) }
         }
@@ -93,12 +101,19 @@ public struct DisplayIdentity: Sendable, Equatable {
     public var uuid: String
     public var name: String
     public var isMain: Bool
+    /// The Mac's own screen (`CGDisplayIsBuiltin`).
+    public var isBuiltIn: Bool
 
-    public init(uuid: String, name: String, isMain: Bool) {
+    public init(uuid: String, name: String, isMain: Bool, isBuiltIn: Bool = false) {
         self.uuid = uuid
         self.name = name
         self.isMain = isMain
+        self.isBuiltIn = isBuiltIn
     }
+
+    /// Built in by the display's own answer, or failing that by the name
+    /// macOS gives the Mac's screen.
+    var looksBuiltIn: Bool { isBuiltIn || name.lowercased().contains("built-in") }
 }
 
 /// The display a pin names, among `displays` given west to east. Nil when it
@@ -110,6 +125,12 @@ public func resolvePin(_ pin: DisplayPin, among displays: [DisplayIdentity]) -> 
         return displays.first(where: \.isMain)?.uuid ?? displays.first?.uuid
     case .secondary:
         return displays.first { !$0.isMain }?.uuid
+    case .builtIn:
+        return displays.first(where: \.looksBuiltIn)?.uuid
+    case .external:
+        return displays.contains(where: \.looksBuiltIn)
+            ? displays.first { !$0.looksBuiltIn }?.uuid
+            : displays.first { !$0.isMain }?.uuid
     case .index(let n):
         return displays.indices.contains(n - 1) ? displays[n - 1].uuid : nil
     case .named(let text):

@@ -558,26 +558,47 @@ public struct SpaceState: Sendable, Equatable {
     }
 
     /// Make the workspace set follow an edited `[[space]]` list without
-    /// touching a window: rename by position, add what is new (hidden, on the
-    /// first display), and drop a workspace past the end of the list only when
-    /// it is hidden and empty. One that still holds windows keeps its old
-    /// name — deleting it would strand what is parked in it.
+    /// touching a window.
+    ///
+    /// Matched by label first: a workspace whose name is still in the list
+    /// keeps its windows and moves to its new place in the order. A name that
+    /// is new takes over the workspace that used to sit at its position, if
+    /// that one's name has gone (a rename), and is otherwise a new, hidden
+    /// workspace. A workspace whose name has gone and was not renamed is
+    /// dropped when it is hidden and empty; one that still holds windows keeps
+    /// its old name at the end of the order, so nothing parked in it is lost.
+    ///
+    /// Matching by position alone, as this used to, meant reordering cards in
+    /// Settings, or deleting one in the middle, handed every name after it —
+    /// and its display pin and app rules — to another workspace's windows.
     public mutating func relabel(_ names: [String]) {
-        for (i, name) in names.enumerated() {
-            let label = name.isEmpty ? "\(i + 1)" : name
-            if i < wsOrder.count {
-                workspaces[wsOrder[i]]?.label = label
+        let labels = names.enumerated().map { $0.element.isEmpty ? "\($0.offset + 1)" : $0.element }
+        let before = wsOrder
+        var byLabel: [String: WorkspaceID] = [:]
+        for id in before { if let l = workspaces[id]?.label, byLabel[l] == nil { byLabel[l] = id } }
+        var claimed = Set(labels.compactMap { byLabel[$0] })
+        var order: [WorkspaceID] = []
+        for (i, label) in labels.enumerated() {
+            if let id = byLabel[label] {
+                if !order.contains(id) { order.append(id) }
+            } else if i < before.count, !claimed.contains(before[i]) {
+                workspaces[before[i]]?.label = label
+                claimed.insert(before[i])
+                order.append(before[i])
             } else if let first = displays.first(where: { managed[$0] != nil }), let desktop = managed[first] {
-                makeWorkspace(label: label, on: desktop)
+                order.append(makeWorkspace(label: label, on: desktop))
             }
         }
         let showing = Set(active.values)
-        for id in wsOrder.dropFirst(names.count)
-        where !showing.contains(id) && workspaces[id]?.members.isEmpty == true {
-            workspaces.removeValue(forKey: id)
-            if recentWorkspace == id { recentWorkspace = nil }
+        for id in before where !claimed.contains(id) {
+            if !showing.contains(id), workspaces[id]?.members.isEmpty == true {
+                workspaces.removeValue(forKey: id)
+                if recentWorkspace == id { recentWorkspace = nil }
+            } else {
+                order.append(id)
+            }
         }
-        wsOrder = wsOrder.filter { workspaces[$0] != nil }
+        wsOrder = order.filter { workspaces[$0] != nil }
     }
 
     /// Show `id` on the display whose managed desktop is `desktop`: it moves

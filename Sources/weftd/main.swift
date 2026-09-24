@@ -2162,6 +2162,9 @@ final class Daemon: @unchecked Sendable {
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
         hideHiddenWorkspaces()
+        // A workspace shown on the main display while its own was unplugged
+        // goes back to it.
+        enforcePins()
     }
 
     // MARK: - Socket handling
@@ -2661,6 +2664,14 @@ final class Daemon: @unchecked Sendable {
                 return IPCResponse(ok: false, error: "unknown space '\(target)' (labels: \(known))")
             }
             let label = sp.label(of: id) ?? "\(id.raw)"
+            let pinned = currentPins(currentConfig())[label].flatMap { sp.managed[$0] != nil ? $0 : nil }
+            // Showing, but not on the display it is pinned to: it goes there.
+            if let pinned, let showing = sp.showingDisplay(of: id), showing != pinned,
+               let desktop = sp.managed[pinned] {
+                if sp.isPaused(pinned) { return pausedError(sp, pinned) }
+                switchWorkspace(on: desktop, to: id, stealFocus: true)
+                return IPCResponse(ok: true, output: "moved \(label) to the display it is pinned to")
+            }
             // Already on screen somewhere. On this display that is nothing to
             // do — re-tiling here yanked focus around on a repeated keypress.
             // On the other display it is a focus move, not a switch: swapping
@@ -2684,7 +2695,6 @@ final class Daemon: @unchecked Sendable {
                 )
             }
             // Pinned: on its own display, wherever the user is. Otherwise here.
-            let pinned = currentPins(currentConfig())[label].flatMap { sp.managed[$0] != nil ? $0 : nil }
             guard let display = pinned ?? focusedDisplayUUID(sp), let desktop = sp.managed[display] else {
                 return IPCResponse(ok: false, error: "no display to show '\(label)' on")
             }
@@ -2828,6 +2838,26 @@ final class Daemon: @unchecked Sendable {
         return out
     }
 
+    /// Put every pinned workspace that is on screen on the wrong display back
+    /// on its own. Run when the pins or the displays change.
+    ///
+    /// Pins used to be read only when a hidden workspace was shown, so
+    /// pinning one that was showing left it where it was, and `space focus`
+    /// on it went to the wrong display. Hidden ones need nothing: showing
+    /// one reads its pin. When two workspaces are pinned to one display,
+    /// the one already showing there stays.
+    private func enforcePins() {
+        let pins = currentPins(currentConfig())
+        for (label, display) in pins.sorted(by: { $0.key < $1.key }) {
+            let sp = readSpaces()
+            guard let id = sp.id(forLabel: label), let desktop = sp.managed[display], !sp.isPaused(display),
+                  let showingOn = sp.showingDisplay(of: id), showingOn != display
+            else { continue }
+            if let there = sp.active[desktop], let l = sp.label(of: there), pins[l] == display { continue }
+            switchWorkspace(on: desktop, to: id, stealFocus: false)
+        }
+    }
+
     /// A window exactly the size of its display, menu bar included, on a
     /// display whose menu bar is showing.
     static func isBorderlessFullscreen(_ f: Frame, among screens: [SpaceControl.DisplayFrames]) -> Bool {
@@ -2899,26 +2929,6 @@ final class Daemon: @unchecked Sendable {
                 fputs("weftd: could not re-hide \(wids.count) window(s): \(error)\n", stderr)
             }
         }
-    }
-
-    /// Give keyboard focus to the desktop, as clicking it does: Finder comes
-    /// forward with no window of its own.
-    ///
-    /// For a workspace that has just been left with nothing in it. Otherwise
-    /// focus stays on the window just hidden, and typing goes to a window the
-    /// user cannot see.
-    ///
-    /// Only while Finder has no window weft knows of. Activating Finder with
-    /// one would make that window key, and if it is in a hidden workspace the
-    /// focus would bring that workspace straight back — or, worse, keystrokes
-    /// would go to a hidden Finder window. The desktop itself is not in that
-    /// set: weft reads only ordinary windows, and the desktop is not one.
-    private func focusDesktop() {
-        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
-        else { return }
-        let pid = finder.processIdentifier
-        guard !allPids().values.contains(pid) else { return }
-        applier.activate(pid: pid)
     }
 
     /// One re-hide pass shortly after a switch or a move, replacing any
@@ -3021,10 +3031,8 @@ final class Daemon: @unchecked Sendable {
             }
         }
 
-        // 5. Lay it out. Nothing to lay out leaves focus on a window just
-        //    hidden, so the desktop takes it.
+        // 5. Lay it out.
         applySpaceLayout(sid, stealFocus: stealFocus)
-        if stealFocus, incoming.isEmpty { focusDesktop() }
         // The layout focuses its own focus. A window focus was asked for that
         // is not laid out — a float — has to be focused by name.
         if let wid = focusWindow, readSpaces().workspaces[targetWsID]?.loose.contains(wid) == true,
@@ -3134,14 +3142,22 @@ final class Daemon: @unchecked Sendable {
         let laidOut = !core.sync { self.unmanaged.contains(wid) }
         let tile = currentConfig().general.asTilingConfig()
 
-        // Following into a hidden workspace is showing it where the window is:
-        // file the window, then switch. The window is not parked in between.
-        if targetShowingOn == nil, follow, let windowDisplay, let here = sp.managed[windowDisplay] {
+        // Following into a hidden workspace is showing it where the window is,
+        // or on its own display when it is pinned: file the window, then
+        // switch. The window is not parked in between.
+        let pinned = currentPins(currentConfig())[label].flatMap { sp.managed[$0] != nil ? $0 : nil }
+        if targetShowingOn == nil, follow, let display = pinned ?? windowDisplay, let here = sp.managed[display] {
+            if sp.isPaused(display) { return pausedError(sp, display) }
             updateSpaces { s in
-                s.file(wid, in: id, laidOut: laidOut, screen: self.usableScreen(onDisplay: windowDisplay),
+                s.file(wid, in: id, laidOut: laidOut, screen: self.usableScreen(onDisplay: display),
                        config: tile, focus: true)
             }
             switchWorkspace(on: here, to: id, focusWindow: wid, stealFocus: true)
+            // Shown on another display: the workspace the window left is still
+            // on screen here, with a hole where the window was.
+            if display != windowDisplay, sourceShowing, let sourceDesktop {
+                applySpaceLayout(sourceDesktop, raiseFocus: false)
+            }
             return IPCResponse(ok: true, output: "moved \(wid) to \(label) and followed")
         }
 
@@ -3183,11 +3199,6 @@ final class Daemon: @unchecked Sendable {
         }
         if sourceShowing, let sourceDesktop, sourceDesktop != targetDesktop || targetShowingOn == nil {
             applySpaceLayout(sourceDesktop, raiseFocus: !follow)
-            // The last window sent away, staying put: the workspace on screen
-            // is empty and focus is on the window that just left it.
-            if !follow, let source, readSpaces().workspaces[source]?.members.isEmpty == true {
-                focusDesktop()
-            }
         }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())
@@ -3635,13 +3646,26 @@ final class Daemon: @unchecked Sendable {
         // `[[space]]` list renames, adds and drops workspaces in place —
         // `relabel` never touches a window, so nothing is unparked or lost.
         let names = next.spaces.map { $0.label }
+        let pinsChanged = !initial && previous.spaces.map { "\($0.label)=\(String(describing: $0.display))" }
+            != next.spaces.map { "\($0.label)=\(String(describing: $0.display))" }
         if !initial, previous.spaces.map({ $0.label }) != names {
             fputs("weft: [[space]] list changed — \(names.count) workspace(s)\n", stderr)
             syncQueue.async { [weak self] in
                 guard let self else { return }
                 self.updateSpaces { $0.relabel(names) }
+                // All three files count by position, and a reorder moved
+                // workspaces between positions.
                 self.saveLabels()
+                self.saveLayoutOverrides()
+                self.scheduleMembershipSave()
                 self.syncFromSnapshot()
+                if pinsChanged { self.enforcePins() }
+            }
+        } else if pinsChanged {
+            syncQueue.async { [weak self] in
+                guard let self else { return }
+                if reshaped { self.syncFromSnapshot() }
+                self.enforcePins()
             }
         } else if !initial, reshaped {
             syncQueue.async { [weak self] in self?.syncFromSnapshot() }

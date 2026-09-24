@@ -97,6 +97,15 @@ public enum SpaceControl {
     /// uses. What `[[space]] display = …` is matched against.
     public static func displayIdentities() -> [DisplayIdentity] {
         let main = mainDisplayUUID()
+        var builtIn: Set<String> = []
+        var active = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        if CGGetActiveDisplayList(16, &active, &count) == .success {
+            for id in active.prefix(Int(count)) where CGDisplayIsBuiltin(id) != 0 {
+                if let u = CGDisplayCreateUUIDFromDisplayID(id),
+                   let s = CFUUIDCreateString(nil, u.takeRetainedValue()) as String? { builtIn.insert(s) }
+            }
+        }
         var names: [String: String] = [:]
         for screen in NSScreen.screens {
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
@@ -106,7 +115,9 @@ public enum SpaceControl {
             names[uuid] = screen.localizedName
         }
         return displayLayout().map {
-            DisplayIdentity(uuid: $0.uuid, name: names[$0.uuid] ?? "", isMain: $0.uuid == main)
+            DisplayIdentity(
+                uuid: $0.uuid, name: names[$0.uuid] ?? "", isMain: $0.uuid == main, isBuiltIn: builtIn.contains($0.uuid)
+            )
         }
     }
 

@@ -174,11 +174,16 @@ and it works on every window — including a terminal with its title bar hidden.
 Sending a window to another workspace is the same, and so is a rule's
 `space = "…"`.
 
-- **Numbers need no setup.** `space focus 4` creates workspaces up to 4 the
-  first time you use it. `[[space]]` blocks give them names and layouts.
-- **Several displays.** Each display shows one workspace. `space focus` shows a
-  workspace on the display you are on, or moves focus to it if it is already on
-  screen elsewhere; `move space display east` sends the current workspace to
+- **Eight to start with.** The default config declares workspaces 1–8: 1–5
+  on the main display (the one with the menu bar) and 6–8 on a second one. On
+  a single display all eight live there. A number past the list, like
+  `space focus 9`, is created the first time you use it.
+- **Several displays.** Each display shows one workspace. `[[space]] display =`
+  keeps a workspace on one: `"main"`, `"secondary"`, `"built-in"` (the Mac's
+  own screen), `"external"`, a number counted west to east, or part of the
+  display's name. Settings › Workspaces sets it by dragging a workspace onto a
+  display, and the change applies at once. An unpinned workspace shows on the
+  display you are on; `move space display east` sends the current workspace to
   the other display and brings that one's back.
 - **Other macOS desktops and full-screen apps keep working.** Weft pauses on a
   display while one of them is showing and resumes when you come back. It never
@@ -268,19 +273,23 @@ QWERTY, Colemak and Dvorak.
 |---|---|
 | `⌥H` `⌥J` `⌥K` `⌥L` | Focus the window left / down / up / right |
 | `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Move the focused window that way |
-| `⌥1`…`⌥5` | Go to workspace 1–5 |
-| `⌥⇧1`…`⌥⇧5` | Send the focused window to that workspace |
+| `⌥1`…`⌥8` | Go to workspace 1–8 (1–5 main display, 6–8 second display) |
+| `⌥⇧1`…`⌥⇧8` | Send the focused window to that workspace, and go with it |
 | `⌥Tab` | Back to the workspace you came from |
 | `⌥F` | Zoom the window to fill the space; again to restore |
 | `⌥⇧Space` | Float the window, or put it back in the tiling |
 | `⌥V` / `⌥⇧V` | Next window splits vertically / horizontally |
 | `⌥\` | Flip the split under the focused window |
 | `⌥B` | Even out every split on this space |
+| `⌥⇧P` | Keep the window on every workspace; again to put it back |
 | `⌥W` `⌥N` `⌥P` `⌥U` | Stack: wrap / next / prev / unstack (`⌥]` `⌥[` work too) |
+| `⌥⇧W` | Every window on this workspace in one stack, and back |
 | `⌥⇧B` `⌥⇧F` | Switch this space to bsp / float |
 | `⌥⌃H` `⌥⌃L` | Focus the display west / east |
+| `` ⌥` `` | Focus the next display |
 | `⌥⌃⇧H` `⌥⌃⇧L` | Send the window to that display and follow it |
 | `⌥⇧R` | Enter resize mode — then `h/j/k/l`, `⇧` for bigger steps, `=` to balance, `Esc` to leave |
+| `⌥↩` `⌥E` `⌥S` | Terminal / Finder / Safari: open it, go to it, or hide it when it is in front |
 | Drag a border | Resize the two windows either side of it — no modifier, no mode |
 | `⌃⌥Space` | Window switcher |
 | `⌘K` | Keybinding cheatsheet |
@@ -293,9 +302,12 @@ One file: `~/.config/weft/weft.toml`. Weft watches it and reloads within 100 ms
 of a save — layout changes, new keybinds and new rules all take effect without
 restarting anything.
 
-The shipped [`examples/weft.toml`](examples/weft.toml) is deliberately generic:
-no named workspaces, no per-app placement, both integrations off. Named
-workspaces and app placement are in it as commented-out worked examples.
+The shipped [`examples/weft.toml`](examples/weft.toml) is what a fresh install
+writes, and it is deliberately generic: workspaces 1–8 pinned by role rather
+than by monitor, shortcuts only for apps every Mac has, no per-app placement,
+both integrations off. Per-app placement is in it as commented-out examples.
+Coming from yabai or skhd? `weftctl migrate` prints your setup as weft config,
+and `weftctl migrate --write` saves it.
 
 ```toml
 [general]
@@ -312,7 +324,8 @@ reserve = 0                     # room for an always-on-screen bar
 "alt-h" = "focus west"
 "alt-1" = "space focus 1"
 "alt-shift-r" = "mode resize"
-"alt-return" = "exec open -a Ghostty"   # anything, through /bin/sh
+"alt-return" = "app toggle com.apple.Terminal"
+"alt-shift-return" = "exec open -a Terminal ~"   # anything, through /bin/sh
 
 [mode.resize]
 "h" = "resize left 40"
@@ -339,6 +352,48 @@ open -a WeftBar --args --settings
 > **A note on `[[space]]`.** Each block is a workspace, in the order `space
 > focus 1`, `2`, … count. Declare as many as you like — they are weft's, not
 > macOS desktops, so there is nothing to create in Mission Control.
+
+## Commands
+
+Every shortcut runs one of these, and so does `weftctl <command>`. A direction
+is `west`, `east`, `north` or `south`. A display is one of those, `next`,
+`prev`, `cycle`, `first`, `last`, or a number counted west to east.
+
+| Command | Does |
+|---|---|
+| `focus <direction>` | Focus the window that way |
+| `move <direction>` | Move the window that way; it keeps its size |
+| `swap <direction>` | Trade places with the window that way |
+| `resize left` / `right` / `up` / `down` `<px>` | Grow or shrink the window that way by that many points |
+| `split vertical` / `split horizontal` | Which way the next window splits this one |
+| `window toggle split` | Flip the split under the window |
+| `window toggle zoom-fullscreen` | Fill the workspace with the window; again to restore |
+| `float` / `float on` / `float off` | Float the window, or put it back in the tiling |
+| `sticky` / `sticky on` / `sticky off` | Keep the window on every workspace |
+| `balance` | Even out every split on the workspace |
+| `stack toggle` / `next` / `prev` / `unstack` / `all` | Stacks: several windows in one slot |
+| `stack move <direction>` / `stack split <direction>` | Join the stack that way / pull that window in |
+| `space focus <name or number>` | Go to a workspace (`recent` goes back) |
+| `space move-window <name or number>` | Send the window there and go with it (`--no-follow` stays) |
+| `space layout bsp` / `float` / `toggle` | Change this workspace's layout |
+| `space label <name>` | Rename this workspace |
+| `focus display <display>` | Focus another display |
+| `move display <display>` | Send the window to another display (`--follow` goes with it) |
+| `move space display <display>` | Swap this workspace with the one on another display |
+| `app toggle <bundle id>` | Open the app, go to its window, or hide it when it is in front |
+| `mode <name>` | Enter a `[mode.<name>]` layer; `mode default` leaves it |
+| `exec <shell command>` | Run anything through `/bin/sh` |
+
+**Making a shortcut.** In Settings › Shortcuts: **Add Shortcut**, then
+**Choose what this does…** and pick an action (or type any command above),
+then **Record keys** and press the combination. In the file, it is one line
+under `[keys]`:
+
+```toml
+"alt-m" = "app toggle com.apple.mail"      # Settings › Choose an app… finds any bundle id
+"alt-shift-9" = "space move-window 9 --no-follow"
+"alt-d" = "exec open ~/Downloads"
+```
 
 ## Command line
 

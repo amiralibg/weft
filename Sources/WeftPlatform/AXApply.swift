@@ -665,15 +665,6 @@ public final class AXApplier: @unchecked Sendable {
         }
     }
 
-    /// Bring an app forward without naming a window: macOS gives key status to
-    /// the app's own choice, or none. On the activation queue, for the reason
-    /// `focusWindow` gives.
-    public func activate(pid: Int32) {
-        activateQueue.async {
-            NSRunningApplication(processIdentifier: pid)?.activate()
-        }
-    }
-
     /// Tell the *app* which of its windows is now the focused one.
     ///
     /// `AXRaise` changes z-order and `activate()` brings the app forward, but

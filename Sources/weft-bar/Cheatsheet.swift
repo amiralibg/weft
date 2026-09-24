@@ -176,6 +176,8 @@ final class CheatsheetModel: ObservableObject {
             return ("Run", String(command.dropFirst("exec".count)).trimmingCharacters(in: .whitespaces))
         case "float":
             return ("Layout", "Float the window, or put it back in the tiling")
+        case "sticky":
+            return ("Layout", "Keep the window on every space, or put it back in one")
         case "split":
             return ("Layout", "Next window opens \(words.count > 1 ? words[1] : "split")")
         case "balance":
@@ -188,14 +190,21 @@ final class CheatsheetModel: ObservableObject {
             // `com.mitchellh.ghostty` → `Ghostty`. The bundle id is right
             // there in the command column; repeating it in the summary just
             // pushed the readable half off the end of the row.
-            let name = words[2].split(separator: ".").last.map(String.init) ?? words[2]
-            return ("Apps", "Launch or focus \(name.prefix(1).uppercased() + name.dropFirst())")
+            let name = Self.appNames[words[2].lowercased()]
+                ?? words[2].split(separator: ".").last.map(String.init) ?? words[2]
+            return ("Apps", "Open \(name.prefix(1).uppercased() + name.dropFirst()), or hide it when it is in front")
         case "mode" where words.count >= 2:
             return ("Modes", words[1] == "default" ? "Leave the current mode" : "Enter “\(words[1])” mode")
         default:
             return ("Other", command)
         }
     }
+
+    /// Built-in apps whose bundle id does not end in their name.
+    private static let appNames: [String: String] = [
+        "com.apple.ical": "Calendar", "com.apple.mobilesms": "Messages",
+        "com.apple.systempreferences": "System Settings", "com.apple.activitymonitor": "Activity Monitor",
+    ]
 
     private static func stackSummary(_ words: [String]) -> String {
         switch words.dropFirst().first {
