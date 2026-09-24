@@ -122,8 +122,8 @@ public enum Doctor {
         let orphanedKeys = Set(
             validated.keymap.modes.values
                 .flatMap { $0.values }
-                .compactMap { action -> String? in
-                    guard case .send(let command) = action else { return nil }
+                .flatMap(\.commands)
+                .compactMap { command -> String? in
                     let parts = command.split(separator: " ").map(String.init)
                     guard parts.count >= 3, parts[0] == "space",
                           parts[1] == "focus" || parts[1] == "move-window",
@@ -154,8 +154,20 @@ public enum Doctor {
         print("    Add a [[space]] to weft.toml, or drop the references.")
     }
 
+    /// The commit `scripts/dev.sh` installed, from the marker it leaves next
+    /// to the binaries. Nil for a published release.
+    static func localBuild() -> String? {
+        guard let exe = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
+        let marker = exe.deletingLastPathComponent().appendingPathComponent(".weft-local-build")
+        guard let text = try? String(contentsOf: marker, encoding: .utf8) else { return nil }
+        return text.split(separator: "\n").first { $0.hasPrefix("commit=") }.map { String($0.dropFirst(7)) }
+    }
+
     public static func run() {
         print("=== weft doctor === \(WeftVersion.full)")
+        if let local = localBuild() {
+            print("[i] Local build of commit \(local) (scripts/dev.sh). `scripts/dev.sh release` goes back to the release.")
+        }
         var allOk = true
 
         // 1. Accessibility

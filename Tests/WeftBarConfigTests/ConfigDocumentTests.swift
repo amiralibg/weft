@@ -251,3 +251,18 @@ private func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .newlines
     #expect(after.contains("# my keys"))
     #expect(after.contains("\"alt-h\" = \"focus west\""))
 }
+
+// MARK: - Several commands on one key
+
+@Test func keybindValuesReadAsSteps() {
+    #expect(TomlValue.steps("\"focus west\"") == ["focus west"])
+    #expect(TomlValue.steps("[\"space focus 3\", \"app toggle com.apple.mail\"]") == ["space focus 3", "app toggle com.apple.mail"])
+    #expect(TomlValue.steps("[\"exec say \\\"hi\\\"\"]  # a comment") == ["exec say \"hi\""])
+    #expect(TomlValue.steps("[]") == [])
+}
+
+@Test func stepsWriteBackAsTheyWereRead() {
+    let steps = ["space focus 3", "exec open 'https://example.com'", "exec say \"hi\""]
+    #expect(TomlValue.steps(TomlValue.literal(steps: steps)) == steps)
+    #expect(TomlValue.literal(steps: ["balance"]) == "\"balance\"")
+}

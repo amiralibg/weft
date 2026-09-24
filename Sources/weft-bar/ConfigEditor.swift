@@ -83,6 +83,11 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
 // MARK: - Root
 
+extension Notification.Name {
+    /// Switch an open Settings window to a pane (`SettingsSection.rawValue`).
+    static let weftShowSettingsSection = Notification.Name("weft.showSettingsSection")
+}
+
 struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
@@ -127,6 +132,9 @@ struct SettingsView: View {
         .frame(minWidth: 840, minHeight: 600)
         .onAppear { health.start() }
         .onDisappear { health.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: .weftShowSettingsSection)) { note in
+            if let raw = note.object as? String, let next = SettingsSection(rawValue: raw) { section = next }
+        }
     }
 
     @ViewBuilder
@@ -524,17 +532,20 @@ private struct AppearancePane: View {
 private struct ShortcutsPane: View {
     @ObservedObject var store: ConfigStore
     @State private var query = ""
+    @State private var editing: EditTarget?
+
+    /// A shortcut open in the builder: a new one in `mode`, or `row`.
+    private struct EditTarget: Identifiable {
+        let id = UUID()
+        let mode: KeyMode.ID
+        let row: KeyRow.ID?
+    }
 
     private struct Group: Identifiable {
         let name: String
         let rows: [KeyRow]
         var id: String { name }
     }
-
-    /// The order a person thinks about these in, not the order the file has.
-    private static let order = [
-        "New", "Focus", "Move", "Spaces", "Layout", "Stacks", "Resize", "Displays", "Apps", "Modes", "Other",
-    ]
 
     var body: some View {
         Form {
@@ -544,9 +555,9 @@ private struct ShortcutsPane: View {
                     Section {
                         ShortcutGuide()
                         Button {
-                            store.addKey(to: mode.id)
+                            editing = EditTarget(mode: mode.id, row: nil)
                         } label: {
-                            Label("Add Shortcut", systemImage: "plus")
+                            Label("Add Shortcut…", systemImage: "plus")
                         }
                         .buttonStyle(.borderless)
                     }
@@ -563,9 +574,9 @@ private struct ShortcutsPane: View {
                             shortcutRow(row, mode: mode, duplicate: duplicates.contains(row.chord.lowercased()))
                         }
                         Button {
-                            store.addKey(to: mode.id)
+                            editing = EditTarget(mode: mode.id, row: nil)
                         } label: {
-                            Label("Add Shortcut", systemImage: "plus")
+                            Label("Add Shortcut…", systemImage: "plus")
                         }
                         .buttonStyle(.borderless)
                     } header: {
@@ -578,12 +589,63 @@ private struct ShortcutsPane: View {
         }
         .formStyle(.grouped)
         .searchable(text: $query, placement: .toolbar, prompt: "Search shortcuts")
+        .sheet(item: $editing) { target in editor(for: target) }
+    }
+
+    private var context: ShortcutContext {
+        ShortcutContext(
+            workspaces: store.spaces.map(\.label).filter { !$0.isEmpty },
+            modes: store.modes.filter { !$0.isDefault }.map(\.name),
+            displays: DisplayCatalog.current()
+        )
+    }
+
+    @ViewBuilder
+    private func editor(for target: EditTarget) -> some View {
+        if let mode = store.modes.first(where: { $0.id == target.mode }) {
+            let row = target.row.flatMap { id in mode.rows.first { $0.id == id } }
+            ShortcutEditor(
+                row: row,
+                isModeLayer: !mode.isDefault,
+                context: context,
+                others: mode.rows.filter { $0.id != target.row && !$0.chord.isEmpty },
+                onSave: { chord, steps in
+                    save(chord: chord, steps: steps, into: target)
+                    editing = nil
+                },
+                onDelete: row == nil ? nil : {
+                    delete(target)
+                    editing = nil
+                },
+                onCancel: { editing = nil }
+            )
+        }
+    }
+
+    private func save(chord: String, steps: [String], into target: EditTarget) {
+        guard let m = store.modes.firstIndex(where: { $0.id == target.mode }) else { return }
+        // The keys belong to this shortcut now; the builder said so.
+        store.modes[m].rows.removeAll { $0.id != target.row && $0.chord.lowercased() == chord.lowercased() }
+        if let id = target.row, let r = store.modes[m].rows.firstIndex(where: { $0.id == id }) {
+            store.modes[m].rows[r].chord = chord
+            store.modes[m].rows[r].steps = steps
+        } else {
+            store.modes[m].rows.append(KeyRow(chord: chord, steps: steps))
+        }
+        store.markDirty()
+    }
+
+    private func delete(_ target: EditTarget) {
+        guard let m = store.modes.firstIndex(where: { $0.id == target.mode }), let id = target.row else { return }
+        store.modes[m].rows.removeAll { $0.id == id }
+        store.markDirty()
     }
 
     private func shortcutRow(_ row: KeyRow, mode: KeyMode, duplicate: Bool) -> some View {
         ShortcutRowView(
             row: binding(mode: mode.id, row: row.id),
             duplicate: duplicate,
+            onEdit: { editing = EditTarget(mode: mode.id, row: row.id) },
             onDelete: {
                 guard let m = store.modes.firstIndex(where: { $0.id == mode.id }) else { return }
                 store.modes[m].rows.removeAll { $0.id == row.id }
@@ -592,31 +654,24 @@ private struct ShortcutsPane: View {
         )
     }
 
+    /// Grouped the way the builder's library is, so a shortcut is found
+    /// under the same heading it was picked from.
     private func groups(for mode: KeyMode) -> [Group] {
         var buckets: [String: [KeyRow]] = [:]
         for row in mode.rows where matches(row) {
-            buckets[Self.category(of: row), default: []].append(row)
+            let name = row.steps.isEmpty ? "New" : ActionCatalog.identify(row.steps[0]).0.category.rawValue
+            buckets[name, default: []].append(row)
         }
-        let known = Self.order.compactMap { name in
-            buckets[name].map {
-                Group(name: name == "Spaces" ? WorkspaceVocabulary.plural : name, rows: $0)
-            }
-        }
-        let rest = buckets.keys.filter { !Self.order.contains($0) }.sorted().compactMap { name in
+        return (["New"] + ActionCategory.allCases.map(\.rawValue)).compactMap { name in
             buckets[name].map { Group(name: name, rows: $0) }
         }
-        return known + rest
-    }
-
-    private static func category(of row: KeyRow) -> String {
-        row.command.isEmpty ? "New" : CheatsheetModel.describe(row.command).0
     }
 
     private func matches(_ row: KeyRow) -> Bool {
         let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !needle.isEmpty else { return true }
-        return ShortcutRowView.summary(for: row.command).lowercased().contains(needle)
-            || row.command.lowercased().contains(needle)
+        return ActionCatalog.sentence(row.steps).lowercased().contains(needle)
+            || row.steps.joined(separator: " ").lowercased().contains(needle)
             || row.chord.lowercased().contains(needle)
             || ChordNaming.caps(for: row.chord).joined().lowercased().contains(needle)
     }
@@ -650,22 +705,18 @@ private struct ShortcutsPane: View {
     }
 }
 
-/// How to make a shortcut, said once at the top of the pane. A new row is two
-/// blank controls, and neither says that a command can be typed or that the
-/// keys are recorded by pressing them.
+/// How to make a shortcut, said once at the top of the pane.
 private struct ShortcutGuide: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Make a shortcut").font(.headline)
-            step(1, "Click **Add Shortcut**. A new row appears under **New**.")
-            step(2, "Click **Choose what this does…** and pick an action. **Apps** opens an app, "
-                + "goes to its window, or hides it. You can also type any weft command, "
-                + "like `space focus 3` or `exec open ~/Downloads`.")
-            step(3, "Click **Record keys** and press the combination. Esc cancels.")
-            Text("⌥ combinations are the safest: most apps leave them free. A shortcut weft "
-                + "uses never reaches the app, so ⌥H moves focus instead of typing ˙. "
-                + "A ⚠ means two shortcuts share the same keys, and only one of them works. "
-                + "The full list of commands is in the README.")
+            step(1, "Click **Add Shortcut…**")
+            step(2, "Press the keys you want to use.")
+            step(3, "Choose what they do from the list of everything weft can do. "
+                + "Add more steps and one shortcut does several things in a row: "
+                + "go to a workspace, then open an app.")
+            Text("Click any shortcut below to change it. ⌥ combinations are the safest: "
+                + "most apps leave them free, and weft never lets an app see a key it uses.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -673,13 +724,13 @@ private struct ShortcutGuide: View {
         .padding(.vertical, 4)
     }
 
-    /// `text` is Markdown, for the bold control names and the code.
+    /// `text` is Markdown, for the bold control names.
     private func step(_ n: Int, _ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("\(n)")
                 .font(.caption.weight(.bold))
                 .frame(width: 18, height: 18)
-                .background(Circle().fill(Color.accentColor.opacity(0.18)))
+                .background(Circle().fill(Color.weft.opacity(0.18)))
             Text(LocalizedStringKey(text)).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -688,45 +739,43 @@ private struct ShortcutGuide: View {
 private struct ShortcutRowView: View {
     @Binding var row: KeyRow
     let duplicate: Bool
+    let onEdit: () -> Void
     let onDelete: () -> Void
-    @State private var picking = false
     @State private var hovering = false
 
-    /// What the shortcut does, in words — "space" said the way the rest of
-    /// this window says it, which depends on the workspaces mode.
-    static func summary(for command: String) -> String {
-        guard !command.isEmpty else { return "" }
-        return WorkspaceVocabulary.rephrase(CheatsheetModel.describe(command).1)
-    }
-
     var body: some View {
-        let summary = Self.summary(for: row.command)
-        let isCustom = !row.command.isEmpty && CheatsheetModel.describe(row.command).1 == row.command
         HStack(spacing: 12) {
-            Button {
-                picking = true
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    if row.command.isEmpty {
+            if let first = row.steps.first {
+                ActionIcon(action: ActionCatalog.identify(first).0, size: 24)
+            }
+            Button(action: onEdit) {
+                HStack(spacing: 6) {
+                    if row.steps.isEmpty {
                         Text("Choose what this does…").foregroundStyle(.secondary)
-                    } else if isCustom {
-                        Text(row.command).font(.system(.body, design: .monospaced))
                     } else {
-                        Text(summary)
+                        Text(ActionCatalog.sentence(row.steps)).lineLimit(2)
+                    }
+                    if row.steps.count > 1 {
+                        Text("\(row.steps.count) steps")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.weft.opacity(0.15)))
+                            .foregroundStyle(Color.weft)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Change what this shortcut does")
-            .popover(isPresented: $picking, arrowEdge: .bottom) {
-                ActionPicker(current: row.command) { command in
-                    row.command = command
-                    picking = false
-                }
-            }
+            .disabled(row.readOnly)
+            .help(row.readOnly
+                ? "Written over several lines in weft.toml — change it there"
+                : "Change this shortcut")
 
+            if row.readOnly {
+                Image(systemName: "lock.fill").foregroundStyle(.secondary)
+            }
             if duplicate {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -734,6 +783,7 @@ private struct ShortcutRowView: View {
             }
 
             ChordField(chord: $row.chord)
+                .disabled(row.readOnly)
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "minus.circle.fill")
@@ -743,128 +793,6 @@ private struct ShortcutRowView: View {
             .opacity(hovering ? 1 : 0.3)
             .help("Remove this shortcut")
         }
-        .onHover { hovering = $0 }
-    }
-}
-
-/// Every action weft knows, in words, searchable — plus a way out for a
-/// command the list does not have. A popover, so it is built when it opens
-/// and costs nothing sitting in sixty rows.
-private struct ActionPicker: View {
-    let current: String
-    let onPick: (String) -> Void
-    @State private var query = ""
-    @State private var custom = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            TextField("Search actions", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .padding(12)
-            Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(CommandCatalog.groups, id: \.name) { group in
-                        let hits = group.commands.filter(matches)
-                        if !hits.isEmpty {
-                            Text(group.name == "Spaces" ? WorkspaceVocabulary.plural : group.name)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 14)
-                                .padding(.top, 12)
-                                .padding(.bottom, 4)
-                            ForEach(hits, id: \.self) { command in
-                                ActionRow(command: command, selected: command == current) { onPick(command) }
-                            }
-                        }
-                    }
-                }
-                .padding(.bottom, 8)
-            }
-            Divider()
-            Button {
-                if let id = Self.chooseApp() { onPick("app toggle \(id)") }
-            } label: {
-                Label("Choose an app…", systemImage: "app.badge")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .help("Open it, go to its window, or hide it when it is in front")
-            HStack(spacing: 8) {
-                TextField("Custom command", text: $custom)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit(useCustom)
-                Button("Use", action: useCustom)
-                    .disabled(custom.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding(12)
-        }
-        .frame(width: 360, height: 480)
-        .onAppear {
-            if !current.isEmpty, !CommandCatalog.contains(current) { custom = current }
-        }
-    }
-
-    /// Any app on disk, as the bundle id `app toggle` takes. A panel rather
-    /// than a list: an app weft has never seen is exactly the one someone
-    /// wants a key for.
-    private static func chooseApp() -> String? {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.application]
-        panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        panel.prompt = "Choose"
-        panel.message = "Choose the app this shortcut opens"
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return Bundle(url: url)?.bundleIdentifier
-    }
-
-    private func useCustom() {
-        let command = custom.trimmingCharacters(in: .whitespaces)
-        guard !command.isEmpty else { return }
-        onPick(command)
-    }
-
-    private func matches(_ command: String) -> Bool {
-        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return needle.isEmpty
-            || command.lowercased().contains(needle)
-            || ShortcutRowView.summary(for: command).lowercased().contains(needle)
-    }
-}
-
-private struct ActionRow: View {
-    let command: String
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(ShortcutRowView.summary(for: command))
-                    Text(command)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 0)
-                if selected {
-                    Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.accentColor.opacity(hovering ? 0.16 : 0))
-                    .padding(.horizontal, 6)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
         .onHover { hovering = $0 }
     }
 }
@@ -1891,75 +1819,6 @@ enum ChordNaming {
     }
 }
 
-enum CommandCatalog {
-    struct Group {
-        let name: String
-        let commands: [String]
-    }
-
-    static let groups: [Group] = [
-        Group(name: "Focus", commands: [
-            "focus west", "focus east", "focus north", "focus south",
-            "focus display west", "focus display east",
-            "focus display next", "focus display cycle",
-        ]),
-        Group(name: "Move", commands: [
-            "move west", "move east", "move north", "move south",
-            // The literal exchange. `move` restructures and keeps the window's
-            // size; `swap` trades slots, so the window takes the size of the
-            // one it traded with.
-            "swap west", "swap east", "swap north", "swap south",
-            "move display west --follow", "move display east --follow",
-            "move display next --follow", "move display cycle --follow",
-        ]),
-        Group(name: "Window", commands: [
-            "window toggle zoom-fullscreen", "window toggle split",
-            "float toggle", "sticky", "balance",
-            "split vertical", "split horizontal",
-        ]),
-        Group(name: "Stacks", commands: [
-            "stack toggle", "stack next", "stack prev", "stack unstack", "stack all",
-            "stack split west", "stack split east",
-            "stack move west", "stack move east",
-        ]),
-        Group(name: "Spaces", commands: [
-            "space focus 1", "space focus 2", "space focus 3", "space focus 4", "space focus 5",
-            "space focus 6", "space focus 7", "space focus 8",
-            "space focus recent",
-            "space move-window 1", "space move-window 2", "space move-window 3", "space move-window 4",
-            "space move-window 5", "space move-window 6", "space move-window 7", "space move-window 8",
-            // The plain form follows the window to its workspace; this is for
-            // a bind that means to stay put.
-            "space move-window 1 --no-follow", "space move-window 2 --no-follow",
-            "space layout bsp", "space layout float", "space layout toggle",
-        ]),
-        Group(name: "Resize", commands: [
-            "resize left 40", "resize right 40", "resize up 40", "resize down 40",
-            "resize left 120", "resize right 120", "resize up 120", "resize down 120",
-        ]),
-        Group(name: "Modes", commands: ["mode default", "mode resize"]),
-        // Apps on every Mac. "Choose an app…" below the list reaches the rest.
-        Group(name: "Apps", commands: [
-            "app toggle com.apple.Terminal", "app toggle com.apple.finder", "app toggle com.apple.Safari",
-            "app toggle com.apple.mail", "app toggle com.apple.Notes", "app toggle com.apple.iCal",
-            "app toggle com.apple.MobileSMS", "app toggle com.apple.Music",
-            "app toggle com.apple.systempreferences", "app toggle com.apple.ActivityMonitor",
-        ]),
-        // Starting points, not a menu: the argument is a shell command, so
-        // these are meant to be picked and then edited.
-        Group(name: "Run a command", commands: [
-            "exec open -a Terminal",
-            "exec open ~/Downloads",
-            "exec pmset displaysleepnow",
-            "exec screencapture -i -c",
-        ]),
-    ]
-
-    static func contains(_ command: String) -> Bool {
-        groups.contains { $0.commands.contains(command) }
-    }
-}
-
 // MARK: - Engine health
 
 /// The daemon's state, for the sidebar card. Polled slowly — every five
@@ -2196,7 +2055,18 @@ final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
         return SettingsSection(launchName: args[i + 1]) ?? .general
     }
 
-    func show() {
+    /// Open on `section`, or switch an open window to it.
+    func show(section: SettingsSection) {
+        let fresh = window?.contentViewController == nil
+        show(initial: section)
+        if !fresh {
+            NotificationCenter.default.post(name: .weftShowSettingsSection, object: section.rawValue)
+        }
+    }
+
+    func show() { show(initial: nil) }
+
+    private func show(initial: SettingsSection?) {
         guard let window else { return }
         if window.contentViewController == nil {
             // Load before the views exist. Loading into views already on
@@ -2209,7 +2079,7 @@ final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
             self.store = store
             self.health = health
             let host = NSHostingController(
-                rootView: SettingsView(store: store, health: health, section: Self.launchSection)
+                rootView: SettingsView(store: store, health: health, section: initial ?? Self.launchSection)
             )
             host.sceneBridgingOptions = [.toolbars, .title]
             let frame = lastFrame ?? window.frame

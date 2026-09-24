@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import SwiftUI
+import WeftBarConfig
 
 /// `weft-bar --render-snapshots <dir>`: draw every Settings pane and Setup
 /// page to PNG, in light and dark, and exit. For looking at the windows while
@@ -34,6 +35,27 @@ enum SnapshotRenderer {
                 size: CGSize(width: 980, height: 1500),
                 appearance: appearance,
                 to: dir.appendingPathComponent("settings-workspaces-tall-\(tag).png")
+            )
+            // The shortcut builder: a new shortcut, which opens on the list of
+            // everything a shortcut can do, and one with two steps.
+            let context = ShortcutContext(
+                workspaces: store.spaces.map(\.label), modes: ["resize"], displays: DisplayCatalog.current()
+            )
+            render(
+                ShortcutEditor(row: nil, isModeLayer: false, context: context, others: [],
+                               onSave: { _, _ in }, onDelete: nil, onCancel: {}),
+                size: CGSize(width: 620, height: 660), appearance: appearance,
+                to: dir.appendingPathComponent("shortcut-new-\(tag).png")
+            )
+            render(
+                ShortcutEditor(
+                    row: KeyRow(chord: "alt-shift-m", steps: ["space move-window 3", "app toggle com.apple.mail"]),
+                    isModeLayer: false, context: context,
+                    others: [KeyRow(chord: "alt-shift-m", steps: ["stack all"])],
+                    onSave: { _, _ in }, onDelete: {}, onCancel: {}
+                ),
+                size: CGSize(width: 620, height: 660), appearance: appearance,
+                to: dir.appendingPathComponent("shortcut-edit-\(tag).png")
             )
             for page in [SetupModel.Page.welcome, .workspacesIntro, .permissions, .done] {
                 let model = SetupModel()

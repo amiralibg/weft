@@ -435,7 +435,7 @@ import Testing
 
     let declared = Set(validated.spaces.map(\.label))
     for binds in validated.keymap.modes.values {
-        for case .send(let command) in binds.values {
+        for command in binds.values.flatMap(\.commands) {
             let parts = command.split(separator: " ").map(String.init)
             guard parts.count >= 3, parts[0] == "space",
                   parts[1] == "focus" || parts[1] == "move-window"
@@ -626,5 +626,48 @@ private func exampleText() throws -> String {
     #expect(cfg.spaces.map(\.display) == [.secondary, .index(2), .named("Studio"), nil])
     #expect(throws: ConfigError.self) {
         try loadConfig("[[space]]\nlabel = \"x\"\ndisplay = 0\n")
+    }
+}
+
+// MARK: - Several commands on one key
+
+/// A list runs its commands in order, from one chord.
+@Test func aListOfCommandsIsOneShortcut() throws {
+    let validated = try loadConfig("""
+        [keys]
+        "alt-m" = ["space focus 3", "app toggle com.apple.mail"]
+        "alt-shift-r" = ["balance", "mode resize"]
+
+        [mode.resize]
+        "escape" = "mode default"
+        """)
+    let binds = try #require(validated.keymap.modes["default"])
+    #expect(binds[try parseChord("alt-m")] == .sequence([.send("space focus 3"), .send("app toggle com.apple.mail")]))
+    #expect(binds[try parseChord("alt-shift-r")] == .sequence([.send("balance"), .mode("resize")]))
+    #expect(binds[try parseChord("alt-m")]?.commands == ["space focus 3", "app toggle com.apple.mail"])
+}
+
+/// One command in a list is just that command.
+@Test func aListOfOneIsAPlainShortcut() throws {
+    let validated = try loadConfig("""
+        [keys]
+        "alt-m" = ["balance"]
+        """)
+    #expect(validated.keymap.modes["default"]?[try parseChord("alt-m")] == .send("balance"))
+}
+
+/// Every step is checked the way a single command is, with the line number.
+@Test func aBadStepInAListFailsTheLoad() {
+    #expect(throws: ConfigError.self) {
+        try loadConfig("""
+            [keys]
+            "alt-m" = ["balance", "fly to the moon"]
+            """)
+    }
+    #expect(throws: ConfigError.self) {
+        try loadConfig("""
+            [keys]
+            "alt-m" = []
+            """)
     }
 }

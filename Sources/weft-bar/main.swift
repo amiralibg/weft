@@ -314,6 +314,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
+        // One cheap WindowServer call, and the problem most likely to look
+        // like weft being broken: windows on another desktop just stop tiling.
+        let extraDesktops = DesktopCensus.extras().reduce(0) { $0 + $1.count - 1 }
+        if extraDesktops > 0 {
+            let item = NSMenuItem(
+                title: extraDesktops == 1
+                    ? "Remove 1 extra macOS desktop…" : "Remove \(extraDesktops) extra macOS desktops…",
+                action: #selector(openDesktopsHelp), keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil
+            )
+            item.toolTip = "weft works on one desktop per display. Windows on the others aren't arranged."
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
+
         let spaces = state.spaces
         guard state.daemonUp != false, !spaces.isEmpty else {
             let item = NSMenuItem(title: "weftd not responding", action: nil, keyEquivalent: "")
@@ -519,6 +537,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openWorkspacesGuide() {
         OnboardingWindowController.shared.showWorkspaces()
+    }
+
+    @objc private func openDesktopsHelp() {
+        ConfigEditorWindowController.shared.show(section: .workspaces)
     }
 
     @objc private func openStageManagerSettings() {

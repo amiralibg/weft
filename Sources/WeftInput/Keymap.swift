@@ -107,6 +107,19 @@ private func keycode(for name: String) -> Int64? {
 public enum KeyAction: Sendable, Equatable {
     case send(String)
     case mode(String)
+    /// Several actions from one chord, run in order:
+    /// `"alt-m" = ["space focus 3", "app toggle com.apple.mail"]`.
+    indirect case sequence([KeyAction])
+
+    /// Every command this sends to the daemon, in order. Mode switches are
+    /// the input layer's own and send nothing.
+    public var commands: [String] {
+        switch self {
+        case .send(let command): return [command]
+        case .mode: return []
+        case .sequence(let steps): return steps.flatMap(\.commands)
+        }
+    }
 
     public static func resolve(_ command: String) -> KeyAction {
         let parts = command.split(separator: " ").map(String.init)

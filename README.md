@@ -384,13 +384,15 @@ is `west`, `east`, `north` or `south`. A display is one of those, `next`,
 | `mode <name>` | Enter a `[mode.<name>]` layer; `mode default` leaves it |
 | `exec <shell command>` | Run anything through `/bin/sh` |
 
-**Making a shortcut.** In Settings › Shortcuts: **Add Shortcut**, then
-**Choose what this does…** and pick an action (or type any command above),
-then **Record keys** and press the combination. In the file, it is one line
-under `[keys]`:
+**Making a shortcut.** In Settings › Shortcuts, click **Add Shortcut…**, press
+the keys, and pick what they do from the list of everything above, in plain
+words, with menus for the details. Add more steps and one key does several
+things in a row. In the file, it is one line under `[keys]`, and a list runs
+its commands in order:
 
 ```toml
 "alt-m" = "app toggle com.apple.mail"      # Settings › Choose an app… finds any bundle id
+"alt-shift-m" = ["space move-window 3", "app toggle com.apple.mail"]   # several steps, in order
 "alt-shift-9" = "space move-window 9 --no-follow"
 "alt-d" = "exec open ~/Downloads"
 ```
@@ -478,9 +480,27 @@ passes `args` through unchanged.
 
 ```bash
 swift build -c release      # weftd, weftctl, weft-bar
-swift test                  # 194 tests, no window manager required
+swift test                  # no window manager required
 ./scripts/build-app.sh      # bundles build/WeftBar.app
 ```
+
+### Trying a change on your own Mac
+
+`scripts/dev.sh` runs your checkout in place of the installed weft, with no
+release in between:
+
+```bash
+./scripts/dev.sh            # build, install over the current weft, restart it
+./scripts/dev.sh logs       # follow what the engine is doing
+./scripts/dev.sh check      # doctor, both hide/show self-tests, idle cost
+./scripts/dev.sh snapshots  # every Settings pane and Setup page as PNGs
+./scripts/dev.sh release    # back to the latest published release
+```
+
+It installs where a release installs and signs with the same local identity,
+so macOS keeps weft's permissions when you switch between a local build and a
+release. Your config is left alone. `weftctl doctor` says when a local build is
+running, and which commit.
 
 To produce what a release ships — universal binaries for both architectures:
 

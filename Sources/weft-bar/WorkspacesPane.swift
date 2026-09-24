@@ -146,6 +146,7 @@ struct WorkspacesPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 header
+                ExtraDesktopsCard()
                 DisplayCanvas(
                     displays: displays,
                     spaces: store.spaces,
@@ -811,10 +812,10 @@ private struct WorkspaceWarnings: View {
     @SwiftUI.State private var stageManager = SystemChecks.stageManagerEnabled()
 
     var body: some View {
-        let extra = status?.displaysWithExtraDesktops ?? []
+        // Extra macOS desktops have their own card at the top of the pane.
         let boxedIn = displays.count > 1
             ? (status?.displays.filter { $0.parkCorner == nil } ?? []) : []
-        let anything = !extra.isEmpty || !boxedIn.isEmpty || !tiling.isEmpty || stageManager
+        let anything = !boxedIn.isEmpty || !tiling.isEmpty || stageManager
         if anything {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Worth knowing").font(.headline)
@@ -833,15 +834,6 @@ private struct WorkspaceWarnings: View {
                         text: "Dragging a window to a screen edge makes macOS resize it and weft puts it back. "
                             + "Turn off: " + tiling.joined(separator: ", ") + ".",
                         action: ("Open Desktop & Dock", SystemChecks.desktopAndDockURL)
-                    )
-                }
-                ForEach(extra, id: \.uuid) { d in
-                    WarningRow(
-                        symbol: "square.stack.3d.up", tint: .secondary,
-                        title: "\(d.name ?? "Display \(d.index)") has \(d.desktops) macOS desktops",
-                        text: "That is fine: weft works on desktop \(d.managedDesktop ?? 1) and pauses while another "
-                            + "one is showing. Remove the others in Mission Control to keep every window managed.",
-                        action: nil
                     )
                 }
                 ForEach(boxedIn, id: \.uuid) { d in

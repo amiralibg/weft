@@ -50,6 +50,8 @@ for b in weftd weftctl; do
     chmod +x "$BINDIR/.$b.new"
     mv -f "$BINDIR/.$b.new" "$BINDIR/$b"
 done
+# What scripts/dev.sh leaves to say a local build is running. This is not one.
+rm -f "$BINDIR/.weft-local-build"
 # The app arrived over the network, so its contents may carry the flag.
 xattr -d com.apple.quarantine "$BINDIR/weftd" 2>/dev/null || true
 xattr -d com.apple.quarantine "$BINDIR/weftctl" 2>/dev/null || true

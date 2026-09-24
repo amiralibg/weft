@@ -605,37 +605,56 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             } catch {
                 throw ConfigError(line: line, message: "bad chord '\(chordText)': \(error)")
             }
-            guard case .string(let cmdText) = cmdValue else {
-                throw ConfigError(line: line, message: "keybind value must be a string")
-            }
-            let action: KeyAction
-            if cmdText.split(separator: " ").first == "mode" {
-                // Mode switches resolve locally in the input layer.
-                let parts = cmdText.split(separator: " ").map(String.init)
-                guard parts.count == 2 else {
-                    throw ConfigError(line: line, message: "bad mode command: \(cmdText)")
+            // One command, or several run in order: `["space focus 3", "app toggle …"]`.
+            let texts: [String]
+            switch cmdValue {
+            case .string(let text):
+                texts = [text]
+            case .array(let items):
+                texts = try items.map { item in
+                    guard case .string(let text) = item else {
+                        throw ConfigError(line: line, message: "'\(chordText)': every step of a list must be a quoted command")
+                    }
+                    return text
                 }
-                action = .mode(parts[1])
-                modeTargets.append((target: parts[1], chord: chordText, line: line))
-            } else if cmdText.split(separator: " ").first == "scroll" {
-                // A binding for the retired scroll layout. Every other
-                // unparseable command is a typo and fails the load; this one
-                // is weft changing under the user, so the bind is dropped
-                // and named, and the rest of their keymap keeps working.
-                warnings.append(ConfigWarning(
-                    line: line,
-                    message: "'\(chordText)' is bound to '\(cmdText)', which was removed with the scroll layout — unbound"
-                ))
-                continue
-            } else {
-                do {
-                    let cmd = try Command.parse(cmdText)
-                    _ = cmd
-                } catch {
-                    throw ConfigError(line: line, message: "bad command '\(cmdText)': \(error)")
+                guard !texts.isEmpty else {
+                    throw ConfigError(line: line, message: "'\(chordText)' is bound to an empty list")
                 }
-                action = .send(cmdText)
+            default:
+                throw ConfigError(line: line, message: "keybind value must be a command in quotes, or a list of them")
             }
+            var steps: [KeyAction] = []
+            var retired = false
+            for cmdText in texts {
+                if cmdText.split(separator: " ").first == "mode" {
+                    // Mode switches resolve locally in the input layer.
+                    let parts = cmdText.split(separator: " ").map(String.init)
+                    guard parts.count == 2 else {
+                        throw ConfigError(line: line, message: "bad mode command: \(cmdText)")
+                    }
+                    steps.append(.mode(parts[1]))
+                    modeTargets.append((target: parts[1], chord: chordText, line: line))
+                } else if cmdText.split(separator: " ").first == "scroll" {
+                    // A binding for the retired scroll layout. Every other
+                    // unparseable command is a typo and fails the load; this one
+                    // is weft changing under the user, so the bind is dropped
+                    // and named, and the rest of their keymap keeps working.
+                    warnings.append(ConfigWarning(
+                        line: line,
+                        message: "'\(chordText)' is bound to '\(cmdText)', which was removed with the scroll layout — unbound"
+                    ))
+                    retired = true
+                } else {
+                    do {
+                        _ = try Command.parse(cmdText)
+                    } catch {
+                        throw ConfigError(line: line, message: "bad command '\(cmdText)': \(error)")
+                    }
+                    steps.append(.send(cmdText))
+                }
+            }
+            if retired { continue }
+            let action: KeyAction = steps.count == 1 ? steps[0] : .sequence(steps)
             if binds[chord] != nil {
                 throw ConfigError(line: line, message: "duplicate chord '\(chordText)'")
             }

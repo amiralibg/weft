@@ -243,6 +243,14 @@ private func tapCallback(
     guard let action else {
         return Unmanaged.passUnretained(event)
     }
+    perform(action, box: box)
+    return nil  // matched: swallow
+}
+
+/// Run a matched action. A sequence runs its steps in order: commands reach
+/// the daemon in the order sent, since it takes them one at a time off one
+/// queue, and a mode switch takes effect before the next step.
+private func perform(_ action: KeyAction, box: TapBox) {
     switch action {
     case .send(let command):
         box.lock.withLock { box.onCommand }?(command)
@@ -255,8 +263,9 @@ private func tapCallback(
         if known {
             box.lock.withLock { box.onModeChange }?(name)
         }
+    case .sequence(let steps):
+        for step in steps { perform(step, box: box) }
     }
-    return nil  // matched: swallow
 }
 
 // MARK: - InputManager

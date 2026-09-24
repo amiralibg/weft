@@ -43,7 +43,26 @@ struct RuleRow: Identifiable, Equatable {
 struct KeyRow: Identifiable, Equatable {
     var id = UUID()
     var chord: String = ""
-    var command: String = ""
+    /// What the shortcut runs, in order. Usually one command.
+    var steps: [String] = []
+    /// A list written across several lines by hand. Shown, never rewritten:
+    /// only its first line is ours to replace, and the rest would be left
+    /// behind as garbage.
+    var readOnly = false
+
+    init(id: UUID = UUID(), chord: String = "", steps: [String] = [], readOnly: Bool = false) {
+        self.id = id
+        self.chord = chord
+        self.steps = steps
+        self.readOnly = readOnly
+    }
+
+    /// The first step, for everything that files or describes a shortcut by
+    /// what it mainly does. Setting it makes the shortcut that one command.
+    var command: String {
+        get { steps.first ?? "" }
+        set { steps = newValue.isEmpty ? [] : [newValue] }
+    }
 }
 
 struct KeyMode: Identifiable, Equatable {
@@ -299,7 +318,11 @@ final class ConfigStore: ObservableObject {
             _ = i
             let rows = section.entries.compactMap { entry -> KeyRow? in
                 guard case .pair(let k, let v) = entry else { return nil }
-                return KeyRow(chord: TomlValue.unquote(k), command: TomlValue.unquote(v))
+                let raw = v.trimmingCharacters(in: .whitespaces)
+                return KeyRow(
+                    chord: TomlValue.unquote(k), steps: TomlValue.steps(raw),
+                    readOnly: raw.hasPrefix("[") && !raw.contains("]")
+                )
             }
             out.append(KeyMode(name: name, rows: rows))
         }
@@ -531,9 +554,11 @@ final class ConfigStore: ObservableObject {
         for mode in modes {
             let i = document.ensureSection(mode.header)
             var s = document.sections[i]
-            let valid = mode.rows.filter { !$0.chord.isEmpty && !$0.command.isEmpty }
+            let valid = mode.rows.filter { !$0.chord.isEmpty && (!$0.steps.isEmpty || $0.readOnly) }
             s.removePairs(notIn: Set(valid.map { $0.chord.lowercased() }))
-            for row in valid { s.setRaw(TomlValue.quote(row.chord), TomlValue.quote(row.command)) }
+            for row in valid where !row.readOnly {
+                s.setRaw(TomlValue.quote(row.chord), TomlValue.literal(steps: row.steps))
+            }
             document.sections[i] = s
         }
     }
@@ -641,8 +666,19 @@ final class ConfigStore: ObservableObject {
     /// yet, Settings shows and saves this: the same starting point whichever
     /// way weft was installed, rather than a shorter one of its own.
     static var shippedDefault: String? {
-        Bundle.main.url(forResource: "weft", withExtension: "toml")
-            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        if let bundled = Bundle.main.url(forResource: "weft", withExtension: "toml")
+            .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }) {
+            return bundled
+        }
+        #if DEBUG
+            // `swift run` and the snapshot renderer: the checkout's own copy.
+            let checkout = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("examples/weft.toml")
+            return try? String(contentsOf: checkout, encoding: .utf8)
+        #else
+            return nil
+        #endif
     }
 
     /// Only for a build with no bundled example: `swift run` from a checkout.
@@ -732,12 +768,14 @@ extension ConfigStore {
         spaces[i].label = label
         for r in rules.indices where rules[r].space == old { rules[r].space = label }
         for m in modes.indices {
-            for k in modes[m].rows.indices {
-                var words = modes[m].rows[k].command.split(separator: " ").map(String.init)
-                if words.count >= 3, words[0] == "space", words[1] == "focus" || words[1] == "move-window",
-                   words[2] == old {
+            for k in modes[m].rows.indices where !modes[m].rows[k].readOnly {
+                modes[m].rows[k].steps = modes[m].rows[k].steps.map { step in
+                    var words = step.split(separator: " ").map(String.init)
+                    guard words.count >= 3, words[0] == "space", words[1] == "focus" || words[1] == "move-window",
+                          words[2] == old
+                    else { return step }
                     words[2] = label
-                    modes[m].rows[k].command = words.joined(separator: " ")
+                    return words.joined(separator: " ")
                 }
             }
         }
@@ -788,11 +826,13 @@ extension ConfigStore {
         guard let mode = modes.first(where: { $0.name == "default" }) else { return ([], []) }
         var focus: [String] = [], move: [String] = []
         for row in mode.rows {
-            let words = row.command.split(separator: " ").map(String.init)
-            guard words.count >= 3, words[0] == "space", words[2] == label || words[2] == "\(number)"
-            else { continue }
-            if words[1] == "focus" { focus.append(row.chord) }
-            if words[1] == "move-window" { move.append(row.chord) }
+            for step in row.steps {
+                let words = step.split(separator: " ").map(String.init)
+                guard words.count >= 3, words[0] == "space", words[2] == label || words[2] == "\(number)"
+                else { continue }
+                if words[1] == "focus", !focus.contains(row.chord) { focus.append(row.chord) }
+                if words[1] == "move-window", !move.contains(row.chord) { move.append(row.chord) }
+            }
         }
         return (focus, move)
     }

@@ -155,6 +155,24 @@ public enum SpaceControl {
     /// labels for desktops the user does not have — a label with no desktop
     /// behind it resolves to nothing and every rule and keybind naming it fails
     /// silently, which is the worst way for a generated config to be wrong.
+    /// How many ordinary desktops each display has, by the display uuid
+    /// `SLSCopyManagedDisplaySpaces` reports, in its order. Fullscreen apps are
+    /// not counted: they come and go with the app and are not the user's to
+    /// remove. With "Displays have separate Spaces" off there is one entry,
+    /// "Main", for all of them. Empty when the call is unavailable.
+    public static func desktopsByDisplay() -> [(uuid: String, count: Int)] {
+        let cid = SLSMainConnectionID()
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [] }
+        return raw.compactMap { displayDict in
+            guard let uuid = displayDict["Display Identifier"] as? String else { return nil }
+            let count = (displayDict["Spaces"] as? [[String: Any]] ?? []).filter { spaceDict in
+                let id = (spaceDict["id64"] as? NSNumber) ?? (spaceDict["id"] as? NSNumber)
+                return id.map { SLSSpaceGetType(cid, $0.uint64Value) == 0 } ?? false
+            }.count
+            return (uuid, count)
+        }
+    }
+
     public static func desktopCount() -> Int {
         let cid = SLSMainConnectionID()
         guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return 0 }

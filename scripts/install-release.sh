@@ -198,6 +198,8 @@ say "installing binaries to $BINDIR"
 mkdir -p "$BINDIR"
 cp "$STAGE/bin/weftd" "$STAGE/bin/weftctl" "$BINDIR/"
 chmod +x "$BINDIR/weftd" "$BINDIR/weftctl"
+# What scripts/dev.sh leaves to say a local build is running. This is not one.
+rm -f "$BINDIR/.weft-local-build"
 
 say "installing WeftBar.app to $APPDIR"
 mkdir -p "$APPDIR"

@@ -106,8 +106,9 @@ final class CheatsheetModel: ObservableObject {
 
             for entry in section.entries {
                 guard case .pair(let key, let value) = entry else { continue }
-                let command = TomlValue.unquote(value)
-                var (category, summary) = Self.describe(command)
+                let steps = TomlValue.steps(value)
+                let command = steps.joined(separator: "; ")
+                var (category, summary) = Self.describe(steps: steps)
                 // `describe` speaks weft's own vocabulary — every command is
                 // spelled `space …`. What the user calls it depends on the
                 // mode, and this is the single place that translates.
@@ -205,6 +206,19 @@ final class CheatsheetModel: ObservableObject {
         "com.apple.ical": "Calendar", "com.apple.mobilesms": "Messages",
         "com.apple.systempreferences": "System Settings", "com.apple.activitymonitor": "Activity Monitor",
     ]
+
+    /// A shortcut that runs several commands: the first one's bucket, and each
+    /// one said in turn — "Go to space “3”, then open Mail".
+    static func describe(steps: [String]) -> (String, String) {
+        guard let first = steps.first else { return ("Other", "") }
+        let head = describe(first)
+        guard steps.count > 1 else { return head }
+        let rest = steps.dropFirst().map { step -> String in
+            let said = describe(step).1
+            return said.prefix(1).lowercased() + said.dropFirst()
+        }
+        return (head.0, ([head.1] + rest).joined(separator: ", then "))
+    }
 
     private static func stackSummary(_ words: [String]) -> String {
         switch words.dropFirst().first {

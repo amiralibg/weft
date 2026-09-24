@@ -260,6 +260,42 @@ public enum TomlValue {
         return "\"\(escaped)\""
     }
 
+    /// A keybind's value as the commands it runs: one quoted command, or a
+    /// list of them run in order (`["space focus 3", "app toggle …"]`).
+    public static func steps(_ raw: String) -> [String] {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("[") else {
+            let one = unquote(t)
+            return one.isEmpty ? [] : [one]
+        }
+        var out: [String] = []
+        var i = t.index(after: t.startIndex)
+        while i < t.endIndex {
+            let c = t[i]
+            if c == "]" || c == "#" { break }
+            guard c == "\"" else { i = t.index(after: i); continue }
+            // A basic string, with its escapes.
+            var text = ""
+            var j = t.index(after: i)
+            while j < t.endIndex, t[j] != "\"" {
+                if t[j] == "\\", t.index(after: j) < t.endIndex {
+                    j = t.index(after: j)
+                }
+                text.append(t[j])
+                j = t.index(after: j)
+            }
+            out.append(text)
+            i = j < t.endIndex ? t.index(after: j) : j
+        }
+        return out
+    }
+
+    /// The value to write for these commands: a plain string for one, a list
+    /// for several.
+    public static func literal(steps: [String]) -> String {
+        steps.count == 1 ? quote(steps[0]) : "[" + steps.map(quote).joined(separator: ", ") + "]"
+    }
+
     /// `{ top = 8, bottom = 8, … }` or a bare number applied to all four
     /// sides — weft accepts both, and a user who wrote the short form should
     /// get it back unless they actually make the sides differ.

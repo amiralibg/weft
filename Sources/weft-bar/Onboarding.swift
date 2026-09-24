@@ -1655,6 +1655,11 @@ private struct DonePage: View {
                 .frame(maxWidth: 420, alignment: .leading)
                 .opacity(appeared ? 1 : 0)
 
+            ExtraDesktopsCard()
+                .padding(.top, 12)
+                .frame(maxWidth: 420, alignment: .leading)
+                .opacity(appeared ? 1 : 0)
+
             Text("Press **⌘K** for the cheatsheet. Everything else lives in the menu-bar icon.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
