@@ -589,6 +589,35 @@ Each phase can ship on its own as the next 0.9.x release.
      window list reading a move before it lands, and the park mover not
      allowing for Accessibility's clamp. All fixed.
 
+## Roadmap after 0.9.15
+
+From the maintainer's brief, in the order they build on each other. None of
+these needs a private call beyond what the platform budget already allows.
+
+1. **Measure on real arrangements.** Park corners on two- and three-display
+   setups, a one-hour park of Electron and a browser, and the idle and
+   switch budgets on a release build (docs/TESTING.md §H2).
+2. **Hide in parallel on the public path.** The Accessibility fallback parks
+   one window at a time; one queue per app, as frame writes already use,
+   would bound a switch by the slowest app rather than the sum.
+3. **weft's own overview**, since Mission Control on the managed desktop is
+   degraded: ScreenCaptureKit thumbnails of every workspace on every
+   display, in a grid, with drag to move a window between workspaces. Needs
+   Screen Recording, which weft already asks for as optional.
+4. **A window inspector** in Settings: pick any window, see its bundle id,
+   role, subrole, layer and why weft tiled or floated it, with "make a rule
+   from this". The classifier's reasons already exist (`query windows`).
+5. **Teach mode**: after a manual float or tile, offer "always do this for
+   windows like this from <app>?" and write the rule.
+6. **Display profiles**: laptop alone, desk, presenting — each with its own
+   workspace pins, layouts and gaps, switched when the arrangement changes.
+   Pins by display name already make most of this a matter of grouping.
+7. **Snapshot-proxy animations**, optional and behind Screen Recording:
+   capture the window, animate the capture in weft's own overlay, move the
+   real window underneath, fade.
+8. **`NSPanel` borders** for the public path, and a scored popup classifier
+   with a shared, versioned rules database.
+
 ## Still to measure
 
 Each one is a spike before the phase that depends on it.
