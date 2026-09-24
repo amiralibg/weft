@@ -155,3 +155,56 @@ private let deadWID: WindowID = 0xFFFF_FFF0
     #expect(outcome.notOurs == [deadWID])
     #expect(parker.ledger.load() == .nothingParked)
 }
+
+// MARK: - A ledger entry is only true while the window is at its spot
+
+private let screen = Frame(x: 0, y: 0, width: 1728, height: 1117)
+private let tile = Frame(x: 8, y: 46, width: 843, height: 1058)
+
+private func entry(_ wid: WindowID, parkedAt spot: CGPoint, frame: Frame = tile) -> ParkedWindow {
+    ParkedWindow(wid: wid, frame: frame, parkedAt: ParkedWindow.Spot(x: spot.x, y: spot.y))
+}
+
+@Test func aWindowStillAtItsSpotIsNotMovedAgain() {
+    let spot = CGPoint(x: 1727, y: 1116)
+    let held = [entry(7, parkedAt: spot)]
+    let plan = Parker.plan([7], held: held, on: screen, corner: .bottomRight) { _ in
+        Frame(x: spot.x, y: spot.y, width: tile.width, height: tile.height)
+    }
+    #expect(plan.alreadyParked == [7])
+    #expect(plan.fresh.isEmpty)
+    #expect(plan.held == held)
+}
+
+@Test func aParkedWindowBackOnScreenIsParkedAgainFromWhereItIs() {
+    // A layout write that landed after the park, or an app putting back the
+    // frame it believes it has. The entry says hidden; the window is showing
+    // on whatever workspace is. Skipping it left it there for good.
+    let back = Frame(x: 860, y: 46, width: 843, height: 1058)
+    let held = [entry(7, parkedAt: CGPoint(x: 1727, y: 1116)), entry(9, parkedAt: CGPoint(x: 1727, y: 1116))]
+    let plan = Parker.plan([7], held: held, on: screen, corner: .bottomRight) { wid in
+        wid == 7 ? back : nil
+    }
+    #expect(plan.alreadyParked.isEmpty)
+    #expect(plan.fresh.map(\.wid) == [7])
+    // Restored to where it was just now, not to the stale entry's frame.
+    #expect(plan.fresh.first?.frame == back)
+    // The stale entry is gone and every other entry is untouched.
+    #expect(plan.held.map(\.wid) == [9])
+}
+
+@Test func anEntryForAWindowThatCannotBeReadIsKept() {
+    // Possibly a window that has gone. Dropping the entry would not help it,
+    // and re-parking needs a frame to write down first.
+    let held = [entry(7, parkedAt: CGPoint(x: 1727, y: 1116))]
+    let plan = Parker.plan([7], held: held, on: screen, corner: .bottomRight) { _ in nil }
+    #expect(plan.alreadyParked == [7])
+    #expect(plan.held == held)
+    #expect(plan.unreadable.isEmpty)
+}
+
+@Test func aWindowNotInTheLedgerIsParkedFromItsLiveFrame() {
+    let plan = Parker.plan([7], held: [], on: screen, corner: .bottomRight) { _ in tile }
+    #expect(plan.fresh.map(\.wid) == [7])
+    #expect(plan.fresh.first?.frame == tile)
+}

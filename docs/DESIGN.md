@@ -1763,9 +1763,12 @@ does nothing. A carry that *failed* still returns the user, whichever was asked
 for — being left on a desktop you did not ask for with the window still behind
 you is the one case where going back is unambiguously right.
 
-`weftctl migrate` emits `--no-follow` for a bare `yabai -m window --space N`,
-which does not follow, so a migrated config keeps doing what it did. A line that
-chains `space --focus` onto it becomes one weft command with the default. That
+`weftctl migrate` used to emit `--no-follow` for a bare `yabai -m window --space
+N`, which does not follow, so a migrated config kept doing what it did. Since
+0.9.17 it emits the default. With workspaces on one desktop (REDESIGN.md),
+following is a workspace switch rather than a desktop switch, and a bind that
+stays put leaves the user on the workspace the window just left. A line that
+chains `space --focus` onto it also becomes one weft command with the default. That
 branch also had to move above `space --focus` in the matcher — the same ordering
 bug §15.2 fixed for `window --display`, which the chained form hits the same way.
 

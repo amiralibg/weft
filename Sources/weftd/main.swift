@@ -43,6 +43,13 @@ final class Daemon: @unchecked Sendable {
     /// Hides and shows a workspace's windows, with a crash-safe ledger read at
     /// startup (WORKSPACES.md, "Park and unpark").
     private let parker: Parker
+    /// Held while a switch or a move decides what is hidden and parks or
+    /// unparks it, and while the re-hide pass does the same. Switches run on
+    /// the command queue and on the sync queue (focus), and the re-hide runs
+    /// on the sync queue. Without the lock, a re-hide that read "hidden" just
+    /// before a switch showed the workspace would park the windows it showed.
+    /// Recursive because following a moved window is a move, then a switch.
+    private let visibility = NSRecursiveLock()
     /// Windows weft is moving between displays itself, and when it started.
     /// The WindowServer can still report the display a window is leaving for
     /// a moment, and a sweep in that moment would read the move as the user
@@ -1699,7 +1706,9 @@ final class Daemon: @unchecked Sendable {
             applySpaceLayout(sid, raiseFocus: sid == focusedSID)
         }
         watchCurrent()
-        if initial { hideHiddenWorkspaces() }
+        // After a restart, the hidden workspaces' windows are all on screen.
+        // After that, only one an app has moved back is.
+        if initial { hideHiddenWorkspaces() } else { rehideStragglers() }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())
         if initial {
@@ -1825,6 +1834,12 @@ final class Daemon: @unchecked Sendable {
     /// Trailing re-apply after `space move-window`, for the size write an app
     /// drops while it is still changing spaces.
     private var pendingMoveSettle: DispatchWorkItem?
+    /// The re-hide pass after a switch or a move, for a frame write that
+    /// was already running when the window was parked (`rehideStragglers`).
+    private var pendingRehide: DispatchWorkItem?
+    /// Windows the re-hide pass could not move, left alone until the next
+    /// switch rather than tried again on every sweep. Guarded by `visibility`.
+    private var rehideRefused: Set<WindowID> = []
     /// Debounced write of `membership.json`.
     private var pendingMembershipSave: DispatchWorkItem?
 
@@ -2838,9 +2853,65 @@ final class Daemon: @unchecked Sendable {
         return (own, .bottomRight)
     }
 
-    private func park(_ wids: [WindowID], from display: String?) throws {
+    @discardableResult
+    private func park(_ wids: [WindowID], from display: String?) throws -> Parker.ParkOutcome {
         let place = parkPlace(for: display)
-        try parker.park(wids, on: place.display, corner: place.corner)
+        // A layout write still queued for one of these would land after the
+        // park and bring the window back on screen.
+        applier.cancelWrites(for: wids)
+        return try parker.park(wids, on: place.display, corner: place.corner)
+    }
+
+    /// Park again every window of a hidden workspace that is on screen anyway.
+    ///
+    /// A park is one move, and an app can undo it: a frame write already
+    /// running in a slow app lands just after it, and an app that sets its
+    /// own frame (a browser, an Electron app) puts back the frame it thinks
+    /// it has. Either way the window shows on whichever workspace is
+    /// showing — an empty one included — until its own is shown. `park`
+    /// skips windows still at their spot, so this costs one frame read per
+    /// hidden window and moves only the ones that came back.
+    ///
+    /// Skips paused displays, where nothing of weft's is on screen, and
+    /// windows weft is moving between displays itself.
+    private func rehideStragglers() {
+        visibility.lock()
+        defer { visibility.unlock() }
+        let sp = readSpaces()
+        let moving = core.sync { Set(self.inFlight.keys) }
+        var byDisplay: [String: [WindowID]] = [:]
+        for id in sp.wsOrder where sp.showingDisplay(of: id) == nil {
+            guard let ws = sp.workspaces[id], let display = sp.displayBySpace[ws.desktop],
+                  !sp.isPaused(display)
+            else { continue }
+            byDisplay[display, default: []] += ws.members.filter {
+                !moving.contains($0) && !rehideRefused.contains($0)
+            }
+        }
+        for (display, wids) in byDisplay where !wids.isEmpty {
+            do {
+                let outcome = try park(wids, from: display)
+                rehideRefused.formUnion(outcome.refused)
+                if !outcome.parked.isEmpty {
+                    fputs("weftd: re-hid \(outcome.parked) — back on screen while their workspace was hidden\n", stderr)
+                }
+            } catch {
+                fputs("weftd: could not re-hide \(wids.count) window(s): \(error)\n", stderr)
+            }
+        }
+    }
+
+    /// One re-hide pass shortly after a switch or a move, replacing any
+    /// pass already waiting. Long enough for an app's frame write to finish:
+    /// one attempt and one retry, each bounded by the 150 ms AX timeout.
+    private func scheduleRehide() {
+        syncQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingRehide?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.rehideStragglers() }
+            self.pendingRehide = work
+            self.syncQueue.asyncAfter(deadline: .now() + 0.5, execute: work)
+        }
     }
 
     /// Record windows weft is about to move between displays, so a sweep that
@@ -2864,6 +2935,10 @@ final class Daemon: @unchecked Sendable {
         focusWindow: WindowID? = nil,
         stealFocus: Bool = true
     ) {
+        visibility.lock()
+        var locked = true
+        defer { if locked { visibility.unlock() } }
+        rehideRefused = []
         let sp = readSpaces()
         guard let currentActive = sp.active[sid], let display = sp.displayBySpace[sid] else { return }
         if currentActive == targetWsID {
@@ -2909,6 +2984,8 @@ final class Daemon: @unchecked Sendable {
                 }
             }
         }
+        visibility.unlock()
+        locked = false
 
         // 4. Floats that changed display. Tiled windows are placed by the
         //    layout below; a float has no layout slot, so it keeps its place
@@ -2933,6 +3010,7 @@ final class Daemon: @unchecked Sendable {
             applier.focusWindow(wid, pid: pid)
         }
         if crossing { scheduleMoveSettle([sid] + (swapping ? fromDesktop.map { [$0] } ?? [] : [])) }
+        if !outgoing.isEmpty, !swapping { scheduleRehide() }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())
     }
@@ -3079,6 +3157,7 @@ final class Daemon: @unchecked Sendable {
                 }
                 return IPCResponse(ok: false, error: "could not hide \(wid): \(error)")
             }
+            scheduleRehide()
         }
         if sourceShowing, let sourceDesktop, sourceDesktop != targetDesktop || targetShowingOn == nil {
             applySpaceLayout(sourceDesktop, raiseFocus: !follow)

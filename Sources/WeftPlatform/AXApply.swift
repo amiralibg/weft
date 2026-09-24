@@ -299,6 +299,18 @@ public final class AXApplier: @unchecked Sendable {
         }
     }
 
+    /// Drop the frame writes still waiting on an app's queue for these
+    /// windows. Each one is skipped when its turn comes, as a superseded write
+    /// is (see `inFlight`).
+    ///
+    /// For windows about to be hidden. A write queued behind a slow app lands
+    /// after the park and puts the window back on screen, in a workspace that
+    /// is no longer showing. A write the app is already handling cannot be
+    /// taken back; the daemon's re-hide pass catches that one.
+    public func cancelWrites(for wids: [WindowID]) {
+        lock.withLock { for wid in wids { inFlight.removeValue(forKey: wid) } }
+    }
+
     /// Release the per-pid queue and app element for a terminated process.
     public func forgetApp(pid: Int32) {
         lock.withLock {

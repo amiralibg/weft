@@ -1867,8 +1867,8 @@ enum CommandCatalog {
             "space focus 1", "space focus 2", "space focus 3", "space focus 4", "space focus 5",
             "space focus recent",
             "space move-window 1", "space move-window 2", "space move-window 3",
-            // The screen changes desktop either way, so the plain form follows
-            // the window; this is for a bind that means to stay put.
+            // The plain form follows the window to its workspace; this is for
+            // a bind that means to stay put.
             "space move-window 1 --no-follow", "space move-window 2 --no-follow",
             "space layout bsp", "space layout float", "space layout toggle",
         ]),

@@ -271,13 +271,14 @@ public enum Migrate {
                     let words = actionRaw.components(separatedBy: .whitespaces)
                     if let idx = words.firstIndex(of: "--space"), idx + 1 < words.count {
                         let target = words[idx + 1]
-                        // yabai's `window --space` does not follow, so a bare
-                        // one migrates to `--no-follow` — weft's default is
-                        // the opposite and a migration must not change what a
-                        // key does. A line that chains `space --focus` onto it
-                        // is the follow case, and becomes one command.
-                        let follows = actionRaw.contains("space --focus")
-                        weftCmd = "space move-window \(target)\(follows ? "" : " --no-follow")"
+                        // Always weft's default, which follows the window.
+                        // yabai's bare `window --space` stays put, but only
+                        // because following there is a desktop switch. Here
+                        // it is a workspace switch on the same desktop, and
+                        // staying put leaves the user looking at a workspace
+                        // the window just left. A line that chains
+                        // `space --focus` onto it is the same one command.
+                        weftCmd = "space move-window \(target)"
                     }
                 }
                 else if actionRaw.contains("space --focus recent") { weftCmd = "space focus recent" }
@@ -369,11 +370,10 @@ public enum Migrate {
         // behaviour. A migrated config is read by someone who had `rule
         // --add ... space=`, so the key they will go looking for should be in
         // the file with the reason attached, not only in the README.
-        toml += "# Let a rule's `space = \"...\"` move a window when it opens. Off because\n"
-        toml += "# weft moves a window by holding it and switching desktops, so the screen\n"
-        toml += "# changes desktop — fine when you type `space move-window` (which goes\n"
-        toml += "# with the window by default; `--no-follow` stays put), surprising when\n"
-        toml += "# an app merely opened.\n"
+        toml += "# Let a rule's `space = \"...\"` also show that workspace when a window\n"
+        toml += "# opens. Off because the screen then changes under you whenever an app\n"
+        toml += "# opens a window. The rule still files the window in its workspace.\n"
+        toml += "# `space move-window` follows the window unless given `--no-follow`.\n"
         toml += "# follow-space-rules = true\n\n"
 
         // Both integrations stay OFF. Migration reads a yabai config, not a

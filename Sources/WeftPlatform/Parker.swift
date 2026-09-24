@@ -140,35 +140,12 @@ public struct Parker: Sendable {
         case .unreadable(let why): throw ParkError.ledgerUnreadable(why)
         }
 
-        let already = Set(held.map { $0.wid })
+        let plan = Self.plan(wids, held: held, on: display, corner: corner) { WorldReader.frame(of: $0) }
+        held = plan.held
+        let fresh = plan.fresh
         var outcome = ParkOutcome(
-            parked: [], alreadyParked: [], unreadable: [], refused: [], note: nil
+            parked: [], alreadyParked: plan.alreadyParked, unreadable: plan.unreadable, refused: [], note: nil
         )
-        var fresh: [ParkedWindow] = []
-        for wid in wids {
-            if already.contains(wid) {
-                outcome.alreadyParked.append(wid)
-                continue
-            }
-            // The frame the window HAS, not the frame the layout computed for
-            // it. An app that refused its tile is exactly the app whose
-            // restore would otherwise put it somewhere it has never been, and
-            // after a crash there is nothing else left to restore from.
-            guard let frame = WorldReader.frame(of: wid) else {
-                outcome.unreadable.append(wid)
-                continue
-            }
-            // Per window: at any corner but bottom-right the window's own size
-            // decides where its one visible point ends up.
-            let point = parkOrigin(width: frame.width, height: frame.height, corner: corner, in: display)
-            fresh.append(
-                ParkedWindow(
-                    wid: wid,
-                    frame: frame,
-                    parkedAt: ParkedWindow.Spot(x: point.x, y: point.y)
-                )
-            )
-        }
         guard !fresh.isEmpty else { return outcome }
         // Checked here rather than on entry: only a park that would move
         // something needs the answer, and asking is what runs the self-test.
@@ -224,6 +201,72 @@ public struct Parker: Sendable {
             }
         }
         return outcome
+    }
+
+    /// What a park will do, decided from the ledger and each window's live
+    /// frame: which windows are hidden already, which to move, and which
+    /// ledger entries to keep.
+    public struct ParkPlan: Sendable, Equatable {
+        /// The ledger with every stale entry taken out.
+        public var held: [ParkedWindow]
+        /// Entries to write, then move.
+        public var fresh: [ParkedWindow]
+        public var alreadyParked: [WindowID]
+        public var unreadable: [WindowID]
+    }
+
+    /// A ledger entry counts as "hidden" only while its window is still at
+    /// the spot weft left it. A window that has come back on screen with its
+    /// entry still in the ledger is parked again, from where it is now.
+    ///
+    /// Trusting the entry alone let one stale entry keep a window on screen
+    /// for good: every later park skipped it as done, so it showed on every
+    /// workspace until its own workspace was shown and the unpark dropped the
+    /// entry. Two things put a parked window back without weft unparking it:
+    /// a frame write already queued for a slow app (Gecko, Electron) that
+    /// lands just after the park, and an app that moves its own window,
+    /// since a WindowServer park never tells the app it moved (S2).
+    ///
+    /// A window whose frame cannot be read keeps its entry. It may be a
+    /// window that has gone, and dropping the entry does not help that case.
+    static func plan(
+        _ wids: [WindowID],
+        held: [ParkedWindow],
+        on display: Frame,
+        corner: Corner,
+        frame: (WindowID) -> Frame?
+    ) -> ParkPlan {
+        var entries = Dictionary(held.map { ($0.wid, $0) }, uniquingKeysWith: { first, _ in first })
+        var plan = ParkPlan(held: [], fresh: [], alreadyParked: [], unreadable: [])
+        for wid in wids {
+            // The frame the window HAS, not the frame the layout computed for
+            // it. An app that refused its tile is exactly the app whose
+            // restore would otherwise put it somewhere it has never been, and
+            // after a crash there is nothing else left to restore from.
+            let live = frame(wid)
+            if let entry = entries[wid] {
+                guard let live,
+                      abs(live.x - entry.parkedAt.x) > spotTolerance
+                        || abs(live.y - entry.parkedAt.y) > spotTolerance
+                else {
+                    plan.alreadyParked.append(wid)
+                    continue
+                }
+                entries.removeValue(forKey: wid)
+            }
+            guard let live else {
+                plan.unreadable.append(wid)
+                continue
+            }
+            // Per window: at any corner but bottom-right the window's own size
+            // decides where its one visible point ends up.
+            let point = parkOrigin(width: live.width, height: live.height, corner: corner, in: display)
+            plan.fresh.append(
+                ParkedWindow(wid: wid, frame: live, parkedAt: ParkedWindow.Spot(x: point.x, y: point.y))
+            )
+        }
+        plan.held = held.filter { entries[$0.wid] == $0 }
+        return plan
     }
 
     // MARK: - Unparking
