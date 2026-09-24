@@ -118,8 +118,8 @@ struct AssignedApp: Identifiable, Equatable {
 struct WorkspacesPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
-    @State private var displays = DisplayCatalog.current()
-    @State private var selection: SpaceRow.ID?
+    @SwiftUI.State private var displays = DisplayCatalog.current()
+    @SwiftUI.State private var selection: SpaceRow.ID?
     @Namespace private var cards
 
     private var spring: Animation { .spring(response: 0.38, dampingFraction: 0.82) }
@@ -270,32 +270,61 @@ private struct DisplayCanvas: View {
     let running: Bool
     let onPin: (String, CanvasDisplay) -> Void
 
-    var body: some View {
-        GeometryReader { geo in
+    private func tile(_ d: CanvasDisplay) -> DisplayTile {
+        let pinned: [String] = spaces
+            .filter { DisplayCatalog.resolve($0.display, in: displays)?.id == d.id }
+            .map(\.label)
+        return DisplayTile(
+            display: d,
+            live: status?.displays.first { $0.uuid == d.id },
+            pinned: pinned,
+            multiple: displays.count > 1,
+            running: running,
+            onPin: { onPin($0, d) }
+        )
+    }
+
+    /// How the displays' global frames map into the canvas: one scale, and
+    /// the offset that centres the arrangement.
+    private struct Placement {
+        var bounds: CGRect
+        var scale: CGFloat
+        var origin: CGPoint
+
+        init(_ displays: [CanvasDisplay], in size: CGSize) {
             let bounds = displays.reduce(CGRect.null) { $0.union($1.frame) }
             let inset: CGFloat = 12
-            let scale = bounds.isNull ? 1 : min(
-                (geo.size.width - inset * 2) / max(bounds.width, 1),
-                (geo.size.height - inset * 2) / max(bounds.height, 1)
+            let sx = (size.width - inset * 2) / max(bounds.width, 1)
+            let sy = (size.height - inset * 2) / max(bounds.height, 1)
+            let scale: CGFloat = bounds.isNull ? 1 : min(sx, sy)
+            self.bounds = bounds
+            self.scale = scale
+            self.origin = CGPoint(
+                x: (size.width - bounds.width * scale) / 2,
+                y: (size.height - bounds.height * scale) / 2
             )
-            let ox = (geo.size.width - bounds.width * scale) / 2
-            let oy = (geo.size.height - bounds.height * scale) / 2
+        }
+
+        func size(of d: CanvasDisplay) -> CGSize {
+            CGSize(width: max(40, d.frame.width * scale - 10), height: max(30, d.frame.height * scale - 10))
+        }
+
+        func center(of d: CanvasDisplay) -> CGPoint {
+            CGPoint(
+                x: origin.x + (d.frame.midX - bounds.minX) * scale,
+                y: origin.y + (d.frame.midY - bounds.minY) * scale
+            )
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let placement = Placement(displays, in: geo.size)
             ZStack(alignment: .topLeading) {
                 ForEach(displays) { d in
-                    DisplayTile(
-                        display: d,
-                        live: status?.displays.first { $0.uuid == d.id },
-                        pinned: spaces.filter { DisplayCatalog.resolve($0.display, in: displays)?.id == d.id }
-                            .map(\.label),
-                        multiple: displays.count > 1,
-                        running: running,
-                        onPin: { onPin($0, d) }
-                    )
-                    .frame(width: max(40, d.frame.width * scale - 10), height: max(30, d.frame.height * scale - 10))
-                    .position(
-                        x: ox + (d.frame.midX - bounds.minX) * scale,
-                        y: oy + (d.frame.midY - bounds.minY) * scale
-                    )
+                    tile(d)
+                        .frame(width: placement.size(of: d).width, height: placement.size(of: d).height)
+                        .position(placement.center(of: d))
                 }
             }
         }
@@ -320,8 +349,8 @@ private struct DisplayTile: View {
     let multiple: Bool
     let running: Bool
     let onPin: (String) -> Void
-    @State private var targeted = false
-    @State private var hovering = false
+    @SwiftUI.State private var targeted = false
+    @SwiftUI.State private var hovering = false
 
     private var corner: Corner? { live?.parkCorner.flatMap(Corner.init(rawValue:)) }
 
@@ -459,7 +488,7 @@ private struct WorkspaceCard: View {
     let showing: Bool
     let windows: Int
     let selected: Bool
-    @State private var hovering = false
+    @SwiftUI.State private var hovering = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -548,7 +577,7 @@ private struct WorkspaceInspector: View {
     let displays: [CanvasDisplay]
     let engineRunning: Bool
     let onRemove: () -> Void
-    @State private var name: String
+    @SwiftUI.State private var name: String
 
     init(
         store: ConfigStore, row: SpaceRow, number: Int, displays: [CanvasDisplay],
@@ -756,8 +785,8 @@ private struct ShortcutsSummary: View {
 private struct WorkspaceWarnings: View {
     let displays: [CanvasDisplay]
     let status: WorkspacesStatus?
-    @State private var tiling = SystemChecks.macOSTilingEnabled()
-    @State private var stageManager = SystemChecks.stageManagerEnabled()
+    @SwiftUI.State private var tiling = SystemChecks.macOSTilingEnabled()
+    @SwiftUI.State private var stageManager = SystemChecks.stageManagerEnabled()
 
     var body: some View {
         let extra = status?.displaysWithExtraDesktops ?? []

@@ -954,15 +954,15 @@ extension View {
 /// outgoing windows shrink into the bottom-right corner, the incoming ones grow
 /// out of it, and the pill in the menu bar follows.
 private struct WorkspaceDemo: View {
-    private struct Set {
+    private struct DemoSet {
         let name: String
         let symbol: String
         let tint: Color
     }
     private let sets = [
-        Set(name: "code", symbol: "chevron.left.forwardslash.chevron.right", tint: Color(red: 0.49, green: 0.64, blue: 0.97)),
-        Set(name: "web", symbol: "globe", tint: Color(red: 0.36, green: 0.80, blue: 0.62)),
-        Set(name: "chat", symbol: "bubble.left.and.bubble.right.fill", tint: Color(red: 0.96, green: 0.62, blue: 0.40)),
+        DemoSet(name: "code", symbol: "chevron.left.forwardslash.chevron.right", tint: Color(red: 0.49, green: 0.64, blue: 0.97)),
+        DemoSet(name: "web", symbol: "globe", tint: Color(red: 0.36, green: 0.80, blue: 0.62)),
+        DemoSet(name: "chat", symbol: "bubble.left.and.bubble.right.fill", tint: Color(red: 0.96, green: 0.62, blue: 0.40)),
     ]
     @State private var showing = 0
 
