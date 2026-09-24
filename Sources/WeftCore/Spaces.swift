@@ -194,6 +194,10 @@ public struct SpaceState: Sendable, Equatable {
     /// The one desktop per display weft tiles on, by display uuid. Recorded
     /// once and kept while it exists; weft never switches to it or away.
     public var managed: [String: SpaceID]
+    /// What each display last showed, by display uuid, kept after the display
+    /// goes. A monitor plugged back in shows it again rather than whatever
+    /// happened to be free.
+    public var lastShown: [String: WorkspaceID] = [:]
     /// Workspace ids in the order labels and `space focus <n>` count in.
     public var wsOrder: [WorkspaceID]
     /// Next id to hand out. Ids are unique within a launch and never
@@ -445,10 +449,16 @@ public struct SpaceState: Sendable, Equatable {
     ///   show — and only then a new numbered one.
     ///
     /// `names` seeds the set on a fresh start (from `[[space]]`, else
-    /// `labels.json`); nil means "keep what is named". Seeding shows the
-    /// first workspace on the first display, the second on the second, and so
-    /// on, and leaves the rest hidden on the first display.
-    public mutating func adoptDisplays(_ reported: [DisplayDesktops], names: [String]?) {
+    /// `labels.json`); nil means "keep what is named". `pins` maps a label to
+    /// the display uuid its `[[space]] display =` resolved to right now.
+    ///
+    /// A display with nothing to show takes, in order: a hidden workspace
+    /// pinned to it, what it last showed, a hidden workspace already living
+    /// on its desktop, an empty hidden one — the last three only if not
+    /// pinned to another connected display — and only then a new numbered one.
+    public mutating func adoptDisplays(
+        _ reported: [DisplayDesktops], names: [String]?, pins: [String: String] = [:]
+    ) {
         let previousDisplayBySpace = displayBySpace
         order = reported.flatMap { $0.desktops }
         displays = reported.map { $0.uuid }
@@ -489,16 +499,24 @@ public struct SpaceState: Sendable, Equatable {
                 makeWorkspace(label: name.isEmpty ? "\(i + 1)" : name, on: mainDesktop)
             }
         }
+        let connected = Set(reported.map { $0.uuid })
+        func pinnedDisplay(_ id: WorkspaceID) -> String? {
+            workspaces[id].flatMap { pins[$0.label] }.flatMap { connected.contains($0) ? $0 : nil }
+        }
         for d in reported {
             guard let desktop = nextManaged[d.uuid], active[desktop] == nil else { continue }
             let showing = Set(active.values)
             let hidden = wsOrder.filter { !showing.contains($0) }
-            let pick = hidden.first { workspaces[$0]?.desktop == desktop }
-                ?? hidden.first { workspaces[$0]?.members.isEmpty == true }
+            let free = hidden.filter { pinnedDisplay($0) == nil || pinnedDisplay($0) == d.uuid }
+            let pick = hidden.first { pinnedDisplay($0) == d.uuid }
+                ?? lastShown[d.uuid].flatMap { free.contains($0) ? $0 : nil }
+                ?? free.first { workspaces[$0]?.desktop == desktop }
+                ?? free.first { workspaces[$0]?.members.isEmpty == true }
                 ?? makeWorkspace(label: freshLabel(), on: desktop)
             workspaces[pick]?.desktop = desktop
             active[desktop] = pick
         }
+        for d in reported { if let desktop = nextManaged[d.uuid], let id = active[desktop] { lastShown[d.uuid] = id } }
     }
 
     @discardableResult
@@ -575,6 +593,7 @@ public struct SpaceState: Sendable, Equatable {
         }
         workspaces[id]?.desktop = desktop
         active[desktop] = id
+        if let display = displayBySpace[desktop] { lastShown[display] = id }
     }
 
 

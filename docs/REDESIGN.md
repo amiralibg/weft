@@ -494,7 +494,33 @@ Each phase can ship on its own as the next 0.9.x release.
 4. **Displays and fullscreen.** Display keying by UUID, park corners, the
    coalesced reconfiguration handler, unplug and replug behaviour,
    `[[space]] display =`, `FullscreenMemo`, borderless-fullscreen floating,
-   and the edge-tiling check.
+   and the edge-tiling check. **Done for 0.9.15:**
+   - `freeCorner` picks, per display, the first corner (bottom-right,
+     bottom-left, top-right, top-left) whose park zone — the display's own
+     size outward from the corner — covers no other display. A display with
+     none parks at another display's free corner. `Parker.park` takes the
+     corner and computes each window's spot from its own size;
+     `unparkOutside` now asks whether the parked window still overlaps a
+     display rather than whether its origin is on one.
+   - `[[space]] display = "main" | "secondary" | N | "name"` pins a
+     workspace; `space focus` shows a pinned workspace on its display, and a
+     display with nothing to show takes a workspace pinned to it first.
+   - `SpaceState.lastShown`: a display plugged back in shows what it showed.
+   - Display reconfiguration is handled once the storm has been quiet for
+     500 ms; afterwards every hidden workspace is parked again at the corners
+     the new arrangement leaves free. A float whose saved frame is on no
+     display comes to the middle of the display showing it.
+   - Native fullscreen: a window that goes fullscreen is remembered with its
+     workspace (`fullscreenMemo`) and goes back into it when it returns; a
+     hidden workspace is shown. Borderless fullscreen — a window covering its
+     display and the showing menu bar — floats until it is window-sized.
+   - `weftctl doctor` reports each display's name, corner, and paused state,
+     macOS's own edge tiling when it is on, and "Displays have separate
+     Spaces" when it is off. `query workspaces` carries names and corners for
+     the Settings canvas.
+   - Not done: returning a fullscreen window to its exact old slot (it is
+     re-inserted like a new window), and measuring corners on real
+     two- and three-display arrangements — still first in "Still to measure".
 5. **The Workspaces canvas.** The merged pane, drag to pin and reorder, the
    inspector, app rules by drag, live mode, and the warnings in place. It
    needs phase 4's `display =` key and nothing else, so it can be built in

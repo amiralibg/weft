@@ -162,10 +162,16 @@ public struct WorkspacesStatus: Codable, Sendable, Equatable {
         public var paused: Bool
         /// Label of the workspace this display shows (or would, once back).
         public var showing: String?
+        /// The display's name, as System Settings shows it.
+        public var name: String?
+        /// Where this display's hidden windows go (`Corner.rawValue`). Nil
+        /// when every corner has a neighbour: they are parked at another
+        /// display's corner instead.
+        public var parkCorner: String?
 
         public init(
             uuid: String, index: Int, managedDesktop: Int?, desktops: Int,
-            paused: Bool, showing: String?
+            paused: Bool, showing: String?, name: String? = nil, parkCorner: String? = nil
         ) {
             self.uuid = uuid
             self.index = index
@@ -173,6 +179,8 @@ public struct WorkspacesStatus: Codable, Sendable, Equatable {
             self.desktops = desktops
             self.paused = paused
             self.showing = showing
+            self.name = name
+            self.parkCorner = parkCorner
         }
     }
 

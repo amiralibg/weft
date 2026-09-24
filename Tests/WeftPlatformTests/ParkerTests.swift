@@ -138,10 +138,13 @@ private let deadWID: WindowID = 0xFFFF_FFF0
 
 @Test func unparkOutsideRestoresWindowsOnRemovedDisplays() {
     let parker = tempParker()
+    // Parked at the bottom-left of a display west of the primary — the corner
+    // weft picks there, because its bottom-right would put the window over
+    // the primary. The window's one visible point is at (-1728, 1116).
     let outsideEntry = ParkedWindow(
         wid: deadWID,
         frame: Frame(x: -1000, y: 100, width: 800, height: 600),
-        parkedAt: ParkedWindow.Spot(x: -1, y: 879)
+        parkedAt: ParkedWindow.Spot(x: -1728 - 800 + 1, y: 1116)
     )
     try! parker.ledger.save([outsideEntry])
 

@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -63,10 +64,15 @@ public enum Doctor {
         print("    - Workspaces: \(live.workspaces), on one macOS desktop per display")
         for d in live.displays {
             let managed = d.managedDesktop.map { "desktop \($0) of \(d.desktops)" } ?? "no desktop"
-            var line = "      display \(d.index): weft manages \(managed)"
+            let name = d.name.map { " (\($0))" } ?? ""
+            var line = "      display \(d.index)\(name): weft manages \(managed)"
             if let showing = d.showing { line += ", showing \(showing)" }
             if d.paused { line += " — PAUSED (another desktop or a fullscreen app is showing)" }
             print(line)
+            if d.parkCorner == nil, live.displays.count > 1 {
+                print("        every corner of this display touches another one, so its hidden")
+                print("        windows are parked at another display's corner instead")
+            }
         }
         if !live.displaysWithExtraDesktops.isEmpty {
             print("    [○] Extra macOS desktops are fine: weft pauses while one is showing and")
@@ -101,12 +107,10 @@ public enum Doctor {
         let liveLabels = Set(live.map(\.label))
         let unassignedLabels = declared.filter { !liveLabels.contains($0) }
 
-        // A space target is unreachable two ways: a NAME with no desktop behind
-        // it, or a NUMBER past the last desktop. The shipped config declares no
-        // spaces and binds alt-1..5, so on a two-desktop Mac the second case is
-        // the only one that fires — and it is exactly as silent as the first.
+        // A NAME with no workspace behind it is unreachable. A number is not:
+        // `space focus 4` creates workspaces up to 4 the first time, up to 99.
         func unreachable(_ target: String) -> Bool {
-            if let n = Int(target) { return n < 1 || n > live.count }
+            if let n = Int(target) { return n < 1 || n > 99 }
             if target == "recent" { return false }
             return !liveLabels.contains(target)
         }
@@ -302,6 +306,20 @@ public enum Doctor {
         print("[\u{2713}] Workspaces: switching and moving windows need no SIP change and no")
         print("    macOS shortcut. weft does not switch macOS desktops or move windows")
         print("    between them; it pauses on a display showing another desktop.")
+
+        // macOS's own tiling moves the same windows weft does.
+        let tiling = SystemChecks.macOSTilingEnabled()
+        if tiling.isEmpty {
+            print("[\u{2713}] macOS window tiling: off")
+        } else {
+            print("[\u{25CB}] macOS window tiling is on: \(tiling.joined(separator: "; ")).")
+            print("    Dragging a window to a screen edge makes macOS resize it, and weft puts it")
+            print("    back. Turn these off in \(SystemChecks.macOSTilingSetting).")
+        }
+        if !SystemChecks.displaysHaveSeparateSpaces(), NSScreen.screens.count > 1 {
+            print("[\u{25CB}] Displays have separate Spaces: off — weft still shows a workspace per")
+            print("    display, but a fullscreen app on one display pauses weft on all of them.")
+        }
 
         // Stage Manager arranges windows too. With it on, macOS and weft move
         // the same windows and the symptom reads as a weft bug.

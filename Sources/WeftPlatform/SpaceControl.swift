@@ -88,6 +88,24 @@ public enum SpaceControl {
         }
     }
 
+    /// Each active display's uuid, its name as System Settings shows it, and
+    /// whether it is the main one — west to east, the order `displayLayout`
+    /// uses. What `[[space]] display = …` is matched against.
+    public static func displayIdentities() -> [DisplayIdentity] {
+        let main = mainDisplayUUID()
+        var names: [String: String] = [:]
+        for screen in NSScreen.screens {
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let unmanaged = CGDisplayCreateUUIDFromDisplayID(CGDirectDisplayID(number.uint32Value)),
+                  let uuid = CFUUIDCreateString(nil, unmanaged.takeRetainedValue()) as String?
+            else { continue }
+            names[uuid] = screen.localizedName
+        }
+        return displayLayout().map {
+            DisplayIdentity(uuid: $0.uuid, name: names[$0.uuid] ?? "", isMain: $0.uuid == main)
+        }
+    }
+
     /// UUID of the display holding the active menu bar — the display keyboard
     /// focus is on, and therefore the one whose current space every command
     /// means by "the current space".

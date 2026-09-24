@@ -602,3 +602,26 @@ private func exampleText() throws -> String {
     // Even a value no build ever accepted: it is ignored, not validated.
     #expect(try loadConfig("[general]\nworkspaces = \"magic\"\n").warnings.count == 1)
 }
+
+@Test func aSpaceCanBePinnedToADisplay() throws {
+    let cfg = try loadConfig("""
+        [[space]]
+        label = "code"
+        display = "secondary"
+
+        [[space]]
+        label = "web"
+        display = 2
+
+        [[space]]
+        label = "chat"
+        display = "Studio"
+
+        [[space]]
+        label = "term"
+        """)
+    #expect(cfg.spaces.map(\.display) == [.secondary, .index(2), .named("Studio"), nil])
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[[space]]\nlabel = \"x\"\ndisplay = 0\n")
+    }
+}

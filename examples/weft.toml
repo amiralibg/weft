@@ -292,6 +292,9 @@ manage = false
 # [[space]]
 # label = "web"
 # layout = "float"
+# display = "secondary"   # always on this display: "main", "secondary", a
+#                         # number counted west to east, or part of its name
+
 #
 # [[space]]
 # label = "term"

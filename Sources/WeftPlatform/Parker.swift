@@ -116,7 +116,9 @@ public struct Parker: Sendable {
     /// One call per workspace, not one per window: the writing is what costs,
     /// and it costs once for the set.
     @discardableResult
-    public func park(_ wids: [WindowID], on display: Frame) throws -> ParkOutcome {
+    public func park(
+        _ wids: [WindowID], on display: Frame, corner: Corner = .bottomRight
+    ) throws -> ParkOutcome {
         var held: [ParkedWindow]
         switch ledger.load() {
         case .nothingParked: held = []
@@ -124,7 +126,6 @@ public struct Parker: Sendable {
         case .unreadable(let why): throw ParkError.ledgerUnreadable(why)
         }
 
-        let point = Self.spot(in: display)
         let already = Set(held.map { $0.wid })
         var outcome = ParkOutcome(
             parked: [], alreadyParked: [], unreadable: [], refused: [], note: nil
@@ -143,6 +144,9 @@ public struct Parker: Sendable {
                 outcome.unreadable.append(wid)
                 continue
             }
+            // Per window: at any corner but bottom-right the window's own size
+            // decides where its one visible point ends up.
+            let point = parkOrigin(width: frame.width, height: frame.height, corner: corner, in: display)
             fresh.append(
                 ParkedWindow(
                     wid: wid,
@@ -167,7 +171,7 @@ public struct Parker: Sendable {
 
         // Only now.
         for entry in fresh {
-            var p = point
+            var p = CGPoint(x: entry.parkedAt.x, y: entry.parkedAt.y)
             if SLSMoveWindow(WorldReader.cid, entry.wid, &p) == 0 {
                 outcome.parked.append(entry.wid)
             } else {
@@ -276,8 +280,15 @@ public struct Parker: Sendable {
     public func unparkOutside(displays: [Frame]) -> UnparkOutcome {
         switch ledger.load() {
         case .parked(let entries):
+            // The parked window, not its origin: at a top or left corner the
+            // origin is off every display by design, and what keeps the
+            // window findable is the one point of it still on screen.
             let outside = entries.filter { entry in
-                !displays.contains { $0.contains(x: entry.parkedAt.x, y: entry.parkedAt.y) }
+                let parked = Frame(
+                    x: entry.parkedAt.x, y: entry.parkedAt.y,
+                    width: entry.frame.width, height: entry.frame.height
+                )
+                return !displays.contains { $0.intersects(parked) }
             }
             guard !outside.isEmpty else {
                 return UnparkOutcome(restored: [], notOurs: [], refused: [], note: nil)

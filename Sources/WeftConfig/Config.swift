@@ -107,10 +107,14 @@ public struct GeneralConfig: Sendable, Equatable {
 public struct SpaceDecl: Sendable, Equatable {
     public var label: String
     public var layout: LayoutKind
+    /// `display = "main" | "secondary" | N | "name"`: the display this
+    /// workspace shows on. Nil shows it on whichever display you are on.
+    public var display: DisplayPin?
 
-    public init(label: String, layout: LayoutKind) {
+    public init(label: String, layout: LayoutKind, display: DisplayPin? = nil) {
         self.label = label
         self.layout = layout
+        self.display = display
     }
 }
 
@@ -516,10 +520,21 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 message: "space '\(label)': scroll settings were removed with the layout — ignored"
             ))
         }
-        for k in elem.keys where k != "label" && k != "layout" && k != "scroll" {
+        var display: DisplayPin?
+        switch elem["display"] {
+        case nil: break
+        case .string(let s)? where !s.isEmpty: display = DisplayPin(s)
+        case .int(let n)? where n >= 1: display = .index(n)
+        default:
+            throw ConfigError(
+                line: at("display"),
+                message: "expected \"main\", \"secondary\", a display number, or part of a display's name"
+            )
+        }
+        for k in elem.keys where !["label", "layout", "scroll", "display"].contains(k) {
             throw ConfigError(line: at(k), message: "unknown space key '\(k)'")
         }
-        spaces.append(SpaceDecl(label: label, layout: layout))
+        spaces.append(SpaceDecl(label: label, layout: layout, display: display))
     }
 
     // [[rule]]
