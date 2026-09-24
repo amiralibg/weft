@@ -524,7 +524,30 @@ Each phase can ship on its own as the next 0.9.x release.
 5. **The Workspaces canvas.** The merged pane, drag to pin and reorder, the
    inspector, app rules by drag, live mode, and the warnings in place. It
    needs phase 4's `display =` key and nothing else, so it can be built in
-   parallel with phase 4.
+   parallel with phase 4. **Done for 0.9.15** (`Sources/weft-bar/WorkspacesPane.swift`):
+   - One Workspaces pane replaces Workspaces and Desktops. A to-scale map of
+     the real displays shows what each one is showing, what is pinned to it,
+     its park corner, and whether it is paused; a workspace card dropped on a
+     display is pinned there. Cards (drag to reorder — the ⌥N order) show the
+     shortcut, layout, app icons from rules, open-window count, and a glow on
+     the one showing.
+   - The inspector renames (carrying rules and shortcuts with it), sets the
+     layout with a live preview, pins to a display, adds and removes apps
+     (running apps, or any app chosen from disk — by bundle id), shows the
+     workspace's shortcuts, and — with the engine running — shows it now.
+   - Warnings appear where they apply: Stage Manager, macOS's own tiling
+     (with the button that opens Desktop & Dock), extra macOS desktops, and a
+     display with no free corner.
+   - Polish across the window: System Settings-style icon tiles in the
+     sidebar, a crossfade between panes, springs on every state change and
+     nothing animating at rest.
+   - Setup loses the mode chooser. Its workspace page is a live demo — three
+     workspaces switching the way weft hides windows — and the last page
+     draws its checkmark in and offers to turn off conflicting macOS features.
+   - `weft-bar --render-snapshots <dir>` (debug builds only) draws every pane
+     and page, light and dark, for reviewing the UI without launching the app.
+   - Not done: dragging a live window's icon between workspaces; clicking a
+     card switches only through the inspector's "Show Now".
 6. **Public-path parity.** AX hide/show in parallel, `NSPanel` borders, and
    the marker window. Run the whole daemon with `WEFT_PUBLIC_ONLY=1` and check
    that nothing is missing, only slower.

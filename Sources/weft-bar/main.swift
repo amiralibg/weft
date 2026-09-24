@@ -607,6 +607,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
+#if DEBUG
+if let i = CommandLine.arguments.firstIndex(of: "--render-snapshots"), i + 1 < CommandLine.arguments.count {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    MainActor.assumeIsolated { SnapshotRenderer.run(into: CommandLine.arguments[i + 1]) }
+}
+#endif
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

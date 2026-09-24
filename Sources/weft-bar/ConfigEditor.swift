@@ -27,7 +27,7 @@ import WeftPlatform
 // MARK: - Sections
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
-    case general, appearance, workspaces, shortcuts, apps, desktops, advanced
+    case general, appearance, workspaces, shortcuts, apps, advanced
 
     var id: String { rawValue }
 
@@ -38,8 +38,19 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .workspaces: return "Workspaces"
         case .shortcuts: return "Shortcuts"
         case .apps: return "Apps"
-        case .desktops: return "Workspace List"
         case .advanced: return "Advanced"
+        }
+    }
+
+    /// The tile behind the sidebar icon, as System Settings draws them.
+    var tint: Color {
+        switch self {
+        case .general: return .gray
+        case .appearance: return .pink
+        case .workspaces: return .weft
+        case .shortcuts: return .orange
+        case .apps: return .green
+        case .advanced: return .indigo
         }
     }
 
@@ -50,7 +61,6 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .workspaces: return "rectangle.3.group"
         case .shortcuts: return "command"
         case .apps: return "square.on.square"
-        case .desktops: return "menubar.dock.rectangle"
         case .advanced: return "slider.horizontal.3"
         }
     }
@@ -61,7 +71,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch launchName {
         case "keys", "keybindings": self = .shortcuts
         case "rules": self = .apps
-        case "spaces": self = .desktops
+        case "spaces", "desktops": self = .workspaces
         case "integrations": self = .advanced
         case "workspace": self = .workspaces
         default:
@@ -88,8 +98,12 @@ struct SettingsView: View {
         NavigationSplitView {
             List(selection: $section) {
                 ForEach(SettingsSection.allCases) { item in
-                    Label(item.title, systemImage: item.symbol)
-                        .tag(item)
+                    Label {
+                        Text(item.title)
+                    } icon: {
+                        SidebarIcon(symbol: item.symbol, tint: item.tint)
+                    }
+                    .tag(item)
                 }
             }
             .listStyle(.sidebar)
@@ -99,6 +113,12 @@ struct SettingsView: View {
             }
         } detail: {
             detail(section ?? .general)
+                // A soft crossfade with a small rise between panes, rather than
+                // a hard cut. Keyed by section, so nothing inside a pane
+                // re-animates while you work in it.
+                .id(section ?? .general)
+                .transition(.opacity.combined(with: .offset(y: 8)))
+                .animation(.easeOut(duration: 0.2), value: section)
                 .navigationTitle((section ?? .general).title)
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) { SaveStateBadge(store: store) }
@@ -117,9 +137,26 @@ struct SettingsView: View {
         case .workspaces: WorkspacesPane(store: store, health: health)
         case .shortcuts: ShortcutsPane(store: store)
         case .apps: AppsPane(store: store)
-        case .desktops: DesktopsPane(store: store, health: health)
         case .advanced: AdvancedPane(store: store, health: health)
         }
+    }
+}
+
+/// A sidebar icon on a coloured tile, the way System Settings draws its own.
+private struct SidebarIcon: View {
+    let symbol: String
+    let tint: Color
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 22, height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(tint.gradient)
+                    .shadow(color: tint.opacity(0.35), radius: 1.5, y: 0.5)
+            )
     }
 }
 
@@ -285,7 +322,7 @@ private struct LayoutPicker: View {
 /// Glass on macOS 26, so the wallpaper shows through them the way a real
 /// desktop does. It animates only when a value changes — a spring, then
 /// nothing — so it costs no GPU sitting still.
-private struct DesktopPreview: View {
+struct DesktopPreview: View {
     let layout: String
     let inner: Int
     let outer: Int
@@ -368,7 +405,7 @@ private struct DesktopPreview: View {
 
 /// Decorative colour only — the one place in the window with more than the
 /// accent in it, and it never becomes a control.
-private struct Wallpaper: View {
+struct Wallpaper: View {
     var body: some View {
         ZStack {
             LinearGradient(
@@ -418,131 +455,6 @@ private struct MiniWindow: View {
 }
 
 // MARK: - Workspaces
-
-/// How workspaces work: weft's own, on one macOS desktop per display.
-private struct WorkspacesPane: View {
-    @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-
-    var body: some View {
-        Form {
-            Section {
-                WorkspacesHero(virtual: true, anchor: 1, desktops: 1)
-                    .frame(height: 210)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-            }
-            Section {
-                Text("Your workspaces all live on one macOS desktop per display. Switching "
-                    + "hides the windows you are not using just off the edge of the screen and "
-                    + "puts the others back — nothing animates, and it works on every window.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("How workspaces work")
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-/// The two models, drawn.
-///
-/// `DesktopPreview` next door draws one screen and the windows inside it;
-/// this draws the screens themselves and where workspaces sit relative to
-/// them, which is the only thing the two modes actually disagree about. It
-/// springs between the two arrangements so switching the picker shows the
-/// change rather than replacing one static picture with another.
-private struct WorkspacesHero: View {
-    let virtual: Bool
-    let anchor: Int
-    let desktops: Int
-
-    var body: some View {
-        GeometryReader { geo in
-            let count = max(1, min(desktops, 3))
-            let gap: CGFloat = 14
-            let w = (geo.size.width - gap * CGFloat(count - 1)) / CGFloat(count)
-            let h = min(geo.size.height, w * 0.62)
-            HStack(spacing: gap) {
-                ForEach(1...count, id: \.self) { n in
-                    MiniScreen(
-                        number: n,
-                        // Under native every desktop carries exactly one
-                        // workspace; under virtual the host carries the stack
-                        // and the rest carry one each, which is the whole
-                        // shape of the model in one number.
-                        chips: virtual ? (n == min(anchor, count) ? 4 : 1) : 1,
-                        highlighted: virtual && n == min(anchor, count)
-                    )
-                    .frame(width: w, height: h)
-                }
-            }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
-            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: virtual)
-            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: anchor)
-        }
-        .padding(.vertical, 10)
-    }
-}
-
-/// One screen: wallpaper, menu bar, and a chip per workspace it holds. The
-/// front chip is the one showing; the ones behind it are parked.
-private struct MiniScreen: View {
-    let number: Int
-    let chips: Int
-    let highlighted: Bool
-
-    var body: some View {
-        GeometryReader { geo in
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-            ZStack(alignment: .topLeading) {
-                Wallpaper().clipShape(shape)
-                Rectangle()
-                    .fill(Color.black.opacity(0.28))
-                    .frame(height: 8)
-                VStack {
-                    Spacer()
-                    ZStack {
-                        // Drawn back to front, so the stack reads as depth.
-                        ForEach((0..<chips).reversed(), id: \.self) { i in
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.white.opacity(i == 0 ? 0.30 : 0.12))
-                                .frame(
-                                    width: geo.size.width * (0.62 - CGFloat(i) * 0.06),
-                                    height: geo.size.height * 0.42
-                                )
-                                .offset(x: CGFloat(i) * 7, y: CGFloat(i) * -5)
-                                .overlay {
-                                    if i == 0 {
-                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                            .stroke(Color.white.opacity(0.45), lineWidth: 1)
-                                            .frame(
-                                                width: geo.size.width * 0.62,
-                                                height: geo.size.height * 0.42
-                                            )
-                                    }
-                                }
-                        }
-                    }
-                    Spacer()
-                    Text("Desktop \(number)")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .padding(.bottom, 6)
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .clipShape(shape)
-            .overlay {
-                shape.stroke(
-                    highlighted ? Color.accentColor : Color.white.opacity(0.18),
-                    lineWidth: highlighted ? 2 : 1
-                )
-            }
-        }
-    }
-}
 
 // MARK: - Appearance
 
@@ -954,7 +866,7 @@ private struct ChordField: View {
 }
 
 /// `alt-shift-bracketright` drawn as ⌥ ⇧ ].
-private struct KeyCaps: View {
+struct KeyCaps: View {
     let chord: String
 
     var body: some View {
@@ -1206,132 +1118,6 @@ private enum AppIcons {
             .replacingOccurrences(of: ".app", with: "")
         names[bundleID] = name
         return name
-    }
-}
-
-// MARK: - Desktops
-
-private struct DesktopsPane: View {
-    @ObservedObject var store: ConfigStore
-    @ObservedObject var health: EngineHealth
-
-    /// Kept as a constant while `DesktopRow` still takes it; there is one
-    /// workspace model, and every row lands.
-    private let virtual = true
-    private var landing: Int { store.spaces.count }
-
-    var body: some View {
-        Form {
-            Section {
-                if store.spaces.isEmpty {
-                    EmptyState(
-                        symbol: virtual ? "rectangle.3.group" : "menubar.dock.rectangle",
-                        title: virtual ? "No workspaces yet" : "No named desktops",
-                        text: virtual
-                            ? "Add a few and give them names. Each one is a separate set of windows you switch between instantly, all on the same macOS desktop."
-                            : "Every desktop uses the default layout. Name one to give it a layout of its own, or to send apps to it."
-                    )
-                }
-                ForEach(Array(store.spaces.enumerated()), id: \.element.id) { index, space in
-                    DesktopRow(
-                        number: index + 1,
-                        space: binding(space.id),
-                        hasDesktop: index < landing,
-                        virtual: virtual,
-                        canMoveUp: index > 0,
-                        canMoveDown: index < store.spaces.count - 1,
-                        onMove: { move(space.id, by: $0) },
-                        onDelete: {
-                            store.spaces.removeAll { $0.id == space.id }
-                            store.markDirty()
-                        }
-                    )
-                }
-                Button {
-                    store.addSpace()
-                } label: {
-                    Label(virtual ? "Add Workspace" : "Add Desktop", systemImage: "plus")
-                }
-                .buttonStyle(.borderless)
-            } footer: {
-                Text(
-                    virtual
-                        ? "The order here is the order alt-1, alt-2 and so on count in. Shortcuts and apps can refer to a workspace by its name. Adding one costs nothing — there is no macOS desktop to create."
-                        : "Names follow Mission Control order — the first name is your first desktop. Shortcuts and apps can refer to a desktop by its name."
-                )
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private func binding(_ id: SpaceRow.ID) -> Binding<SpaceRow> {
-        Binding(
-            get: { store.spaces.first { $0.id == id } ?? SpaceRow() },
-            set: { value in
-                guard let i = store.spaces.firstIndex(where: { $0.id == id }) else { return }
-                store.spaces[i] = value
-                store.markDirty()
-            }
-        )
-    }
-
-    private func move(_ id: SpaceRow.ID, by delta: Int) {
-        guard let from = store.spaces.firstIndex(where: { $0.id == id }),
-              store.spaces.indices.contains(from + delta)
-        else { return }
-        store.spaces.swapAt(from, from + delta)
-        store.markDirty()
-    }
-}
-
-private struct DesktopRow: View {
-    let number: Int
-    @Binding var space: SpaceRow
-    let hasDesktop: Bool
-    let virtual: Bool
-    let canMoveUp: Bool
-    let canMoveDown: Bool
-    let onMove: (Int) -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text("\(number)")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 28, height: 28)
-                .foregroundStyle(hasDesktop ? Color.white : Color.secondary)
-                .weftGlass(Circle(), tint: hasDesktop ? Color.accentColor.opacity(0.8) : nil)
-            TextField("Name", text: $space.label)
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 220)
-            if !hasDesktop, !virtual {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .help("There is no desktop for this name yet.")
-            }
-            Spacer(minLength: 8)
-            Picker("", selection: $space.layout) {
-                Text("Tiling").tag("bsp")
-                Text("Floating").tag("float")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            HStack(spacing: 2) {
-                Button { onMove(-1) } label: { Image(systemName: "chevron.up") }
-                    .disabled(!canMoveUp)
-                Button { onMove(1) } label: { Image(systemName: "chevron.down") }
-                    .disabled(!canMoveDown)
-            }
-            .buttonStyle(.borderless)
-            Button(role: .destructive, action: onDelete) {
-                Image(systemName: "minus.circle.fill")
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("Remove")
-        }
     }
 }
 
@@ -1731,7 +1517,7 @@ private struct DoubleSliderRow: View {
     }
 }
 
-private struct EmptyState: View {
+struct EmptyState: View {
     let symbol: String
     let title: String
     let text: String
@@ -2123,6 +1909,9 @@ final class EngineHealth: ObservableObject {
     /// Labels of the workspaces that exist right now, in `space focus N`
     /// order.
     @Published var liveSpaces: [String] = []
+    /// The same, with what the canvas draws: layout, windows, and whether each
+    /// is showing right now.
+    @Published var liveWorkspaces: [SpaceStatus] = []
     /// How the workspaces sit on the displays, from `query workspaces`. Nil
     /// until the daemon has answered once.
     @Published var workspaces: WorkspacesStatus?
@@ -2212,13 +2001,14 @@ final class EngineHealth: ObservableObject {
                 else { return nil }
                 return try? JSONDecoder().decode(DaemonPermissions.self, from: data)
             }()
-            let spaces: [String] = {
+            let statuses: [SpaceStatus] = {
                 guard let json = BarIPC.send("query spaces"),
                       let data = json.data(using: .utf8),
                       let decoded = try? JSONDecoder().decode([SpaceStatus].self, from: data)
                 else { return [] }
-                return decoded.map(\.label)
+                return decoded
             }()
+            let spaces = statuses.map(\.label)
             let workspaces: WorkspacesStatus? = {
                 guard let json = BarIPC.send("query workspaces"),
                       let data = json.data(using: .utf8)
@@ -2234,6 +2024,7 @@ final class EngineHealth: ObservableObject {
                 self.keybindsLive = perms?.tapLive ?? false
                 self.needsRestart = perms?.mustRestart ?? false
                 self.liveSpaces = spaces
+                if self.liveWorkspaces != statuses { self.liveWorkspaces = statuses }
                 self.workspaces = workspaces
                 if !self.checkingForUpdate { self.update = cachedUpdate }
             }

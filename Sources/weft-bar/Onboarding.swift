@@ -4,6 +4,7 @@ import Combine
 import CoreGraphics
 import Foundation
 import SwiftUI
+import WeftPlatform
 import WeftBarConfig
 
 // First-run Setup: the permissions gate, as a three-page flow.
@@ -153,13 +154,9 @@ final class SetupModel: ObservableObject {
     @Published var installError: String?
 
     enum Page: Int {
-        case welcome, workspacesIntro, workspacesChoice, permissions, done, install
+        case welcome, workspacesIntro, permissions, done, install
     }
 
-    /// The mode the chooser is showing. Seeded from the file so re-opening the
-    /// explainer later starts on the answer already in force rather than on
-    /// the recommendation.
-    @Published var workspacesChoice = "virtual"
 
     private var timer: Timer?
     private var stepStarted: Date?
@@ -399,7 +396,6 @@ final class SetupModel: ObservableObject {
     /// the model is what every later screen is about and the permission panes
     /// take the user out to System Settings and back.
     func beginWorkspaces() {
-        workspacesChoice = Self.currentWorkspacesMode()
         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
             page = .workspacesIntro
         }
@@ -407,31 +403,6 @@ final class SetupModel: ObservableObject {
 
     func goTo(_ next: Page) {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { page = next }
-    }
-
-    /// Write the chosen mode, then carry on into permissions.
-    ///
-    /// Through `weftctl config pin-workspaces` rather than by editing TOML
-    /// here: that command is what the installers already call, it preserves
-    /// every comment in the file, and it has tests. Two code paths that write
-    /// the same key is how the two answers start disagreeing.
-    func chooseWorkspaces() {
-        let mode = workspacesChoice
-        Task.detached(priority: .userInitiated) {
-            ConfigEditorWindowController.runWeftctl(["config", "pin-workspaces", mode])
-            await MainActor.run { self.beginPermissions() }
-        }
-    }
-
-    /// What the file says right now, for seeding the chooser.
-    static func currentWorkspacesMode() -> String {
-        guard let text = try? String(contentsOfFile: ConfigStore.configPath, encoding: .utf8)
-        else { return "virtual" }
-        let document = TomlDocument(text)
-        guard let i = document.firstIndex(ofHeader: "[general]"),
-              let declared = document.sections[i].string("workspaces")
-        else { return "virtual" }
-        return declared == "native" ? "native" : "virtual"
     }
 
     func beginPermissions() {
@@ -629,8 +600,6 @@ struct SetupView: View {
                 case .welcome: WelcomePage(model: model, onClose: onClose).transition(pageTransition)
                 case .workspacesIntro:
                     WorkspacesIntroPage(model: model).transition(pageTransition)
-                case .workspacesChoice:
-                    WorkspacesChoicePage(model: model).transition(pageTransition)
                 case .permissions:
                     PermissionsPage(model: model, onClose: onClose).transition(pageTransition)
                 case .done:
@@ -817,8 +786,7 @@ private struct WelcomePage: View {
             }
             .padding(.top, 34)
             .frame(maxWidth: 430, alignment: .leading)
-            .opacity(appeared ? 1 : 0)
-            .offset(y: appeared ? 0 : 14)
+            .staggered(appeared, 1)
 
             Spacer()
 
@@ -892,71 +860,65 @@ private struct Bullet: View {
 
 // MARK: - Page 1b: what a workspace is
 
-/// The one concept weft cannot be used without understanding.
-///
-/// Everything else in Setup is a switch to flip. This is the model: what a
-/// workspace is, and the fact that weft's own workspaces are not macOS's
-/// desktops. Without it, "workspace" and "desktop" read as synonyms, and the
-/// choice on the next page is a coin toss between two words.
+/// The one concept weft cannot be used without understanding, shown rather
+/// than told: a small desktop switching between three workspaces the way weft
+/// really does it — the windows you are leaving slide into the corner, the
+/// next set slides out of it.
 private struct WorkspacesIntroPage: View {
     @ObservedObject var model: SetupModel
     @State private var appeared = false
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer()
+            Spacer(minLength: 44)
 
-            Image(systemName: "rectangle.3.group.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(Color.weft)
-                .scaleEffect(appeared ? 1 : 0.7)
+            WorkspaceDemo()
+                .frame(width: 420, height: 222)
+                .scaleEffect(appeared ? 1 : 0.94)
                 .opacity(appeared ? 1 : 0)
 
             Text("Workspaces")
                 .font(.system(size: 30, weight: .semibold))
-                .padding(.top, 20)
+                .padding(.top, 22)
                 .opacity(appeared ? 1 : 0)
                 .offset(y: appeared ? 0 : 10)
 
             Text("A named set of windows, with a layout of its own.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-                .padding(.top, 6)
-                .multilineTextAlignment(.center)
+                .padding(.top, 5)
                 .opacity(appeared ? 1 : 0)
                 .offset(y: appeared ? 0 : 10)
 
-            VStack(alignment: .leading, spacing: 16) {
-                Bullet(
-                    symbol: "number",
-                    title: "One per job",
-                    text: "`alt-1` for your editor, `alt-2` for the browser, `alt-3` for chat. "
-                        + "Each keeps its own windows, arranged its own way."
-                )
+            VStack(alignment: .leading, spacing: 14) {
                 Bullet(
                     symbol: "bolt.fill",
-                    title: "Weft's own, not macOS's",
-                    text: "Weft can keep them all on **one** macOS desktop and switch between "
-                        + "them by moving windows just off the edge of the screen. "
-                        + "No desktop change, so nothing animates."
+                    title: "Instant",
+                    text: "⌥1, ⌥2, ⌥3… Windows you are not using wait just off the edge of the screen. "
+                        + "Nothing animates but them."
                 )
+                .staggered(appeared, 0)
                 Bullet(
                     symbol: "macwindow.on.rectangle",
-                    title: "Every window can move",
-                    text: "Sending a window to another *desktop* means weft drags it by the "
-                        + "title bar — which some terminals do not have. Sending it to another "
-                        + "*workspace* is just bookkeeping, so it always works."
+                    title: "Every window",
+                    text: "Sending a window to a workspace always works — even a terminal with no title bar."
                 )
+                .staggered(appeared, 1)
+                Bullet(
+                    symbol: "checkmark.shield",
+                    title: "Nothing to switch off",
+                    text: "No change to System Integrity Protection. Full-screen apps and your other "
+                        + "macOS desktops keep working; weft picks up where it was when you come back."
+                )
+                .staggered(appeared, 2)
             }
-            .padding(.top, 30)
-            .frame(maxWidth: 460, alignment: .leading)
-            .opacity(appeared ? 1 : 0)
-            .offset(y: appeared ? 0 : 14)
+            .padding(.top, 24)
+            .frame(maxWidth: 470, alignment: .leading)
 
-            Spacer()
+            Spacer(minLength: 20)
 
             VStack(spacing: 12) {
-                Button { model.goTo(.workspacesChoice) } label: {
+                Button(action: model.beginPermissions) {
                     Text("Continue").frame(width: 190)
                 }
                 .buttonStyle(.borderedProminent)
@@ -968,146 +930,134 @@ private struct WorkspacesIntroPage: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            .padding(.bottom, 44)
+            .padding(.bottom, 40)
             .opacity(appeared ? 1 : 0)
         }
         .onAppear {
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) { appeared = true }
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.78)) { appeared = true }
         }
     }
 }
 
-// MARK: - Page 1c: which model
+extension View {
+    /// Fade and rise in, a beat after the one before it.
+    func staggered(_ shown: Bool, _ index: Int) -> some View {
+        opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 12)
+            .animation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.12 + Double(index) * 0.08), value: shown)
+    }
+}
 
-/// The choice, with both costs written down.
+/// Three workspaces on one desktop, switching every couple of seconds.
 ///
-/// Neither option is free and the pane says so on both cards, because the one
-/// thing that cannot be undone quietly is a user picking virtual, meeting
-/// Mission Control's slivers a week later, and reading it as a bug.
-private struct WorkspacesChoicePage: View {
-    @ObservedObject var model: SetupModel
-    @State private var appeared = false
+/// Runs only while Setup shows this page. Each switch is one spring: the
+/// outgoing windows shrink into the bottom-right corner, the incoming ones grow
+/// out of it, and the pill in the menu bar follows.
+private struct WorkspaceDemo: View {
+    private struct Set {
+        let name: String
+        let symbol: String
+        let tint: Color
+    }
+    private let sets = [
+        Set(name: "code", symbol: "chevron.left.forwardslash.chevron.right", tint: Color(red: 0.49, green: 0.64, blue: 0.97)),
+        Set(name: "web", symbol: "globe", tint: Color(red: 0.36, green: 0.80, blue: 0.62)),
+        Set(name: "chat", symbol: "bubble.left.and.bubble.right.fill", tint: Color(red: 0.96, green: 0.62, blue: 0.40)),
+    ]
+    @State private var showing = 0
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            Text("How should they work?")
-                .font(.system(size: 28, weight: .semibold))
-                .opacity(appeared ? 1 : 0)
-                .offset(y: appeared ? 0 : 10)
-
-            Text("You can change this any time in Settings → Workspaces.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .padding(.top, 6)
-                .opacity(appeared ? 1 : 0)
-
-            VStack(spacing: 14) {
-                ChoiceCard(
-                    symbol: "rectangle.3.group.fill",
-                    title: "All on one desktop",
-                    badge: "Recommended",
-                    summary: "Switching is instant and any window can move between them.",
-                    cost: "Mission Control shows a sliver for each hidden window on that desktop.",
-                    selected: model.workspacesChoice == "virtual"
-                ) { model.workspacesChoice = "virtual" }
-
-                ChoiceCard(
-                    symbol: "macwindow.on.rectangle",
-                    title: "One per macOS desktop",
-                    badge: nil,
-                    summary: "Each workspace is one of macOS's own desktops. Mission Control "
-                        + "and swipes behave exactly as they always have.",
-                    cost: "Switching animates, and a window with no title bar cannot be moved.",
-                    selected: model.workspacesChoice == "native"
-                ) { model.workspacesChoice = "native" }
-            }
-            .padding(.top, 26)
-            .frame(maxWidth: 480)
-            .opacity(appeared ? 1 : 0)
-            .offset(y: appeared ? 0 : 14)
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button(action: model.chooseWorkspaces) {
-                    Text("Continue").frame(width: 190)
+        GeometryReader { geo in
+            let bar: CGFloat = 22
+            let pad: CGFloat = 10
+            let area = CGRect(x: pad, y: bar + pad, width: geo.size.width - pad * 2, height: geo.size.height - bar - pad * 2)
+            ZStack(alignment: .topLeading) {
+                Wallpaper()
+                ForEach(sets.indices, id: \.self) { i in
+                    ForEach(0..<3, id: \.self) { slot in
+                        let frame = tile(slot, in: area)
+                        let here = i == showing
+                        DemoWindow(symbol: sets[i].symbol, tint: sets[i].tint, main: slot == 0)
+                            .frame(width: frame.width, height: frame.height)
+                            .scaleEffect(here ? 1 : 0.08, anchor: .bottomTrailing)
+                            .offset(
+                                x: here ? frame.minX : geo.size.width - frame.width - 2,
+                                y: here ? frame.minY : geo.size.height - frame.height - 2
+                            )
+                            .opacity(here ? 1 : 0.0)
+                            .zIndex(here ? 1 : 0)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-
-                Button("Back") { model.goTo(.workspacesIntro) }
-                    .buttonStyle(.plain)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(sets.indices, id: \.self) { i in
+                        Text("⌥\(i + 1) \(sets[i].name)")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundStyle(i == showing ? .white : .white.opacity(0.6))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule().fill(i == showing ? sets[i].tint.opacity(0.9) : .white.opacity(0.1))
+                            )
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .frame(height: bar)
+                .background(Color.black.opacity(0.28))
             }
-            .padding(.bottom, 44)
-            .opacity(appeared ? 1 : 0)
         }
-        .onAppear {
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) { appeared = true }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 20, y: 10)
+        .task {
+            // A loop that ends with the page: `.task` is cancelled when the
+            // view goes, so nothing keeps ticking behind Setup.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2.2))
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.82)) {
+                    showing = (showing + 1) % sets.count
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Three workspaces on one desktop, switching between each other")
+    }
+
+    /// One big window on the left, two stacked on the right: weft's bsp.
+    private func tile(_ slot: Int, in area: CGRect) -> CGRect {
+        let gap: CGFloat = 6
+        let half = (area.width - gap) / 2
+        let halfHeight = (area.height - gap) / 2
+        switch slot {
+        case 0: return CGRect(x: area.minX, y: area.minY, width: half, height: area.height)
+        case 1: return CGRect(x: area.minX + half + gap, y: area.minY, width: half, height: halfHeight)
+        default: return CGRect(x: area.minX + half + gap, y: area.minY + halfHeight + gap, width: half, height: halfHeight)
         }
     }
 }
 
-private struct ChoiceCard: View {
+private struct DemoWindow: View {
     let symbol: String
-    let title: String
-    let badge: String?
-    let summary: String
-    let cost: String
-    let selected: Bool
-    let action: () -> Void
+    let tint: Color
+    let main: Bool
 
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: symbol)
-                    .font(.system(size: 20))
-                    .foregroundStyle(selected ? Color.weft : .secondary)
-                    .frame(width: 26)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
-                        Text(title).font(.system(size: 15, weight: .semibold))
-                        if let badge { Chip(text: badge, tint: .weft) }
-                    }
-                    Text(.init(summary))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    // Named on both cards, not only on the one being talked
-                    // out of. A trade-off listed under one option reads as a
-                    // warning; listed under both, it reads as a choice.
-                    Label(cost, systemImage: "exclamationmark.circle")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 1)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 17))
-                    .foregroundStyle(selected ? Color.weft : Color.secondary.opacity(0.4))
-                    .padding(.top, 2)
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        ZStack(alignment: .topLeading) {
+            shape.fill(Color.white.opacity(0.13))
+            shape.fill(tint.opacity(0.18))
+            HStack(spacing: 3.5) {
+                Circle().fill(Color(red: 1, green: 0.37, blue: 0.34)).frame(width: 5, height: 5)
+                Circle().fill(Color(red: 1, green: 0.74, blue: 0.18)).frame(width: 5, height: 5)
+                Circle().fill(Color(red: 0.16, green: 0.79, blue: 0.26)).frame(width: 5, height: 5)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(7)
+            Image(systemName: symbol)
+                .font(.system(size: main ? 26 : 16, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .buttonStyle(.plain)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(selected ? 0.07 : 0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(selected ? Color.weft : Color.primary.opacity(0.12),
-                        lineWidth: selected ? 2 : 1)
-        )
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: selected)
+        .overlay(shape.stroke(tint.opacity(main ? 0.9 : 0.35), lineWidth: main ? 1.5 : 1))
     }
 }
 
@@ -1662,11 +1612,11 @@ private struct DonePage: View {
                     .fill(Color.green.opacity(0.14))
                     .frame(width: 106, height: 106)
                     .scaleEffect(appeared ? 1 : 0.5)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 44, weight: .semibold))
-                    .foregroundStyle(.green)
-                    .scaleEffect(appeared ? 1 : 0.3)
-                    .opacity(appeared ? 1 : 0)
+                CheckmarkShape()
+                    .trim(from: 0, to: appeared ? 1 : 0)
+                    .stroke(.green, style: StrokeStyle(lineWidth: 6.5, lineCap: .round, lineJoin: .round))
+                    .frame(width: 44, height: 34)
+                    .animation(.easeOut(duration: 0.45).delay(0.18), value: appeared)
             }
 
             Text("Weft is ready")
@@ -1699,6 +1649,11 @@ private struct DonePage: View {
             .frame(maxWidth: 420, alignment: .leading)
             .opacity(appeared ? 1 : 0)
             .offset(y: appeared ? 0 : 12)
+
+            ConflictingMacOSSettings()
+                .padding(.top, 18)
+                .frame(maxWidth: 420, alignment: .leading)
+                .opacity(appeared ? 1 : 0)
 
             Text("Press **⌘K** for the cheatsheet. Everything else lives in the menu-bar icon.")
                 .font(.callout)
@@ -1735,6 +1690,57 @@ private struct DonePage: View {
         }
         .onAppear {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.62)) { appeared = true }
+        }
+    }
+}
+
+/// A checkmark drawn as one stroke, so it can draw itself in.
+private struct CheckmarkShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX, y: rect.midY + rect.height * 0.05))
+        p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.36, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        return p
+    }
+}
+
+/// macOS features that arrange the same windows weft does. Said here, once,
+/// with the button that fixes it, because the symptom — a window snapping
+/// back — reads as weft being broken.
+private struct ConflictingMacOSSettings: View {
+    @State private var tiling = SystemChecks.macOSTilingEnabled()
+    @State private var stageManager = SystemChecks.stageManagerEnabled()
+
+    var body: some View {
+        if !tiling.isEmpty || stageManager {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: "rectangle.split.2x1.slash")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.orange)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(stageManager ? "Turn off Stage Manager and macOS window tiling"
+                        : "Turn off macOS window tiling")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("They move the same windows weft does, so a window can snap back after you drag it.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open Desktop & Dock") {
+                        if let url = URL(string: SystemChecks.desktopAndDockURL) { NSWorkspace.shared.open(url) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.08)))
+            .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    tiling = SystemChecks.macOSTilingEnabled()
+                    stageManager = SystemChecks.stageManagerEnabled()
+                }
+            }
         }
     }
 }
@@ -1923,7 +1929,6 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     /// the only real explanation of the model in the whole app would be
     /// unreachable the moment it had been read once.
     func showWorkspaces() {
-        model.workspacesChoice = SetupModel.currentWorkspacesMode()
         model.page = .workspacesIntro
         show()
     }

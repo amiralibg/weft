@@ -17,6 +17,9 @@ struct SpaceRow: Identifiable, Equatable {
     var id = UUID()
     var label: String = ""
     var layout: String = "bsp"
+    /// `display = …` as written: "main", "secondary", a number, or part of a
+    /// display's name. Empty means it shows on whichever display you are on.
+    var display: String = ""
     /// The `[[space]]` section this row came from, so any comment inside the
     /// block survives an edit to the label next to it.
     var origin: TomlSection?
@@ -258,7 +261,12 @@ final class ConfigStore: ObservableObject {
     private func readSpaces() {
         spaces = document.indices(ofHeader: "[[space]]").map { i in
             let s = document.sections[i]
-            return SpaceRow(label: s.string("label") ?? "", layout: s.string("layout") ?? "bsp", origin: s)
+            return SpaceRow(
+                label: s.string("label") ?? "",
+                layout: s.string("layout") ?? "bsp",
+                display: s.rawValue("display").map(TomlValue.unquote) ?? "",
+                origin: s
+            )
         }
     }
 
@@ -458,6 +466,13 @@ final class ConfigStore: ObservableObject {
         syncBlocks(header: "[[space]]", rows: spaces) { row, section in
             section.set("label", string: row.label)
             section.set("layout", string: row.layout)
+            if row.display.isEmpty {
+                section.remove("display")
+            } else if let n = Int(row.display) {
+                section.set("display", int: n)
+            } else {
+                section.set("display", string: row.display)
+            }
         }
     }
 
@@ -669,5 +684,107 @@ extension ConfigStore {
             return !line.contains("false")
         }
         return true
+    }
+}
+
+// MARK: - Workspaces, as the canvas edits them
+
+extension ConfigStore {
+    /// Put a workspace before another one (or last) — the order `space focus
+    /// 1`, `2`, … count in.
+    func moveSpace(_ id: SpaceRow.ID, before target: SpaceRow.ID?) {
+        guard id != target, let from = spaces.firstIndex(where: { $0.id == id }) else { return }
+        let row = spaces.remove(at: from)
+        let to = target.flatMap { t in spaces.firstIndex(where: { $0.id == t }) } ?? spaces.endIndex
+        spaces.insert(row, at: to)
+        markDirty()
+    }
+
+    func pinSpace(_ id: SpaceRow.ID, to display: String) {
+        guard let i = spaces.firstIndex(where: { $0.id == id }), spaces[i].display != display else { return }
+        spaces[i].display = display
+        markDirty()
+    }
+
+    func setLayout(_ id: SpaceRow.ID, to layout: String) {
+        guard let i = spaces.firstIndex(where: { $0.id == id }), spaces[i].layout != layout else { return }
+        spaces[i].layout = layout
+        markDirty()
+    }
+
+    /// Rename a workspace and everything that names it: rules sending apps
+    /// there, and shortcuts that focus it or move windows to it. A rename that
+    /// left those behind would break them silently.
+    func renameSpace(_ id: SpaceRow.ID, to newLabel: String) {
+        let label = newLabel.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty, let i = spaces.firstIndex(where: { $0.id == id }) else { return }
+        let old = spaces[i].label
+        guard old != label, !spaces.contains(where: { $0.label == label }) else { return }
+        spaces[i].label = label
+        for r in rules.indices where rules[r].space == old { rules[r].space = label }
+        for m in modes.indices {
+            for k in modes[m].rows.indices {
+                var words = modes[m].rows[k].command.split(separator: " ").map(String.init)
+                if words.count >= 3, words[0] == "space", words[1] == "focus" || words[1] == "move-window",
+                   words[2] == old {
+                    words[2] = label
+                    modes[m].rows[k].command = words.joined(separator: " ")
+                }
+            }
+        }
+        markDirty()
+    }
+
+    func removeSpace(_ id: SpaceRow.ID) {
+        spaces.removeAll { $0.id == id }
+        markDirty()
+    }
+
+    /// Rules that send an app to this workspace.
+    func rules(for label: String) -> [RuleRow] {
+        rules.filter { $0.space == label && $0.isValid }
+    }
+
+    /// Send an app to a workspace when it opens: its existing rule gains the
+    /// workspace, or a new rule is written — by bundle id when there is one,
+    /// which cannot match the wrong app the way a name can.
+    func assignApp(name: String, bundleID: String?, to label: String) {
+        if let i = rules.firstIndex(where: {
+            (bundleID != nil && $0.bundleID == bundleID) || (!name.isEmpty && $0.app == name)
+        }) {
+            rules[i].space = label
+        } else if let bundleID, !bundleID.isEmpty {
+            rules.append(RuleRow(bundleID: bundleID, space: label))
+        } else {
+            rules.append(RuleRow(app: name, space: label))
+        }
+        markDirty()
+    }
+
+    /// Stop sending an app anywhere. A rule that did nothing else goes; one
+    /// that also floats the app keeps doing that.
+    func unassign(_ ruleID: RuleRow.ID) {
+        guard let i = rules.firstIndex(where: { $0.id == ruleID }) else { return }
+        if rules[i].manage == nil, rules[i].title.isEmpty {
+            rules.remove(at: i)
+        } else {
+            rules[i].space = ""
+        }
+        markDirty()
+    }
+
+    /// Shortcuts in the default layer that focus this workspace or send a
+    /// window to it, by label or by its number.
+    func chords(for label: String, number: Int) -> (focus: [String], move: [String]) {
+        guard let mode = modes.first(where: { $0.name == "default" }) else { return ([], []) }
+        var focus: [String] = [], move: [String] = []
+        for row in mode.rows {
+            let words = row.command.split(separator: " ").map(String.init)
+            guard words.count >= 3, words[0] == "space", words[2] == label || words[2] == "\(number)"
+            else { continue }
+            if words[1] == "focus" { focus.append(row.chord) }
+            if words[1] == "move-window" { move.append(row.chord) }
+        }
+        return (focus, move)
     }
 }
