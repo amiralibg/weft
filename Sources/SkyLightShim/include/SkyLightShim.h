@@ -130,18 +130,10 @@ WEFT_PRIVATE_FN(WEFT_RETAINED, CFStringRef, SLSCopyManagedDisplayForSpace, NULL,
 WEFT_PRIVATE_FN(, int32_t, SLSMoveWindow, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid, const CGPoint *point), (cid, wid, point))
 
-// Move window to space without changing focused space (see S3). Signatures
-// from yabai's scripting-addition payload (MIT — see DESIGN §11.11). NOTE:
-// SLSMoveWindowsToManagedSpace returns void — success is verified by
-// re-reading SLSCopySpacesForWindows, not by return code.
-WEFT_PRIVATE_VOID(SLSMoveWindowsToManagedSpace,
-    (SLConnectionID cid, CFArrayRef windowIDs, SLSpaceID sid), (cid, windowIDs, sid))
-
-// Sticky bit for scratchpads (see S3): bit (1 << 11), tag_size 64.
-// Same source; SLSClearWindowTags removes bits.
+// Tags on weft's OWN windows (the border overlays). On another app's window
+// the WindowServer accepts the sticky bit from an ordinary connection and
+// drops it (S8), which is why weft never tries.
 WEFT_PRIVATE_FN(, int32_t, SLSSetWindowTags, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, uint64_t *tags, size_t tagSize), (cid, wid, tags, tagSize))
-WEFT_PRIVATE_FN(, int32_t, SLSClearWindowTags, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid, uint64_t *tags, size_t tagSize), (cid, wid, tags, tagSize))
 
 // Stack rendering: raise active child, z-order only, no AX (see DESIGN §4.1).

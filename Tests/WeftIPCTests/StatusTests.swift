@@ -9,89 +9,60 @@ import Testing
 // shape is pinned here rather than left to be discovered from a menu bar
 // showing the wrong desktop.
 
-/// Workspace ids that are nowhere near the desktop ids they sit on. Under the
-/// identity mapping the two are handed out in step and a mix-up is invisible;
-/// these make one show up.
+/// Workspace ids that are nowhere near the desktop ids they sit on, so a
+/// mix-up between the two shows up. Two workspaces on desktop 11 of one
+/// display; desktop 12 exists and is not managed.
 private func state() -> SpaceState {
     var s = SpaceState()
     s.nextWorkspaceID = 900
-    s.adoptDesktops([11, 12], names: ["code", "web"])
-    s.displayBySpace = [11: "DISPLAY-A", 12: "DISPLAY-A"]
-    s.displays = ["DISPLAY-A"]
-    s.currentByDisplay = ["DISPLAY-A": 11]
+    s.adoptDisplays(
+        [DisplayDesktops(uuid: "DISPLAY-A", desktops: [11, 12], current: 11)],
+        names: ["code", "web"]
+    )
     return s
 }
 
-private func status(_ s: SpaceState, _ sid: SpaceID, fallback: [WindowID] = []) -> SpaceStatus {
-    SpaceStatus.of(
-        desktop: sid,
-        in: s,
-        display: s.displayBySpace[sid] ?? "",
-        current: s.currentByDisplay["DISPLAY-A"] == sid,
-        declaredLayout: { _ in nil },
-        defaultLayout: .bsp,
-        fallbackWindows: fallback
-    )
+private func statuses(_ s: SpaceState, declared: [String: LayoutKind] = [:]) -> [SpaceStatus] {
+    SpaceStatus.workspaces(in: s, declaredLayout: { declared[$0] }, defaultLayout: .bsp)
 }
 
-/// The one that matters. `SpaceStatus.id` is the native space id, and weft-bar
-/// hands it straight back to `space focus` — so a workspace id here names a
-/// different desktop and nothing anywhere throws.
+/// The one that matters. `SpaceStatus.id` is the desktop id, and weft-bar
+/// decodes it as one — so a workspace id here would decode cleanly and mean
+/// nothing, and nothing anywhere would throw.
 @Test func theWireReportsDesktopIdsNotWorkspaceIds() {
-    let s = state()
-    #expect(s.active[11] == WorkspaceID(900))
-    #expect(status(s, 11).id == 11)
-    #expect(status(s, 12).id == 12)
-    // And nothing on the wire carries a workspace id at all.
-    #expect(status(s, 11).id != 900)
+    let out = statuses(state())
+    #expect(out.map(\.id) == [11, 11])
+    #expect(!out.contains { $0.id == 900 || $0.id == 901 })
+    #expect(out.map(\.label) == ["code", "web"])
 }
 
-/// Label, layout kind and membership all come from the workspace showing on
-/// the desktop — which is what makes this survive Phase 3 unchanged.
-@Test func aDesktopReportsTheWorkspaceShowingOnIt() {
+/// Label, layout kind and membership come from each workspace, and `current`
+/// is whether it is showing.
+@Test func eachWorkspaceReportsItsOwnLayoutAndMembers() {
     var s = state()
-    s.setLayout(.float(FloatState(order: [7, 3], remembered: [:], focus: 7)), on: 12)
-    let out = status(s, 12)
-    #expect(out.label == "web")
-    #expect(out.layout == "float")
-    #expect(out.windows == [3, 7])   // sorted, so a redraw does not reorder
-    #expect(out.current == false)
-    #expect(out.display == "DISPLAY-A")
-    #expect(status(s, 11).current == true)
+    s.workspaces[s.wsOrder[1]]?.layout = .float(FloatState(order: [7, 3], remembered: [:], focus: 7))
+    s.file(9, in: s.wsOrder[1], laidOut: false)
+    let out = statuses(s)
+    #expect(out[1].layout == "float")
+    #expect(out[1].windows == [3, 7, 9])   // sorted, floats included
+    #expect(out[1].current == false)
+    #expect(out[0].current == true)
+    #expect(out[0].display == "DISPLAY-A")
 }
 
-/// A desktop weft has not swept yet has no workspace. It still has to report
-/// something, and reporting an empty window list would blank the menu bar for
-/// a desktop that plainly has windows on it.
-@Test func anUnsweptDesktopFallsBackToTheWindowServer() {
-    let s = SpaceState()
-    let out = SpaceStatus.of(
-        desktop: 99,
-        in: s,
-        display: "DISPLAY-A",
-        current: false,
-        declaredLayout: { _ in nil },
-        defaultLayout: .bsp,
-        fallbackWindows: [4, 5]
-    )
-    #expect(out.id == 99)
-    #expect(out.label == "99")       // its own id, for want of anything better
-    #expect(out.layout == "bsp")
-    #expect(out.windows == [4, 5])
+/// An empty workspace shows the kind it *would* get, so the menu bar is not
+/// claiming bsp for a workspace declared float in weft.toml.
+@Test func anEmptyWorkspaceShowsItsDeclaredLayout() {
+    let out = statuses(state(), declared: ["web": .float])
+    #expect(out[1].layout == "float")
+    #expect(out[0].layout == "bsp")
 }
 
-/// An unvisited desktop shows the kind it *would* get, so the menu bar is not
-/// claiming bsp for a space declared float in weft.toml.
-@Test func anUnsweptDesktopShowsItsDeclaredLayout() {
-    let out = SpaceStatus.of(
-        desktop: 99,
-        in: SpaceState(),
-        display: "D",
-        current: false,
-        declaredLayout: { $0 == "99" ? .float : nil },
-        defaultLayout: .bsp
-    )
-    #expect(out.layout == "float")
+/// A display showing another desktop is paused, and nothing on it is current.
+@Test func nothingIsCurrentOnAPausedDisplay() {
+    var s = state()
+    s.adoptDisplays([DisplayDesktops(uuid: "DISPLAY-A", desktops: [11, 12], current: 12)], names: nil)
+    #expect(statuses(s).allSatisfy { !$0.current })
 }
 
 /// The field names and types weft-bar's own decoder expects. It declares
@@ -101,7 +72,7 @@ private func status(_ s: SpaceState, _ sid: SpaceID, fallback: [WindowID] = []) 
     var s = state()
     s.setLayout(.tiling(treeFromOrder([42])), on: 11)
     let payload = BarStateStatus(
-        spaces: [status(s, 11)],
+        spaces: [statuses(s)[0]],
         windows: [BarWindowStatus(id: 42, app: "Ghostty", title: "t", pid: 7, spaces: [11])]
     )
     let data = try JSONEncoder().encode(payload)
@@ -129,31 +100,11 @@ private func status(_ s: SpaceState, _ sid: SpaceID, fallback: [WindowID] = []) 
 // rather than as a decode failure.
 
 @Test func workspacesStatusRoundTrips() throws {
-    let sent = WorkspacesStatus(
-        mode: "virtual", anchor: 1, requestedAnchor: 3, desktops: 1, workspaces: 5
-    )
+    let sent = WorkspacesStatus(workspaces: 5, displays: [
+        .init(uuid: "A", index: 1, managedDesktop: 1, desktops: 3, paused: false, showing: "code"),
+        .init(uuid: "B", index: 2, managedDesktop: nil, desktops: 1, paused: true, showing: nil),
+    ])
     let data = try JSONEncoder().encode(sent)
-    let back = try JSONDecoder().decode(WorkspacesStatus.self, from: data)
-    #expect(back == sent)
-}
-
-/// The clamp is only visible as a difference between two fields, so the rule
-/// that reads it is pinned here rather than left to each caller.
-@Test func anchorClampedOnlyWhenVirtualAndDifferent() {
-    #expect(
-        WorkspacesStatus(
-            mode: "virtual", anchor: 1, requestedAnchor: 3, desktops: 1, workspaces: 4
-        ).anchorClamped
-    )
-    #expect(
-        !WorkspacesStatus(
-            mode: "virtual", anchor: 2, requestedAnchor: 2, desktops: 3, workspaces: 4
-        ).anchorClamped
-    )
-    // Under native the anchor means nothing, so it cannot be wrong.
-    #expect(
-        !WorkspacesStatus(
-            mode: "native", anchor: 1, requestedAnchor: 9, desktops: 3, workspaces: 3
-        ).anchorClamped
-    )
+    #expect(try JSONDecoder().decode(WorkspacesStatus.self, from: data) == sent)
+    #expect(sent.displaysWithExtraDesktops.map(\.uuid) == ["A"])
 }

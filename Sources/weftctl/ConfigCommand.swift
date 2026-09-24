@@ -1,27 +1,23 @@
 import Foundation
 import WeftBarConfig
 
-// `weftctl config pin-workspaces <native|virtual>` — write the workspaces mode
-// into the user's weft.toml, but only if the key is not already there.
+// `weftctl config tidy` — take settings weft no longer reads out of the user's
+// weft.toml, leaving everything else byte for byte.
 //
-// It exists because two very different callers need exactly the same edit:
+// 0.9.11–0.9.14 chose between two workspace models with `workspaces` and
+// `workspace-anchor`. There is one model now, and both keys only produce a
+// warning, so every installer runs this over a config it keeps. It is in Swift
+// rather than in the install scripts because `TomlDocument` preserves
+// comments, key order and everything it does not understand, and it has
+// tests; a `sed` editing a file someone hand-commented would not.
 //
-//   - The installers. `workspaces` defaults to `virtual` as of 0.9.12, and an
-//     upgrade must not silently change what `alt-2` means for someone who has
-//     been running weft for months. So when an installer keeps an existing
-//     config, it pins that config to `native` explicitly. The user opts in
-//     afterwards, from Settings or Setup, rather than being opted in by a
-//     release note.
-//   - Setup's mode chooser. It asks the question once, on a fresh install, and
-//     has to write the answer somewhere.
-//
-// Doing it in Swift rather than in each of the three install scripts is not
-// tidiness: `TomlDocument` preserves comments, key order and everything the
-// form does not understand, and it has tests. Three `sed` invocations editing
-// a file a user has hand-commented would not.
+// `pin-workspaces` is the name older installers call. It does the same thing,
+// so an installer fetched from an older release still leaves a tidy config.
 enum ConfigCommand {
+    static let retiredGeneralKeys = ["workspaces", "workspace-anchor"]
+
     static func usage() -> Never {
-        fputs("usage: weftctl config pin-workspaces <native|virtual>\n", stderr)
+        fputs("usage: weftctl config tidy\n", stderr)
         exit(2)
     }
 
@@ -30,43 +26,37 @@ enum ConfigCommand {
     }
 
     static func run(_ args: [String]) -> Never {
-        guard args.count >= 3, args[1] == "pin-workspaces" else { usage() }
-        let mode = args[2]
-        guard mode == "native" || mode == "virtual" else { usage() }
+        guard args.count >= 2, args[1] == "tidy" || args[1] == "pin-workspaces" else { usage() }
 
         let path = configPath
-        // No config is not a failure. A fresh install has not copied the
-        // starter file yet, and the starter file already carries the key — so
-        // there is nothing to pin and nothing to complain about.
+        // No config is not a failure: a fresh install has not copied the
+        // starter file yet, and the starter file carries neither key.
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
-            print("no config at \(path) — nothing to pin")
+            print("no config at \(path) — nothing to tidy")
             exit(0)
         }
 
         var doc = TomlDocument(text)
-        // Already answered, by the user or by a previous run. Leave it alone:
-        // this command is run by every installer on every upgrade, so
-        // overwriting would undo the user's choice once per update.
-        if let i = doc.firstIndex(ofHeader: "[general]"),
-           doc.sections[i].string("workspaces") != nil
-        {
-            print("workspaces already set — left alone")
+        guard let i = doc.firstIndex(ofHeader: "[general]") else {
+            print("nothing to tidy")
             exit(0)
         }
-
-        let i = doc.ensureSection("[general]")
         var section = doc.sections[i]
-        section.set("workspaces", string: mode)
+        let present = retiredGeneralKeys.filter { section.rawValue($0) != nil }
+        guard !present.isEmpty else {
+            print("nothing to tidy")
+            exit(0)
+        }
+        for key in present { section.remove(key) }
         doc.sections[i] = section
 
-        let rendered = doc.render()
         do {
-            try rendered.write(toFile: path, atomically: true, encoding: .utf8)
+            try doc.render().write(toFile: path, atomically: true, encoding: .utf8)
         } catch {
             fputs("weftctl: could not write \(path): \(error)\n", stderr)
             exit(1)
         }
-        print("pinned workspaces = \"\(mode)\" in \(path)")
+        print("removed \(present.joined(separator: ", ")) from \(path) — weft keeps its workspaces on one desktop per display")
         exit(0)
     }
 }

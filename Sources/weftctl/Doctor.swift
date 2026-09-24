@@ -41,14 +41,10 @@ public enum Doctor {
         return "\(shown), and \(items.count - limit) more"
     }
 
-    /// Which workspace model the daemon is actually in, and whether the anchor
-    /// it used is the one that was asked for.
-    ///
-    /// Returns the live status so `reportSpaces` can pick its nouns from it.
-    /// Nothing else in weft can report the clamp: `adoptDesktops` has to
-    /// produce a usable state whatever `workspace-anchor` says, the config
-    /// parser has no WindowServer to check it against, and the daemon's own
-    /// warning goes to a log nobody reads until something is already wrong.
+    /// How the workspaces sit on the displays, from the daemon: which desktop
+    /// each display manages and whether it is paused right now. Nothing else
+    /// can say it — the config has no WindowServer, and the daemon's log is
+    /// read only once something is already wrong.
     @discardableResult
     private static func reportWorkspaces(_ validated: ValidatedConfig) -> WorkspacesStatus? {
         guard let response = IPCClient.sendCommand(
@@ -60,47 +56,30 @@ public enum Doctor {
         else {
             // An older daemon has no such query. Say what the file asks for
             // rather than nothing — it is still the more useful half.
-            print("    - Workspaces: \(validated.general.workspaces.rawValue) (weftd did not answer)")
+            print("    - Workspaces: \(validated.spaces.count) declared (weftd did not answer)")
             return nil
         }
 
-        if live.mode == "virtual" {
-            print(
-                "    - Workspaces: virtual — \(live.workspaces) on"
-                    + " \(live.desktops) macOS desktop(s), hosted on desktop \(live.anchor)"
-            )
-        } else {
-            print("    - Workspaces: native — one per macOS desktop (\(live.desktops))")
+        print("    - Workspaces: \(live.workspaces), on one macOS desktop per display")
+        for d in live.displays {
+            let managed = d.managedDesktop.map { "desktop \($0) of \(d.desktops)" } ?? "no desktop"
+            var line = "      display \(d.index): weft manages \(managed)"
+            if let showing = d.showing { line += ", showing \(showing)" }
+            if d.paused { line += " — PAUSED (another desktop or a fullscreen app is showing)" }
+            print(line)
         }
-
-        if live.anchorClamped {
-            print(
-                "    [!] workspace-anchor = \(live.requestedAnchor) names no desktop;"
-                    + " using desktop \(live.anchor)"
-            )
-        }
-        // The file and the daemon disagreeing is normal for a second — a
-        // reload is in flight — and a bug if it lasts. Either way it explains
-        // the symptom the user came here with.
-        if live.mode != validated.general.workspaces.rawValue {
-            print(
-                "    [!] weft.toml says \(validated.general.workspaces.rawValue)"
-                    + " but weftd is running \(live.mode) — restart the engine"
-            )
+        if !live.displaysWithExtraDesktops.isEmpty {
+            print("    [○] Extra macOS desktops are fine: weft pauses while one is showing and")
+            print("        resumes when you come back. Remove them in Mission Control to keep")
+            print("        every window managed.")
         }
         return live
     }
 
-    /// Cross-check the `[[space]]` declarations against the desktops that
-    /// actually exist. Labels are assigned by ordinal, so a config written on a
-    /// seven-desktop machine and used on a three-desktop one leaves four names
-    /// unassigned — and every keybind and rule naming them fails quietly.
-    ///
-    /// `mode` decides the nouns and one piece of advice. Under `virtual`,
-    /// `query spaces` returns one entry per *workspace*, so "N desktops exist"
-    /// was counting the wrong thing, and "add desktops in Mission Control" was
-    /// the wrong fix — the fix is another `[[space]]`.
-    private static func reportSpaces(_ validated: ValidatedConfig, mode: String) {
+    /// Cross-check every rule and keybind that names a workspace against the
+    /// workspaces the daemon actually has. A name with nothing behind it fails
+    /// quietly every time it is used.
+    private static func reportSpaces(_ validated: ValidatedConfig) {
         guard let response = IPCClient.sendCommand(
                   path: IPCPaths.socketPath(), command: "query spaces"
               ),
@@ -108,12 +87,11 @@ public enum Doctor {
               let data = response.output?.data(using: .utf8),
               let live = try? JSONDecoder().decode([SpaceStatus].self, from: data)
         else {
-            print("    - Desktops: weftd is not running, cannot check the space labels")
+            print("    - Workspaces: weftd is not running, cannot check the space labels")
             return
         }
-        let virtual = mode == "virtual"
-        let noun = virtual ? "workspace" : "desktop"
-        let nouns = virtual ? "workspaces" : "desktops"
+        let noun = "workspace"
+        let nouns = "workspaces"
 
         // Ask the daemon which labels actually landed rather than re-deriving
         // the ordinal assignment here. It is the same answer for a fresh
@@ -169,11 +147,7 @@ public enum Doctor {
         if !orphanedKeys.isEmpty {
             print("      keybinds: \(summarise(orphanedKeys))")
         }
-        print(
-            virtual
-                ? "    Add a [[space]] to weft.toml, or drop the references."
-                : "    Add desktops in Mission Control, or drop the references."
-        )
+        print("    Add a [[space]] to weft.toml, or drop the references.")
     }
 
     public static func run() {
@@ -321,56 +295,13 @@ public enum Doctor {
             if essentialLost { allOk = false }
         }
 
-        // 3. Moving a window to another desktop. No scripting addition, no SIP
-        // change: weft holds the window and presses the desktop shortcut, which
-        // is the only route macOS 27 still allows an ordinary process.
-        if DragMove.isSupported {
-            print("[\u{2713}] Moving a window to another desktop: available, with SIP on")
-            print("    weft holds the window and presses your 'move a space' shortcut, so the")
-            print("    screen changes desktop and changes back. A rule's `space =` does this only")
-            print("    with `follow-space-rules = true` under [general].")
-        } else if !AXIsProcessTrusted() {
-            print("[\u{2717}] Moving a window to another desktop: needs Accessibility")
-            allOk = false
-        } else {
-            print("[\u{2717}] Moving a window to another desktop: no 'move a space' shortcut is bound.")
-            print("    System Settings \u{2192} Keyboard \u{2192} Keyboard Shortcuts \u{2192} Mission Control")
-            print("    \u{2192} 'Move left a space' / 'Move right a space'. weft uses whichever keys")
-            print("    you have set there, so they do not have to be the defaults.")
-            allOk = false
-        }
-
-        // Sticky: weft does not do this, and the reason is not a missing
-        // scripting addition — weft is not going to ship one.
-        print("[\u{25CB}] Keeping a window on every desktop (sticky): not implemented")
-        print("    The SkyLight sticky tag is accepted and dropped from an ordinary connection.")
-        print("    macOS does it per application: right-click the app's Dock icon \u{2192} Options")
-        print("    \u{2192} All Desktops. That works today and persists; weft does not drive it.")
-
-        // Switching desktops: weft-sa when loaded, otherwise weft's own Dock
-        // swipe, otherwise a ⌃N that reaches nothing unless the Mission
-        // Control shortcuts are on — and on a stock macOS they are not.
-        // Reported on its own line because the symptom is a keybind that does
-        // nothing at all, with no error anywhere the user looks.
-        let switchShortcuts = SpaceControl.missionControlSwitchShortcuts().sorted()
-        if ScriptingAddition.supportsSpaceFocus() {
-            print("[\u{2713}] Switching desktops: instant, via weft-sa")
-        } else if DockSwipe.isSupported {
-            print("[\u{2713}] Switching desktops: instant, via weft's Dock swipe (no scripting addition, SIP on)")
-        } else if switchShortcuts.isEmpty {
-            print("[\u{2717}] Switching desktops: nothing to switch with.")
-            print("    This macOS release does not take weft's Dock swipe (26.6 or later does), and")
-            print("    every 'Switch to Desktop N' shortcut is off, so the \u{2303}N fallback lands nowhere.")
-            print("    Turn them on: System Settings \u{2192} Keyboard \u{2192} Keyboard Shortcuts")
-            print("    \u{2192} Mission Control \u{2192} Mission Control.")
-            allOk = false
-        } else {
-            let covered = switchShortcuts.map(String.init).joined(separator: ", ")
-            print("[\u{2713}] Switching desktops: \u{2303}N keystroke — desktops \(covered)")
-            if switchShortcuts.count < SpaceControl.desktopCount() {
-                print("    Desktops past that need their own 'Switch to Desktop N' shortcut.")
-            }
-        }
+        // 3. What weft does not do, said once so nobody goes looking for it.
+        // Moving windows between macOS desktops and switching desktops needed
+        // SIP off or simulated input that broke on macOS updates; workspaces
+        // do both jobs now, on one desktop per display.
+        print("[\u{2713}] Workspaces: switching and moving windows need no SIP change and no")
+        print("    macOS shortcut. weft does not switch macOS desktops or move windows")
+        print("    between them; it pauses on a display showing another desktop.")
 
         // Stage Manager arranges windows too. With it on, macOS and weft move
         // the same windows and the symptom reads as a weft bug.
@@ -423,10 +354,7 @@ public enum Doctor {
                     setting: "[integrations.sketchybar]"
                 ) { allOk = false }
 
-                reportSpaces(
-                    validated,
-                    mode: workspaces?.mode ?? validated.general.workspaces.rawValue
-                )
+                reportSpaces(validated)
             } catch {
                 print("[\u{2717}] Configuration: Parse error in \(configURL.path): \(error)")
                 allOk = false

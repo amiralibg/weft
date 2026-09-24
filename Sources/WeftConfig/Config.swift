@@ -51,18 +51,13 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
-    /// Whether a rule's `space = "…"` may take the screen over to place a
-    /// window.
+    /// Whether a rule's `space = "…"` also switches to that workspace.
     ///
-    /// Off, and this is the one option where the default is not the useful
-    /// behaviour. Moving a window to another desktop means holding it and
-    /// pressing the desktop shortcut — the gesture a person uses — because
-    /// macOS 27 refuses every API for it from an ordinary connection
-    /// (spikes/RESULTS.md §S8). That is fine for `space move-window`, which you
-    /// just asked for and are watching. A rule fires when an app opens, which
-    /// can be while you are typing in something else, and having the desktop
-    /// switch twice underneath you is worse than the window landing in the
-    /// wrong place. Turn this on if you would rather have the placement.
+    /// A rule always places the window: the workspace it names is a park away,
+    /// with no animation and nothing for the user to watch. This decides only
+    /// whether the screen follows the window there, and it is off because a
+    /// rule fires when an app opens — often while you are typing in
+    /// something else, which a workspace switch would pull out from under you.
     public var followSpaceRules: Bool
     /// Bundle ids whose `AXEnhancedUserInterface` weft must leave alone.
     ///
@@ -71,15 +66,6 @@ public struct GeneralConfig: Sendable, Equatable {
     /// resize goes through a slow, animated relayout. weft turns it off for
     /// the instant of each frame write and back on after. An app whose
     /// assistive tooling misbehaves with that goes here.
-    /// Whether workspaces map 1:1 to native spaces or multiple virtual spaces live on an anchor.
-    ///
-    /// `virtual` since 0.9.12. Installing over an existing config writes
-    /// `native` into it explicitly (`weftctl config pin-workspaces`), so the
-    /// flip reaches new installs only and nobody's `alt-2` changes meaning
-    /// under them on an upgrade.
-    public var workspaces: WorkspacesMode
-    /// Which native space hosts virtual workspaces (1-based Mission Control ordinal).
-    public var workspaceAnchor: Int
     public var enhancedUIExempt: [String]
     public var reserve: ScreenReserve
 
@@ -94,14 +80,10 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
-        workspaces: WorkspacesMode = .virtual,
-        workspaceAnchor: Int = 1,
         followSpaceRules: Bool = false,
         enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
     ) {
-        self.workspaces = workspaces
-        self.workspaceAnchor = workspaceAnchor
         self.innerGap = innerGap
         self.stackOffset = stackOffset
         self.manageMenubarApps = manageMenubarApps
@@ -481,30 +463,23 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     ids.append(id)
                 }
                 general.enhancedUIExempt = ids
-            case "workspaces":
-                guard case .string(let s) = v else { throw err(path, "expected native|virtual") }
-                guard let mode = WorkspacesMode(rawValue: s) else {
-                    throw err(path, "expected native|virtual")
-                }
-                general.workspaces = mode
-            case "workspace-anchor":
-                guard case .int(let n) = v, n >= 1 else { throw err(path, "expected positive int") }
-                general.workspaceAnchor = n
+            case "workspaces", "workspace-anchor":
+                // 0.9.11–0.9.14 chose between workspaces on native desktops
+                // and workspaces on an anchor desktop. There is one model now
+                // — weft's workspaces on one desktop per display — so both
+                // keys are read and ignored rather than failing a config that
+                // was valid yesterday. `weftctl config migrate` removes them.
+                warnings.append(ConfigWarning(
+                    line: doc.lines[path] ?? 0,
+                    message: "\(k) is no longer a setting — weft keeps its workspaces on one "
+                        + "desktop per display — ignored"
+                ))
             case "reserve":
                 general.reserve = try parseReserve(v, path: path, lines: doc.lines)
             default:
                 throw err(path, "unknown general key")
             }
         }
-    }
-    // Outside the `[general]` block on purpose. Under `virtual` a rule's
-    // `space = "…"` is a park, not two desktop animations, so there is nothing
-    // left for the opt-in to defend against and it defaults on. That has to
-    // hold for a config with no `[general]` table at all — which, now that
-    // `virtual` is the default, is exactly the config most likely to be in
-    // virtual mode. Inside the block it was skipped for precisely those users.
-    if doc.tables["general"]?["follow-space-rules"] == nil, general.workspaces == .virtual {
-        general.followSpaceRules = true
     }
 
     // [[space]]

@@ -21,7 +21,7 @@ func usage() -> Never {
           weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
           weftctl trace reset          # clear the daemon's phase samples
           weftctl migrate [--write]    # migrate yabai/skhd configuration
-          weftctl config pin-workspaces <native|virtual>  # set the mode, if unset
+          weftctl config tidy                   # drop settings weft no longer reads
           weftctl service <install|uninstall|start|stop|restart|status>
           weftctl --version
         """,
@@ -41,7 +41,7 @@ func localQuery(_ kind: String) -> Never {
     case "spaces": data = try? encoder.encode(world.spaces)
     case "windows": data = try? encoder.encode(world.windows)
     case "world": data = try? encoder.encode(world)
-    case "capability": data = try? encoder.encode(PlatformCapability.current)
+    case "capability": data = try? encoder.encode(PrivateAPI.selfTest())
     default: data = nil
     }
     guard let data, let str = String(data: data, encoding: .utf8) else { usage() }

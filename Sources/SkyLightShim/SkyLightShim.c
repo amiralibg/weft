@@ -24,9 +24,7 @@
     X(SLSCopyActiveMenuBarDisplayIdentifier)     \
     X(SLSCopyManagedDisplayForSpace)             \
     X(SLSMoveWindow)                             \
-    X(SLSMoveWindowsToManagedSpace)              \
     X(SLSSetWindowTags)                          \
-    X(SLSClearWindowTags)                        \
     X(SLSOrderWindow)                            \
     X(SLSTransactionCreate)                      \
     X(SLSTransactionCommit)                      \

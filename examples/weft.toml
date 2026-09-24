@@ -22,31 +22,15 @@
 # ---------------------------------------------------------------- workspaces
 #
 # A workspace is a named set of windows with a layout of its own — what
-# `alt-1`, `alt-2` and the [[space]] blocks below refer to. This says where
-# they live.
+# `alt-1`, `alt-2` and the [[space]] blocks below refer to. weft keeps them on
+# one macOS desktop per display: switching moves the windows you are not using
+# just off the edge of the screen and puts the others back. Instant, nothing
+# animates, and it works on every window, including one with no title bar.
 #
-#   "virtual"  All of your workspaces sit on ONE macOS desktop. Switching
-#              between them moves the windows you are not using just off the
-#              edge of the screen and puts the others back: instant, nothing
-#              animates, and it works on any window — including a terminal
-#              with its title bar hidden, which the other mode cannot move.
-#              The cost: Mission Control shows a sliver for every hidden
-#              window on that one desktop.
-#
-#   "native"   Each workspace IS one of macOS's own desktops, the way weft
-#              worked before 0.9.12. Mission Control and swipes are untouched.
-#              The cost: switching animates, and weft moves a window between
-#              desktops by dragging its title bar — so a window without one
-#              cannot be moved at all.
-#
-# Your other macOS desktops keep working either way: full-screen apps still
-# make their own, swipes still switch them, and weft tiles what is on them.
-workspaces = "virtual"
-
-# Which desktop hosts them, by Mission Control number. Ignored under "native".
-# An anchor naming a desktop you do not have falls back to your last one —
-# `weftctl doctor` says so when that happens.
-workspace-anchor = 1
+# Other macOS desktops and full-screen apps keep working. weft pauses on a
+# display while one of them is showing and picks up where it was when you come
+# back. It never switches desktops for you and needs no change to System
+# Integrity Protection.
 
 # Gap between neighbouring tiled windows, in pixels.
 inner-gap = 8
@@ -71,27 +55,9 @@ stack-offset = 8
 # app as an agent and want its windows tiled.
 manage-menubar-apps = false
 
-# Whether a rule's `space = "..."` may take the screen over to place a window.
-#
-# This is the one setting whose default follows another setting, because what
-# it costs depends entirely on `workspaces` above.
-#
-# Under "virtual", placing a window in another workspace on the same desktop is
-# bookkeeping plus a fraction of a millisecond. Nothing is visible, so there is
-# nothing to protect you from, and leaving this key out means ON.
-#
-# Under "native" it is the opposite. macOS refuses every API for moving another
-# app's window to another desktop, so weft does it the way you would: it holds
-# the window by the title bar and presses your "move a space" shortcut, which
-# means the screen visibly changes desktop and changes back, about a second per
-# desktop travelled. That is fine for `space move-window`, which you just typed
-# and are watching — and because you see it either way, that command follows
-# the window by default (add `--no-follow` to stay where you are). But a rule
-# fires when an app opens, possibly while you are typing in something else, and
-# having the desktop switch underneath you is worse than the window landing on
-# the wrong one. So under "native", leaving this key out means OFF.
-#
-# Setting it here pins it either way.
+# Whether a rule's `space = "..."` also switches to that workspace. The window
+# is placed either way — it is instant and invisible. Off, because a rule fires
+# when an app opens, which may be while you are typing somewhere else.
 # follow-space-rules = true
 
 # Ask GitHub once a day whether a newer weft has been released, and show a
@@ -195,21 +161,17 @@ reserve = 0
 "alt-shift-b" = "space layout bsp"
 "alt-shift-f" = "space layout float"
 
-# Spaces (desktops), by their Mission Control number. Bound 1-5 because that
-# covers most setups without leaving a row of dead keys; add 6-9 the same way
-# if you use more. These keep working if you name your spaces below.
+# Workspaces by number. A number that does not exist yet is created the first
+# time you use it, so these work with no [[space]] blocks at all — and keep
+# working if you name your workspaces below. Add 6-9 the same way.
 "alt-1" = "space focus 1"
 "alt-2" = "space focus 2"
 "alt-3" = "space focus 3"
 "alt-4" = "space focus 4"
 "alt-5" = "space focus 5"
 
-# Send the focused window to a space, and go with it.
-#
-# Moving a window between desktops changes the desktop on the way — macOS
-# leaves weft no quieter route — so going with it is the default: coming back
-# is one more visible switch to end up where you probably did not want to be.
-# Add `--no-follow` to a bind that should send the window and leave you here.
+# Send the focused window to a workspace, and go with it. Add `--no-follow`
+# to a bind that should send the window and leave you where you are.
 "alt-shift-1" = "space move-window 1"
 "alt-shift-2" = "space move-window 2"
 "alt-shift-3" = "space move-window 3"
@@ -274,10 +236,8 @@ reserve = 0
 # regular expressions, so "Foo|Bar" matches either.
 #
 #   manage = false   leave the window completely alone — never tiled, never moved
-#   space = "..."    move it there when it opens. Off unless you set
-#                    follow-space-rules = true under [general]: weft moves a
-#                    window by holding it and switching desktops, and doing
-#                    that unprompted takes the screen over while you type.
+#   space = "..."    put it in that workspace when it opens. The screen
+#                    stays where it is unless follow-space-rules = true.
 #
 # Weft already floats anything that is not a real window on its own: a dialog
 # or popover (its AX subrole is not a standard window), a window the app
@@ -318,14 +278,12 @@ manage = false
 # ------------------------------------------------------------------------------
 # Spaces
 # ------------------------------------------------------------------------------
-# Optional. With no [[space]] blocks — the default — every desktop keeps its
-# Mission Control number as its name, which is what the alt-1..5 binds use.
+# Optional. With no [[space]] blocks — the default — workspaces are numbered,
+# which is what the alt-1..5 binds use, and a number is created when first used.
 #
-# Declaring them gives each desktop a name you can use in rules and keybinds,
-# and a layout of its own. Names are handed out in Mission Control order, so
-# there must be at least as many desktops as blocks: extra blocks have nowhere
-# to land, and anything naming them silently does nothing. Add desktops in
-# Mission Control first, then uncomment.
+# Declaring them gives each workspace a name you can use in rules and keybinds,
+# and a layout of its own. The order here is what `space focus 1`, `2`, … count
+# in. Declare as many as you like: they are weft's, not macOS desktops.
 #
 # [[space]]
 # label = "main"

@@ -87,28 +87,9 @@ final class ConfigStore: ObservableObject {
     @Published var mouseBorderResize = true
     @Published var mouseFollowsFocus = true
     @Published var focusFollowsMouse = false
-    /// `native` — one workspace per macOS desktop, the way weft worked before
-    /// 0.9.11 — or `virtual`, where several workspaces share one desktop and
-    /// switching between them parks windows instead of changing desktop.
-    ///
-    /// Held as the raw TOML string rather than the `WorkspacesMode` enum, for
-    /// the same reason `bordersBackend` is: the picker's tags are the strings
-    /// the file holds, and one representation cannot drift from the other.
-    @Published var workspacesMode = "virtual"
-    /// Which desktop, by Mission Control number, hosts the virtual
-    /// workspaces. Meaningless under `native`.
-    @Published var workspaceAnchor = 1
-    /// Whether a rule's `space = "…"` may take the screen over to place a
-    /// window. The default depends on the mode — under `virtual` a rule-driven
-    /// move is a park, which costs nothing, so weftd turns it on when the key
-    /// is absent.
+    /// Whether a rule's `space = "…"` also switches to that workspace. The
+    /// window is placed either way; this is only whether the screen follows.
     @Published var followSpaceRules = false
-    /// Set once the user touches the toggle. Until then the key is left out of
-    /// the file entirely, because writing it is what cancels weftd's
-    /// mode-aware default: reading `?? false` and then writing unconditionally
-    /// meant merely opening this window pinned the setting to `false` under
-    /// `virtual`, and nothing said so.
-    private var followSpaceRulesEdited = false
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
 
@@ -216,18 +197,7 @@ final class ConfigStore: ObservableObject {
         mouseBorderResize = g?.bool("mouse-border-resize") ?? true
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
-        workspacesMode = g?.string("workspaces") == "native" ? "native" : "virtual"
-        workspaceAnchor = max(1, g?.int("workspace-anchor") ?? 1)
-        // Absent means "let weftd decide", and weftd decides by mode. Showing
-        // the toggle in the state the daemon is actually in keeps the form
-        // honest without writing the key to say so.
-        if let declared = g?.bool("follow-space-rules") {
-            followSpaceRules = declared
-            followSpaceRulesEdited = true
-        } else {
-            followSpaceRules = workspacesMode == "virtual"
-            followSpaceRulesEdited = false
-        }
+        followSpaceRules = g?.bool("follow-space-rules") ?? false
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
     }
@@ -415,19 +385,11 @@ final class ConfigStore: ObservableObject {
         s.set("mouse-border-resize", bool: mouseBorderResize)
         s.set("mouse-follows-focus", bool: mouseFollowsFocus)
         s.set("focus-follows-mouse", bool: focusFollowsMouse)
-        s.set("workspaces", string: workspacesMode)
-        if workspacesMode == "virtual" {
-            s.set("workspace-anchor", int: workspaceAnchor)
-        } else {
-            // Nothing reads it under `native`, and leaving a number behind
-            // that does nothing is how a later "why is this ignored?" starts.
-            s.remove("workspace-anchor")
-        }
-        if followSpaceRulesEdited {
-            s.set("follow-space-rules", bool: followSpaceRules)
-        } else {
-            s.remove("follow-space-rules")
-        }
+        // Retired in 0.9.15: one workspace model, so these two only ever
+        // produce a warning. Saving from Settings is a good moment to drop them.
+        s.remove("workspaces")
+        s.remove("workspace-anchor")
+        s.set("follow-space-rules", bool: followSpaceRules)
         s.set("manage-menubar-apps", bool: manageMenubarApps)
         s.set("check-for-updates", bool: checkForUpdates)
         s.setRaw("reserve", TomlValue.sidesLiteral(
@@ -609,23 +571,8 @@ final class ConfigStore: ObservableObject {
         return nil
     }
 
-    /// The toggle's setter, rather than a plain `bind(\.followSpaceRules)`:
-    /// touching it is what earns the key a line in the file. Everything else
-    /// in `[general]` is written whether or not it was touched, because
-    /// everything else has one default; this one's default follows the mode.
     func setFollowSpaceRules(_ on: Bool) {
         followSpaceRules = on
-        followSpaceRulesEdited = true
-        markDirty()
-    }
-
-    /// Switching mode moves `follow-space-rules`' default with it, so an
-    /// untouched toggle follows rather than silently keeping the other mode's
-    /// answer. A toggle the user has set stays set — that is the point of
-    /// having set it.
-    func setWorkspacesMode(_ mode: String) {
-        workspacesMode = mode
-        if !followSpaceRulesEdited { followSpaceRules = mode == "virtual" }
         markDirty()
     }
 

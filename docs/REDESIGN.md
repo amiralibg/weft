@@ -1,8 +1,8 @@
 # Redesign — weft owns workspaces, macOS owns nothing weft needs
 
 **Status:** Proposal, 2026-09-23, against 0.9.12. Supersedes the "nest, do
-not replace" decision in `WORKSPACES.md`. Phase 1 shipped in 0.9.13 and phase 2
-in 0.9.14; the rest is not built yet.
+not replace" decision in `WORKSPACES.md`. Phase 1 shipped in 0.9.13, phase 2 in
+0.9.14, and phases 3 onward land together in 0.9.15.
 
 ## Requirements
 
@@ -465,7 +465,32 @@ Each phase can ship on its own as the next 0.9.x release.
      workspace.
 3. **One mode, one managed desktop per display.** Delete the native-desktop
    layer. Space focus and move are state plus hide/show. Add the paused state
-   for other desktops. This is the release that fixes switching and moving.
+   for other desktops. This is the release that fixes switching and moving. **Done for 0.9.15:**
+   - `adoptDisplays` replaces `adoptDesktops`: each display gets a managed
+     desktop (kept while it exists, never a fullscreen space), workspaces are
+     never deleted when a display or desktop goes — they rehome — and every
+     managed desktop always has a workspace, preferring one that costs no
+     window moves.
+   - `reconcileWorkspaces` follows the rule in "Model": membership is weft's,
+     a window on no managed desktop is in no workspace, a window dragged to
+     another display joins what shows there, and windows weft is moving
+     (`inFlight`) keep their workspace.
+   - `space focus` shows a hidden workspace on the focused display, or moves
+     focus to the display already showing it. `space move-window`, `move
+     display`, rules and `app toggle` are state plus a park or a frame write.
+     `move space display` works, as a swap. `sticky` works: a window in no
+     workspace. A paused display refuses workspace commands with a message
+     that says which desktop to go back to.
+   - Numbered workspaces are created on first use (`space focus 4`), so the
+     shipped `alt-1…5` binds work with no `[[space]]` blocks.
+   - Membership persists across restarts in `membership.json`, stamped with
+     the boot time because window ids are reused after a reboot. The first
+     sweep re-files every window and parks the hidden workspaces again.
+   - Deleted: `DragMove`, `DockSwipe`, `DockSwipePayload`, `SpaceShortcut`,
+     `ScriptingAddition`, the desktop-switching half of `SpaceControl`, the
+     3-second space-watch timer, `workspaces`/`workspace-anchor` (now warned
+     and ignored; `weftctl config tidy` removes them), and two private
+     symbols nothing calls any more.
 4. **Displays and fullscreen.** Display keying by UUID, park corners, the
    coalesced reconfiguration handler, unplug and replug behaviour,
    `[[space]] display =`, `FullscreenMemo`, borderless-fullscreen floating,

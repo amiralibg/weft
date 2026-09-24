@@ -43,36 +43,38 @@ public struct SpaceStatus: Codable, Sendable, Equatable {
 }
 
 extension SpaceStatus {
-    /// The wire's view of one desktop: whatever workspace is showing on it.
+    /// Every workspace, in the order `space focus N` counts, as the socket
+    /// reports it to `query spaces` and `query bar-state`.
     ///
-    /// A desktop weft has not swept yet has no workspace and so no layout, and
-    /// reports the kind it *would* get — the `[[space]] layout` declaration for
-    /// its label, else the general default. `fallbackWindows` is what the
-    /// WindowServer says is there, used when weft has no membership of its own
-    /// to report.
-    public static func of(
-        desktop sid: SpaceID,
+    /// `id` is the managed desktop the workspace lives on — what weft-bar and
+    /// weftctl have always decoded, as `UInt64` — so several workspaces on one
+    /// desktop share it; they are told apart by `label`. `current` means
+    /// showing on its display right now. A workspace holding nothing reports
+    /// the kind it *would* get: its override, else its `[[space]] layout`,
+    /// else the default — an empty tree's kind is `bsp`, which told Settings
+    /// `bsp` for a workspace the file declares `float`.
+    public static func workspaces(
         in sp: SpaceState,
-        display: String,
-        current: Bool,
         declaredLayout: (String) -> LayoutKind?,
-        defaultLayout: LayoutKind,
-        fallbackWindows: [WindowID] = []
-    ) -> SpaceStatus {
-        let ws = sp.workspace(on: sid)
-        let label = ws?.label ?? "\(sid)"
-        let layout = ws?.layout.kind
-            ?? ws?.overrideKind
-            ?? declaredLayout(label)
-            ?? defaultLayout
-        return SpaceStatus(
-            id: sid,
-            label: label,
-            layout: layout.rawValue,
-            windows: ws?.members.sorted() ?? fallbackWindows,
-            current: current,
-            display: display
-        )
+        defaultLayout: LayoutKind
+    ) -> [SpaceStatus] {
+        sp.wsOrder.compactMap { wsid -> SpaceStatus? in
+            guard let ws = sp.workspaces[wsid], let display = sp.displayBySpace[ws.desktop] else {
+                return nil
+            }
+            let label = ws.label.isEmpty ? "\(wsid.raw)" : ws.label
+            let layout = ws.layout.windows.isEmpty
+                ? (ws.overrideKind ?? declaredLayout(label) ?? defaultLayout)
+                : ws.layout.kind
+            return SpaceStatus(
+                id: ws.desktop,
+                label: label,
+                layout: layout.rawValue,
+                windows: ws.members.sorted(),
+                current: sp.showingDisplay(of: wsid) != nil,
+                display: display
+            )
+        }
     }
 }
 
@@ -142,46 +144,47 @@ public struct WindowStatus: Codable, Sendable, Equatable {
     }
 }
 
-/// `query workspaces`: which model the running daemon is actually in.
-///
-/// The file is not the answer. weftd rebuilds its workspace set when
-/// `workspaces` or `workspace-anchor` changes, but a reload that has not
-/// landed yet — or a daemon that has not been restarted — leaves the two
-/// disagreeing, and both the Settings window and `doctor` have to be able to
-/// say which one the user is looking at.
-///
-/// `anchor` is the desktop actually hosting the workspaces, which is not
-/// necessarily `requestedAnchor`: `adoptDesktops` clamps an anchor that names
-/// no desktop, because a sweep has to produce a usable state whatever the file
-/// says. The two fields differing is the only evidence that happened.
+/// `query workspaces`: how weft's workspaces sit on this Mac's displays, from
+/// the daemon's point of view. Settings draws its display picture from this
+/// and `weftctl doctor` reports it.
 public struct WorkspacesStatus: Codable, Sendable, Equatable {
-    /// `native` or `virtual` — the mode the daemon is running, not the file's.
-    public var mode: String
-    /// Mission Control ordinal of the desktop hosting virtual workspaces.
-    /// Meaningless under `native`, where every desktop hosts its own.
-    public var anchor: Int
-    /// What `workspace-anchor` asked for. Differs from `anchor` when it named
-    /// a desktop that does not exist.
-    public var requestedAnchor: Int
-    /// Live native desktops, i.e. what Mission Control shows.
-    public var desktops: Int
-    /// Live workspaces. Equals `desktops` under `native`.
-    public var workspaces: Int
+    public struct Display: Codable, Sendable, Equatable {
+        public var uuid: String
+        /// 1-based, west to east — what `focus display N` counts.
+        public var index: Int
+        /// Which of this display's macOS desktops weft manages, 1-based in
+        /// Mission Control order. Nil when it could not be placed.
+        public var managedDesktop: Int?
+        /// How many macOS desktops this display has. More than one is fine;
+        /// weft pauses on the others.
+        public var desktops: Int
+        /// Showing another desktop or a fullscreen app right now.
+        public var paused: Bool
+        /// Label of the workspace this display shows (or would, once back).
+        public var showing: String?
 
-    public init(
-        mode: String,
-        anchor: Int,
-        requestedAnchor: Int,
-        desktops: Int,
-        workspaces: Int
-    ) {
-        self.mode = mode
-        self.anchor = anchor
-        self.requestedAnchor = requestedAnchor
-        self.desktops = desktops
-        self.workspaces = workspaces
+        public init(
+            uuid: String, index: Int, managedDesktop: Int?, desktops: Int,
+            paused: Bool, showing: String?
+        ) {
+            self.uuid = uuid
+            self.index = index
+            self.managedDesktop = managedDesktop
+            self.desktops = desktops
+            self.paused = paused
+            self.showing = showing
+        }
     }
 
-    /// Whether the anchor the daemon used is not the one that was asked for.
-    public var anchorClamped: Bool { mode == "virtual" && anchor != requestedAnchor }
+    /// How many workspaces exist.
+    public var workspaces: Int
+    public var displays: [Display]
+
+    public init(workspaces: Int, displays: [Display]) {
+        self.workspaces = workspaces
+        self.displays = displays
+    }
+
+    /// Displays with desktops weft pauses on.
+    public var displaysWithExtraDesktops: [Display] { displays.filter { $0.desktops > 1 } }
 }

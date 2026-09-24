@@ -5,35 +5,16 @@ import Foundation
 import SkyLightShim
 import WeftCore
 
-/// Privileged-looking window/space operations from an ORDINARY connection.
+/// What the WindowServer says about displays and desktops. Reads only.
 ///
-/// The WindowServer refuses all three, and two of them refuse dishonestly:
-/// - SLSMoveWindowsToManagedSpace: silently ignored (membership unchanged).
-/// - SLSSetWindowTags sticky bit: returns rc=0 and drops the tag.
-/// - SLSOrderWindow: rc=1000 (see AXApply).
-///
-/// That used to read "all three need a Dock-injected connection". They do not,
-/// and weft ships no scripting addition:
-/// - Moving a window to another desktop is done by holding it and pressing the
-///   bound "move a space" shortcut (`DragMove`), which needs only
-///   Accessibility. Sixteen SkyLight routes were tried first and every one was
-///   refused — spikes/RESULTS.md §S8.
-/// - Sticky is macOS's own per-application setting (Dock → Options → All
-///   Desktops). weft does not implement a per-window version because there
-///   isn't one to implement.
-/// - Ordering another app's window remains unavailable.
-///
-/// Every mutating call below VERIFIES via re-read and returns Bool. That is not
-/// belt-and-braces: three APIs in this area return kCGErrorSuccess while doing
-/// nothing, and one predicate answers "supported" about a tag it then drops, so
-/// a return code here is evidence of nothing. No silent no-ops, ever.
+/// weft does not change desktops and does not move windows between them: the
+/// WindowServer refuses every route from an ordinary connection (S8), and the
+/// routes that remain — holding a title bar and pressing the user's space
+/// shortcut, or a synthetic Dock gesture — were removed for breaking on macOS
+/// updates (REDESIGN.md). Workspaces live on one managed desktop per display
+/// instead, and everything that changes what is on screen is a park, an
+/// unpark or a frame write.
 public enum SpaceControl {
-    /// Whether `SLSMoveWindowsToManagedSpace` moves a window on this machine.
-    /// Nil until it has been tried once; false on every macOS weft has met.
-    private static let probeLock = NSLock()
-    private nonisolated(unsafe) static var slsMoveWorks: Bool?
-
-    // MARK: - Reads (unprivileged, always work)
 
     public static func spacesForWindow(_ wid: WindowID) -> [SpaceID] {
         let cid = WorldReader.cid
@@ -128,311 +109,11 @@ public enum SpaceControl {
         return CFUUIDCreateString(nil, unmanaged.takeRetainedValue()) as String?
     }
 
-    // MARK: - Space Focus (weft-sa, else weft's own Dock swipe, else ctrl+N)
-
-    /// Switch to space `sid`, instantly wherever this Mac allows it.
-    ///
-    /// weft-sa first when it is loaded and its Dock hooks resolved; otherwise
-    /// weft's own synthetic Dock swipe, which needs neither SIP off nor an
-    /// addition. The ⌃N keystroke is the caller's last resort, not this one's.
-    ///
-    /// Returns true **only if the WindowServer actually reports `sid` as
-    /// current afterwards**. An addition acknowledges a write whether or not
-    /// it acted on it, and a swipe Dock refused looks exactly like one it
-    /// took, so trusting either is how "alt-3 does nothing but weft thinks it
-    /// switched" happened: the daemon retiled a space that was never brought
-    /// to the front. Verify, then report.
-    @discardableResult
-    public static func focusSpace(_ sid: SpaceID) -> Bool {
-        if ScriptingAddition.focusSpace(sid), waitForCurrentSpace(sid) { return true }
-        return DockSwipe.focusSpace(sid)
-    }
-
-    /// True once any display reports `sid` as its current space. The Dock
-    /// transition is fast but not synchronous with the socket reply, so poll
-    /// briefly rather than sleeping a fixed amount: the common case returns on
-    /// the first or second read (~2 ms), and a real failure costs 120 ms once
-    /// before we fall back to the keystroke path.
-    public static func waitForCurrentSpace(_ sid: SpaceID, timeout: TimeInterval = 0.12) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if WorldReader.currentSpaces().values.contains(sid) { return true }
-            usleep(2_000)
-        } while Date() < deadline
-        return false
-    }
-
-    // MARK: - Mutations (verified by re-reading; false means nothing changed)
-
-    /// Move a window to another space. Verified by re-reading membership;
-    /// false leaves nothing changed.
-    /// - Parameter allowDrag: whether to fall back to the drag route, which
-    ///   takes the screen over for a moment. True for anything the user just
-    ///   asked for; false for anything weft decided on its own — a rule firing
-    ///   because an app opened must not switch the desktop out from under
-    ///   someone who is typing. See `[general] follow-space-rules`.
-    /// - Parameter follow: leave the user on the destination. Costs one
-    ///   desktop change *fewer* than not following, because the drag route
-    ///   ends there and has to switch back to undo it.
-    @discardableResult
-    public static func moveWindowToSpace(
-        _ wid: WindowID, _ sid: SpaceID, allowDrag: Bool = true, follow: Bool = false
-    ) -> Bool {
-        // The two silent routes move the window without moving the screen, so
-        // following them is a separate switch. They are also refused on
-        // macOS 27, so in practice this is dead weight kept for a machine with
-        // an addition loaded.
-        func followIfAsked() -> Bool {
-            guard follow else { return true }
-            return focusSpace(sid)
-        }
-        // Already there — and worth asking before anything else, because the
-        // work below is a synthetic drag across desktops.
-        if spacesForWindow(wid).contains(sid) {
-            _ = followIfAsked()
-            return true
-        }
-        if ScriptingAddition.moveWindowToSpace(wid, sid) {
-            usleep(60_000)
-            if spacesForWindow(wid).contains(sid) {
-                _ = followIfAsked()
-                return true
-            }
-        }
-        // Tried once per daemon, not once per move.
-        //
-        // This call is refused on macOS 27 and returns void, so the only way
-        // to know is to make it and re-read — which costs a 150 ms settle. S8
-        // established it never works here, but "never" is a fact about today's
-        // macOS and the probe is what survives the next release, so it is kept
-        // and *cached*: one 150 ms answer for the life of the daemon instead
-        // of 150 ms on every single move, in front of a gesture that is
-        // already slow enough to be complained about.
-        if probeLock.withLock({ slsMoveWorks }) != false {
-            let arr = [NSNumber(value: wid)] as CFArray
-            SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), arr, sid)
-            usleep(150_000)
-            let landed = spacesForWindow(wid).contains(sid)
-            probeLock.withLock { slsMoveWorks = landed }
-            if landed {
-                _ = followIfAsked()
-                return true
-            }
-        }
-        // Last, because it is the one that works and the one the user sees.
-        //
-        // Nothing above moves a window from an ordinary connection on macOS 27:
-        // sixteen SkyLight routes were tried and refused, three of them by
-        // returning kCGErrorSuccess and doing nothing (spikes/RESULTS.md §S8).
-        // What remains is the gesture a person uses — hold the window, press
-        // the bound "move a space" shortcut, let go — which costs two visible
-        // desktop changes and needs no scripting addition and no SIP change.
-        guard allowDrag else { return false }
-        return DragMove.moveWindow(wid, to: sid, stayOnDestination: follow)
-    }
-
-    /// Sticky bit (1 << 11): window appears on every space. Verified by
-    /// membership count. False leaves nothing changed.
-    @discardableResult
-    public static func setSticky(_ wid: WindowID, _ on: Bool) -> Bool {
-        if ScriptingAddition.setSticky(wid, on) {
-            usleep(60_000)
-            let count = spacesForWindow(wid).count
-            if on ? count > 1 : count <= 1 {
-                return true
-            }
-        }
-        let cid = SLSMainConnectionID()
-        var tags: UInt64 = 1 << 11
-        if on {
-            _ = SLSSetWindowTags(cid, wid, &tags, 64)
-        } else {
-            _ = SLSClearWindowTags(cid, wid, &tags, 64)
-        }
-        usleep(150_000)
-        let count = spacesForWindow(wid).count
-        return on ? count > 1 : count <= 1
-    }
-
-    /// Move a whole space to another display (yabai's `space --display`).
-    ///
-    /// Always false on macOS 26, and the reason is a missing symbol rather
-    /// than a silent WindowServer no-op: the compat-id pair this needs lost
-    /// `SLSSetDisplaySpaceCompatID` (see SkyLightShim.h). Kept as a real
-    /// function so the verb has one honest answer and starts working the day
-    /// a replacement is found, instead of pretending in the command layer.
-    @discardableResult
-    public static func moveSpaceToDisplay(_ sid: SpaceID, _ displayUUID: String) -> Bool {
-        displayOfSpace(sid) == displayUUID
-    }
-
     /// Display UUID owning `sid`, straight from the WindowServer.
     public static func displayOfSpace(_ sid: SpaceID) -> String? {
         SLSCopyManagedDisplayForSpace(WorldReader.cid, sid) as String?
     }
 
-    // MARK: - Degraded space focus (unprivileged, always "works")
-
-    /// Whether macOS will act on the ⌃N the keystroke fallback posts.
-    ///
-    /// "Switch to Desktop N" ships **off** on macOS, and without it — and
-    /// without the scripting addition — `space focus` cannot move the user
-    /// anywhere at all: the keystroke goes out and nothing receives it. That
-    /// was worth knowing up front rather than one failed keybind at a time,
-    /// because the failure is otherwise completely silent.
-    ///
-    /// Symbolic hot key ids 118…126 are Switch to Desktop 1…9. An id absent
-    /// from the dictionary is one macOS has never been asked about, which
-    /// means the shipped default: off.
-    public static func missionControlSwitchShortcuts() -> Set<Int> {
-        guard let hotkeys = UserDefaults(suiteName: "com.apple.symbolichotkeys")?
-            .dictionary(forKey: "AppleSymbolicHotKeys")
-        else { return [] }
-        var on: Set<Int> = []
-        for n in 118...126 {
-            guard let entry = hotkeys["\(n)"] as? [String: Any],
-                  let enabled = entry["enabled"] as? Bool, enabled
-            else { continue }
-            on.insert(n - 117)
-        }
-        return on
-    }
-
-    /// True when `space focus` has *some* way to switch desktops: weft-sa,
-    /// weft's Dock swipe, or at least one Mission Control shortcut.
-    public static func canFocusSpaces() -> Bool {
-        ScriptingAddition.supportsSpaceFocus() || DockSwipe.isSupported
-            || !missionControlSwitchShortcuts().isEmpty
-    }
-
-    /// Focus a space by its 1-based Mission Control number via ctrl+N.
-    /// Costs the ~250ms system animation (the SA path makes it instant).
-    /// Returns false for out-of-range numbers.
-    ///
-    /// Whether the keystroke reaches anything is a separate question, and one
-    /// `missionControlSwitchShortcuts()` can now answer up front — posting a
-    /// key nothing is bound to looks identical to success from here.
-    @discardableResult
-    public static func focusSpaceNumber(_ n: Int) -> Bool {
-        // Hardware keycodes for 1..9 (ANSI positions, layout-independent).
-        let keycodes: [Int64] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
-        guard (1...9).contains(n) else { return false }
-        // Posting keys without Accessibility is refused, and the refusal is a
-        // system dialog. Nothing a keypress can do is worth one of those.
-        guard AXIsProcessTrusted() else { return false }
-        let keycode = CGKeyCode(keycodes[n - 1])
-        let flags = CGEventFlags.maskControl
-        // Tag both events with the "WEFT" marker the input tap checks for.
-        // Without it our own synthetic ctrl+N re-enters our tap and, if the
-        // user has bound anything on ctrl+digit, fires it recursively.
-        let marker: Int64 = 0x57454654
-        if let down = CGEvent(keyboardEventSource: nil, virtualKey: keycode, keyDown: true) {
-            down.flags = flags
-            down.setIntegerValueField(.eventSourceUserData, value: marker)
-            down.post(tap: CGEventTapLocation.cgSessionEventTap)
-        }
-        usleep(20_000)
-        if let up = CGEvent(keyboardEventSource: nil, virtualKey: keycode, keyDown: false) {
-            up.flags = flags
-            up.setIntegerValueField(.eventSourceUserData, value: marker)
-            up.post(tap: CGEventTapLocation.cgSessionEventTap)
-        }
-        return true
-    }
-}
-
-/// Capability record: what this connection can actually do, from probe
-/// evidence — not from documentation. Served by `query capability` so the
-/// M4-SA slice knows exactly what to unlock.
-public struct PlatformCapability: Codable, Sendable {
-    public var moveWindowToSpace: Bool
-    public var moveWindowToSpaceNote: String
-    public var sticky: Bool
-    public var stickyNote: String
-    public var orderWindow: Bool
-    public var orderWindowNote: String
-    public var focusSpaceKeystroke: Bool
-    public var focusSpaceKeystrokeNote: String
-    public var moveSpaceToDisplay: Bool
-    public var moveSpaceToDisplayNote: String
-
-    /// What the ⌃N fallback can actually reach right now. Reported rather
-    /// than assumed: the shortcuts it needs are off on a stock macOS, and a
-    /// note that says "needs them enabled" reads the same whether they are or
-    /// not.
-    static func keystrokeNote() -> String {
-        let on = SpaceControl.missionControlSwitchShortcuts().sorted()
-        guard !on.isEmpty else {
-            return "unavailable: this macOS release does not take weft's Dock swipe (26.6 or later "
-                + "does), weft-sa is not loaded, and System Settings → Keyboard → Shortcuts → "
-                + "Mission Control → 'Switch to Desktop N' is off, so the ⌃N fallback reaches nothing."
-        }
-        let covered = on.map(String.init).joined(separator: ", ")
-        return "degraded: ⌃N keystroke, ~250ms animation; desktops \(covered) only "
-            + "(the rest need 'Switch to Desktop N' enabled)"
-    }
-
-    /// How `space focus` switches on this Mac, best first.
-    static var focus: (available: Bool, note: String) {
-        if ScriptingAddition.supportsSpaceFocus() {
-            return (true, "instant, via weft-sa")
-        }
-        if DockSwipe.isSupported {
-            return (true, "instant, via weft's Dock swipe (no scripting addition, SIP on)")
-        }
-        return (!SpaceControl.missionControlSwitchShortcuts().isEmpty, keystrokeNote())
-    }
-
-    /// Not an SA gap: the symbol the compat-id sequence needs is gone from
-    /// SkyLight on macOS 26, so no connection of any privilege can do it.
-    static let spaceToDisplayNote =
-        "SkyLight no longer exports SLSSetDisplaySpaceCompatID (macOS 26.5.2, "
-        + "dyld_info -exports) — the compat-id pair `space --display` needs is "
-        + "half missing, and weft-sa would not change that. Move the windows instead."
-
-    public static var current: PlatformCapability {
-        let focus = Self.focus
-        if ScriptingAddition.isAvailable() {
-            return PlatformCapability(
-                moveWindowToSpace: true,
-                moveWindowToSpaceNote: "enabled via weft-sa (instant, non-activating)",
-                sticky: true,
-                stickyNote: "enabled via weft-sa",
-                orderWindow: true,
-                orderWindowNote: "enabled via weft-sa",
-                focusSpaceKeystroke: focus.available,
-                focusSpaceKeystrokeNote: focus.note,
-                moveSpaceToDisplay: false,
-                moveSpaceToDisplayNote: Self.spaceToDisplayNote
-            )
-        }
-        // Read once: it parses a preferences dictionary, and it is asked about
-        // twice below.
-        let drag = DragMove.isSupported
-        return PlatformCapability(
-            moveWindowToSpace: drag,
-            moveWindowToSpaceNote: drag
-                ? "enabled with SIP on: weft holds the window and presses the bound 'move a space' "
-                    + "shortcut, so the desktop visibly changes and changes back"
-                : "SLSMoveWindowsToManagedSpace is silently ignored from an ordinary connection, and "
-                    + "no 'Move left/right a space' shortcut is bound to carry a held window instead "
-                    + "(System Settings → Keyboard → Keyboard Shortcuts → Mission Control)",
-            sticky: false,
-            stickyNote: "SLSSetWindowTags' sticky bit is accepted and dropped (rc=0, tag never "
-                + "set). Dock's per-application 'All Desktops' does work — confirmed taking a "
-                + "window from 1 desktop to 5 — but it is per application, needs the app to have "
-                + "a bundle identifier, and weft does not drive it yet",
-            orderWindow: false,
-            orderWindowNote: "SLSOrderWindow rc=1000 from regular connection (M3 probe)",
-            focusSpaceKeystroke: focus.available,
-            focusSpaceKeystrokeNote: focus.note,
-            moveSpaceToDisplay: false,
-            moveSpaceToDisplayNote: Self.spaceToDisplayNote
-        )
-    }
-}
-
-extension SpaceControl {
     /// How many ordinary desktops exist right now, across every display.
     ///
     /// Fullscreen and tiled spaces (type != 0) are not desktops: nothing can be
@@ -469,7 +150,7 @@ extension SpaceControl {
     ///
     /// Deliberately the cheapest question that detects a space change: no
     /// window list, no AX, no layout. Measured at ~40 µs on a two-display
-    /// setup, which is what makes it affordable to ask on a timer.
+    /// setup.
     public static func currentSpaceByDisplay() -> [String: SpaceID] {
         let cid = SLSMainConnectionID()
         guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [:] }

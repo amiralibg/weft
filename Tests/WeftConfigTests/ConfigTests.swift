@@ -354,16 +354,11 @@ import Testing
     }
 }
 
-/// The virtual default has to survive a config that never opens `[general]`.
-///
-/// It used to be decided inside the `if let general` branch, so a file with no
-/// `[general]` table skipped it entirely — and that is precisely the file most
-/// likely to be in virtual mode now that virtual is what an unset key means.
-@Test func virtualDefaultsSurviveAConfigWithNoGeneralTable() throws {
-    let bare = try loadConfig("[keys]\n\"alt-h\" = \"focus west\"\n")
-    #expect(bare.general.workspaces == .virtual)
-    #expect(bare.general.followSpaceRules == true)
-    #expect(try loadConfig("").general.workspaces == .virtual)
+/// A rule places its window either way; following is off unless asked for,
+/// with or without a `[general]` table.
+@Test func followSpaceRulesIsOffUnlessAskedFor() throws {
+    #expect(try loadConfig("[keys]\n\"alt-h\" = \"focus west\"\n").general.followSpaceRules == false)
+    #expect(try loadConfig("").general.followSpaceRules == false)
 }
 
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
@@ -591,40 +586,19 @@ private func exampleText() throws -> String {
     }
 }
 
-@Test func parsesWorkspacesAndWorkspaceAnchor() throws {
-    // Unset means virtual as of 0.9.12. An existing install keeps `native`
-    // because the installer writes it into the file, not because the parser
-    // assumes it — see `weftctl config pin-workspaces`.
-    let cfgDefault = try loadConfig("[general]\ninner-gap = 8\n")
-    #expect(cfgDefault.general.workspaces == .virtual)
-    #expect(cfgDefault.general.workspaceAnchor == 1)
-    #expect(cfgDefault.general.followSpaceRules == true)
-
-    let cfgNative = try loadConfig("[general]\nworkspaces = \"native\"\n")
-    #expect(cfgNative.general.workspaces == .native)
-    #expect(cfgNative.general.followSpaceRules == false)
-
-    let cfgVirtual = try loadConfig("""
+/// 0.9.11–0.9.14 chose a workspace model with these two keys. There is one
+/// model now: a config that still carries them loads, with a warning on the
+/// line, instead of failing.
+@Test func retiredWorkspaceKeysWarnAndAreIgnored() throws {
+    let cfg = try loadConfig("""
         [general]
-        workspaces = "virtual"
+        workspaces = "native"
         workspace-anchor = 2
+        inner-gap = 8
         """)
-    #expect(cfgVirtual.general.workspaces == .virtual)
-    #expect(cfgVirtual.general.workspaceAnchor == 2)
-    // Under virtual, follow-space-rules defaults to true when omitted
-    #expect(cfgVirtual.general.followSpaceRules == true)
-
-    let cfgExplicitFalse = try loadConfig("""
-        [general]
-        workspaces = "virtual"
-        follow-space-rules = false
-        """)
-    #expect(cfgExplicitFalse.general.followSpaceRules == false)
-
-    #expect(throws: ConfigError.self) {
-        try loadConfig("[general]\nworkspaces = \"magic\"\n")
-    }
-    #expect(throws: ConfigError.self) {
-        try loadConfig("[general]\nworkspace-anchor = 0\n")
-    }
+    #expect(cfg.warnings.filter { $0.message.contains("no longer a setting") }.count == 2)
+    #expect(cfg.warnings.allSatisfy { $0.line > 0 })
+    #expect(cfg.general.innerGap == 8)
+    // Even a value no build ever accepted: it is ignored, not validated.
+    #expect(try loadConfig("[general]\nworkspaces = \"magic\"\n").warnings.count == 1)
 }

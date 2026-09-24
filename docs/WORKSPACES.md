@@ -1,8 +1,12 @@
 # Workspaces — weft's own, inside macOS's
 
-**Status:** Built (Phases 1–5), released in 0.9.11, and the default for new
-installs since 0.9.12 — see "The default" below. S9 in `spikes/RESULTS.md`
-establishes that the mechanism works.
+**Status:** Superseded in 0.9.15 by [`REDESIGN.md`](REDESIGN.md). The "nest,
+do not replace" model below — workspaces on an anchor desktop beside native
+desktops weft still drove — kept every fragile part of the native layer and is
+gone; weft now keeps its workspaces on one managed desktop per display and
+never drives macOS desktops. What still holds from this document is the park
+and unpark mechanism and its crash-safe ledger (Phase 2), which the redesign
+builds on unchanged.
 
 ## The problem, stated once
 

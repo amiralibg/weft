@@ -62,10 +62,9 @@ echo "==> seeding config"
 mkdir -p "$HOME/.config/weft"
 if [ -e "$HOME/.config/weft/weft.toml" ]; then
     echo "    kept existing ~/.config/weft/weft.toml"
-    # 0.9.12 made `workspaces = "virtual"` the default; an existing config is
-    # pinned to `native` so an upgrade never changes what alt-2 means under
-    # someone. No-op if the key is already set.
-    "$BINDIR/weftctl" config pin-workspaces native || true
+    # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
+    # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
+    "$BINDIR/weftctl" config tidy || true
 elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ]; then
     # A yabai user's own setup is the only config that will feel right. Seeding
     # the example instead — which this used to do unconditionally — hands them
@@ -75,8 +74,9 @@ elif [ -e "$HOME/.config/yabai/yabairc" ] || [ -e "$HOME/.config/skhd/skhdrc" ];
     # looks broken while working exactly as configured.
     echo "    found yabai/skhd config — migrating it"
     "$BINDIR/weftctl" migrate --write
-    # Migrated binds switch native desktops one-to-one.
-    "$BINDIR/weftctl" config pin-workspaces native || true
+    # Drop the two workspace-model keys 0.9.15 retired (0.9.11–0.9.14 wrote
+    # them); weft warns about them otherwise. Comment-preserving, no-op if absent.
+    "$BINDIR/weftctl" config tidy || true
 else
     cp "$DIR/examples/weft.toml" "$HOME/.config/weft/weft.toml"
     echo "    wrote ~/.config/weft/weft.toml — a generic starting point:"

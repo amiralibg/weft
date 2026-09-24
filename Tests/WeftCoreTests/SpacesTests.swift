@@ -1,13 +1,18 @@
 import Testing
 @testable import WeftCore
 
-/// The identity mapping every test below is written against: one workspace per
-/// desktop, in the order given. `adoptDesktops` is the only thing that creates
-/// a workspace, so it is also the only way to build a state to test with.
+/// One display per desktop id, each showing its own — so every desktop is a
+/// managed one and shows one workspace. `adoptDisplays` is the only thing that
+/// creates a workspace, so it is also the only way to build a state to test
+/// with.
 private func desktops(_ sids: [SpaceID], names: [String] = []) -> SpaceState {
     var s = SpaceState()
-    s.adoptDesktops(sids, names: names)
+    s.adoptDisplays(displays(sids), names: names)
     return s
+}
+
+private func displays(_ sids: [SpaceID]) -> [DisplayDesktops] {
+    sids.map { DisplayDesktops(uuid: "D\($0)", desktops: [$0], current: $0) }
 }
 
 /// The workspace showing on a desktop, for a test that needs to name one.
@@ -28,7 +33,6 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     // files — which are keyed by ordinal — cannot come back scrambled.
     #expect(s.wsOrder == [ws(s, 5), ws(s, 3), ws(s, 7)])
     #expect(s.persistedNames() == ["code", "web", "3"])
-    #expect(s.ordinal(of: 3) == 2)
 }
 
 /// One workspace per desktop, and each one knows where it lives. The identity
@@ -51,7 +55,7 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     var s = desktops([5, 3], names: ["code", "web"])
     let before = ws(s, 5)
     s.setLayout(.float(FloatState()), on: 5)
-    s.adoptDesktops([5, 3], names: nil)
+    s.adoptDisplays(displays([5, 3]), names: nil)
     #expect(ws(s, 5) == before)
     #expect(s.workspace(on: 5)?.label == "code")
     #expect(s.layout(on: 5)?.kind == .float)
@@ -314,25 +318,23 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(fresh == [11])
 }
 
-/// A space that is genuinely gone — an unplugged display — still loses its
-/// layout, which is the behaviour the dropping was there for.
-///
-/// This used to be `syncMembership`'s job, which knew only that a space was
-/// absent from a list. `adoptDesktops` knows the desktop is gone, so it takes
-/// what is showing there and the layout override with it. A stale `active`
-/// entry is harmless right up until macOS recycles the id, and then a
-/// brand-new desktop inherits a dead workspace's tree.
-@Test func aVanishedSpaceLosesItsLayout() {
+/// A display that goes away takes nothing with it: its workspace moves to the
+/// first display, hidden, with its layout, its override and its windows. A
+/// workspace is weft's, not the display's, and unplugging a monitor must not
+/// be a way to lose a tree.
+@Test func anUnpluggedDisplaysWorkspaceMovesToTheFirstDisplay() {
     var s = desktops([7, 8])
-    s.workspaces[ws(s, 8)]?.overrideKind = .float
-    let dead = ws(s, 8)
-    s.adoptDesktops([7], names: nil)
-    #expect(s.workspace(on: 7) != nil)
+    let moved = ws(s, 8)
+    s.workspaces[moved]?.overrideKind = .float
+    s.file(42, in: moved, laidOut: true)
+    s.adoptDisplays(displays([7]), names: nil)
+    #expect(s.workspaces[moved]?.desktop == 7)
+    #expect(s.workspaces[moved]?.overrideKind == .float)
+    #expect(s.workspaces[moved]?.contains(42) == true)
     #expect(s.active[8] == nil)
-    // The workspace goes, and its override goes with it because the override
-    // now lives on the workspace rather than in a table beside it.
-    #expect(s.workspaces[dead] == nil)
-    #expect(s.wsOrder == [ws(s, 7)])
+    // Hidden there: the first display keeps showing what it showed.
+    #expect(s.active[7] != moved)
+    #expect(s.wsOrder.count == 2)
 }
 
 @Test func layoutOverridesRoundTripByOrdinal() {
@@ -351,15 +353,15 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(next.layout(on: 21)?.kind == .float)
 }
 
-/// Unplugging a display must not leave a stale override behind to be applied
-/// to whatever space inherits that id later.
-@Test func overridesDieWithTheirSpace() {
+/// Plugging it back in shows something there again without inventing a
+/// workspace: an empty hidden one is free to move, so it is the one taken.
+@Test func aReturningDisplayTakesAnEmptyHiddenWorkspace() {
     var s = desktops([10, 20], names: ["main", "web"])
-    let dead = ws(s, 20)
-    s.workspaces[dead]?.overrideKind = .float
-    s.adoptDesktops([10], names: ["main"])
-    #expect(s.workspaces[dead] == nil)
-    #expect(s.persistedOverrides() == [""])
+    s.adoptDisplays(displays([10]), names: nil)
+    #expect(s.wsOrder.count == 2)
+    s.adoptDisplays(displays([10, 30]), names: nil)
+    #expect(s.wsOrder.count == 2)
+    #expect(s.workspace(on: 30)?.label == "web")
 }
 
 @Test func spaceWithOverrideFloatKeepsFloatWhenNewWindowOpens() {
@@ -391,19 +393,15 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 // MARK: - The workspace seam
 //
 // `reconcileWorkspaces` is where the two owners of membership meet: SLS says
-// which desktop a window is on, weft says which workspace within it. These
-// tests are the specification of that one rule, and two of them describe a
-// configuration nothing creates yet — several workspaces on one desktop —
-// because the whole point of writing the rule now is that it is already right
-// when something does.
+// which desktop a window is on, weft says which workspace it is in. These
+// tests are the specification of that rule.
 
 private let ws1 = WorkspaceID(1)
 private let ws2 = WorkspaceID(2)
 private let ws3 = WorkspaceID(3)
 
-/// One workspace per desktop — today's model, and the thing Phase 1 must not
-/// change. Whatever SLS reports is what comes out, unchanged.
-@Test func identityMappingReproducesWhatSLSReports() {
+/// Two displays, one workspace each: whatever SLS reports is what comes out.
+@Test func oneWorkspacePerDisplayReproducesWhatSLSReports() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [3], 11: [3], 12: [5]],
         membership: [ws1: [10, 11], ws2: [12]],
@@ -413,30 +411,37 @@ private let ws3 = WorkspaceID(3)
     #expect(out == [ws1: [10, 11], ws2: [12]])
 }
 
-/// The reconciliation rule's second half. A window weft filed on desktop 3
-/// that SLS now reports on desktop 5 has been moved by something weft did not
-/// do — Mission Control, a rule, the app itself — and it joins whatever is
-/// showing where it landed.
-@Test func aWindowThatChangedDesktopJoinsTheArrivingDesktopsActiveWorkspace() {
+/// A window in a workspace that is showing on display A, reported on display
+/// B: the user dragged it across, or the app moved it. It joins B's.
+@Test func aWindowDraggedToAnotherDisplayJoinsWhatIsShowingThere() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [5]],
         membership: [ws1: [10], ws2: []],
         desktopOf: [ws1: 3, ws2: 5],
         activeOn: [3: ws1, 5: ws2]
     )
-    // It joined 5's workspace, and left 3's by simply not being reported there.
     #expect(out[ws2] == [10])
     #expect(out[ws1] == nil)
 }
 
-/// The reconciliation rule's first half, and the one that makes a hidden
-/// workspace possible at all.
-///
-/// Two workspaces on desktop 3, `ws2` showing. SLS reports every window on
-/// desktop 3 either way — a parked window is still on its desktop, and still
-/// in the on-screen window list (S9) — so without this half `ws1`'s windows
-/// would be swept into `ws2` on the first sweep after they were hidden, and a
-/// workspace switch would be a one-way trip.
+/// …unless weft is the one moving it. A workspace shown on another display
+/// is marked in flight, and a sweep that lands before the WindowServer
+/// catches up must not read the move as a drag back.
+@Test func aWindowInFlightKeepsItsWorkspace() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws1: [10], ws2: []],
+        desktopOf: [ws1: 3, ws2: 5],
+        activeOn: [3: ws1, 5: ws2],
+        inFlight: [10]
+    )
+    #expect(out[ws1] == [10])
+}
+
+/// The half that makes a hidden workspace possible at all. Two workspaces on
+/// desktop 3, `ws2` showing: SLS reports every window there either way — a
+/// parked window is still on its desktop (S9) — and `ws1`'s must not be swept
+/// into `ws2` on the next sweep.
 @Test func aHiddenWorkspaceKeepsItsWindowsWhileAnotherIsShowing() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [3], 11: [3], 12: [3]],
@@ -448,8 +453,21 @@ private let ws3 = WorkspaceID(3)
     #expect(out[ws2] == [12])
 }
 
-/// A window that is new to a desktop holding several workspaces goes to the
-/// one showing, not to the first one that happens to be on that desktop.
+/// A hidden workspace keeps its windows wherever they are parked. Its windows
+/// can be reported on another display's desktop — it last showed there — and
+/// that is not the user moving them.
+@Test func aHiddenWorkspaceKeepsWindowsParkedOnAnotherDisplay() {
+    let out = reconcileWorkspaces(
+        windowDesktops: [10: [5]],
+        membership: [ws1: [10]],
+        desktopOf: [ws1: 3, ws2: 3, ws3: 5],
+        activeOn: [3: ws2, 5: ws3]
+    )
+    #expect(out[ws1] == [10])
+}
+
+/// A new window goes to what is showing where it opened, not to the first
+/// workspace that happens to live on that desktop.
 @Test func aNewWindowLandsInTheShowingWorkspaceNotJustAnyOnThatDesktop() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [3], 99: [3]],
@@ -461,40 +479,33 @@ private let ws3 = WorkspaceID(3)
     #expect(out[ws2] == [99])
 }
 
-/// A sticky window is on every desktop at once, so it is resolved once per
-/// desktop and holds a slot in a workspace on each.
-@Test func aStickyWindowLandsInOneWorkspacePerDesktop() {
+/// A window on several desktops at once — macOS's own "All Desktops" — is
+/// filed once, where it first lands on a managed desktop. Membership is one
+/// workspace per window now.
+@Test func aWindowOnSeveralDesktopsIsFiledOnce() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [3, 5]],
         membership: [:],
         desktopOf: [ws1: 3, ws2: 5],
         activeOn: [3: ws1, 5: ws2]
     )
-    #expect(out == [ws1: [10], ws2: [10]])
+    #expect(out == [ws1: [10]])
 }
 
-/// A desktop with no active workspace has nowhere to put what arrives, and
-/// drops it silently — there is nothing else a pure function can do.
-///
-/// This is the failure the caller has to make impossible: `evictOrderedOut`
-/// and `refreshDividerZones` both give up quietly on a desktop whose lookup
-/// misses, so the symptom would be closed windows never giving their slot back
-/// and borders vanishing, with nothing in the log. Every live desktop gets an
-/// active workspace before this is ever called.
-@Test func aDesktopWithNoActiveWorkspaceDropsWhatArrivesOnIt() {
+/// A window on a desktop weft does not manage — another desktop, a
+/// fullscreen space — is in no workspace. weft pauses there.
+@Test func aWindowOnAnUnmanagedDesktopIsInNoWorkspace() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [3], 11: [7]],
-        membership: [ws1: [10]],
+        membership: [ws1: [10, 11]],
         desktopOf: [ws1: 3],
         activeOn: [3: ws1]
     )
     #expect(out == [ws1: [10]])
 }
 
-/// A workspace whose desktop weft no longer knows about contributes nothing —
-/// its windows are reconciled against the desktop SLS puts them on, like any
-/// others. An unplugged display must not be able to hold windows hostage in a
-/// workspace that can never be shown again.
+/// A workspace weft has no desktop for holds nothing back: its windows are
+/// reconciled like any others.
 @Test func aWorkspaceWithNoDesktopHoldsNothingBack() {
     let out = reconcileWorkspaces(
         windowDesktops: [10: [5]],
@@ -505,126 +516,183 @@ private let ws3 = WorkspaceID(3)
     #expect(out == [ws2: [10]])
 }
 
-@Test func adoptDesktopsVirtualHostsDeclaredWorkspacesOnAnchor() {
-    var state = SpaceState()
-    state.adoptDesktops(
-        [10, 20],
-        names: ["term", "web", "code", "chat"],
-        mode: .virtual,
-        anchor: 1,
-        anchorCount: 4
+// MARK: - Displays and their managed desktops
+
+/// Every `[[space]]` is a workspace on the managed desktop, however many
+/// macOS desktops the display has. The other desktops get none.
+@Test func declaredWorkspacesAllLiveOnTheManagedDesktop() {
+    var s = SpaceState()
+    s.adoptDisplays(
+        [DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)],
+        names: ["term", "web", "code", "chat"]
     )
-
-    #expect(state.workspaces.count == 5)
-    #expect(state.wsOrder.count == 5)
-
-    let w1 = state.wsOrder[0]
-    let w2 = state.wsOrder[1]
-    let w3 = state.wsOrder[2]
-    let w4 = state.wsOrder[3]
-    let w5 = state.wsOrder[4]
-
-    #expect(state.workspaces[w1]?.label == "term")
-    #expect(state.workspaces[w1]?.desktop == 10)
-    #expect(state.workspaces[w2]?.label == "web")
-    #expect(state.workspaces[w2]?.desktop == 10)
-    #expect(state.workspaces[w3]?.label == "code")
-    #expect(state.workspaces[w3]?.desktop == 10)
-    #expect(state.workspaces[w4]?.label == "chat")
-    #expect(state.workspaces[w4]?.desktop == 10)
-
-    #expect(state.workspaces[w5]?.label == "5")
-    #expect(state.workspaces[w5]?.desktop == 20)
-
-    #expect(state.active[10] == w1)
-    #expect(state.active[20] == w5)
-
-    #expect(state.resolveWorkspace("term") == w1)
-    #expect(state.resolveWorkspace("web") == w2)
-    #expect(state.resolveWorkspace("1") == w1)
-    #expect(state.resolveWorkspace("4") == w4)
-    #expect(state.resolveWorkspace("5") == w5)
-
-    state.active[10] = w2
-    state.adoptDesktops([10, 20], names: nil, mode: .virtual, anchor: 1, anchorCount: 4)
-    #expect(state.active[10] == w2)
-    #expect(state.wsOrder == [w1, w2, w3, w4, w5])
+    #expect(s.wsOrder.count == 4)
+    #expect(s.managed == ["A": 10])
+    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
+    #expect(s.active == [10: s.wsOrder[0]])
+    #expect(s.resolveWorkspace("web") == s.wsOrder[1])
+    #expect(s.resolveWorkspace("4") == s.wsOrder[3])
 }
 
-// MARK: - Virtual mode: the restart round trip
+/// Swiping to another macOS desktop does not move the managed one. The
+/// display is paused, and nothing weft shows is on screen there.
+@Test func anotherDesktopShowingPausesTheDisplay() {
+    var s = SpaceState()
+    let one = DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)
+    s.adoptDisplays([one], names: ["a", "b"])
+    #expect(!s.isPaused("A"))
+    #expect(s.showingDisplay(of: s.wsOrder[0]) == "A")
 
-/// What `labels.json` records has to survive being read back.
-///
-/// `persistedNames()` writes one entry per `wsOrder` slot, which under
-/// `virtual` is the anchor's workspaces *plus* one for every other desktop.
-/// weftd used to feed that count straight back as `anchorCount`, so three
-/// labels on a three-desktop machine became five workspaces, saved as five
-/// labels, and came back as seven — the count grew by `desktops - 1` on every
-/// restart. Passing `nil` lets `adoptDesktops` subtract the other desktops
-/// itself, which is the exact inverse of what was written.
-@Test func virtualWorkspaceCountSurvivesARestart() {
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 20)], names: nil)
+    #expect(s.managed["A"] == 10)
+    #expect(s.isPaused("A"))
+    #expect(s.showingDisplay(of: s.wsOrder[0]) == nil)
+    // And back.
+    s.adoptDisplays([one], names: nil)
+    #expect(!s.isPaused("A"))
+}
+
+/// A launch while a fullscreen app is showing must not manage the
+/// fullscreen space: it is not in `desktops`, so the first real one is.
+@Test func aFullscreenSpaceIsNeverManaged() {
+    var s = SpaceState()
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 99)], names: ["a"])
+    #expect(s.managed["A"] == 10)
+    #expect(s.isPaused("A"))
+}
+
+/// The managed desktop deleted in Mission Control: macOS moves its windows,
+/// weft manages what the display shows now, and the workspaces go with it.
+@Test func aDeletedManagedDesktopHandsItsWorkspacesToTheNextOne() {
+    var s = SpaceState()
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)], names: ["a", "b"])
+    s.file(42, in: s.wsOrder[1], laidOut: true)
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [20], current: 20)], names: nil)
+    #expect(s.managed["A"] == 20)
+    #expect(s.workspaces.values.allSatisfy { $0.desktop == 20 })
+    #expect(s.workspaces[s.wsOrder[1]]?.contains(42) == true)
+    #expect(s.active[20] == s.wsOrder[0])
+}
+
+/// A new display with no hidden workspace free to take gets a numbered one.
+@Test func aNewDisplayWithNothingFreeGetsANumberedWorkspace() {
+    var s = SpaceState()
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10], current: 10)], names: ["a"])
+    s.file(42, in: s.wsOrder[0], laidOut: true)
+    s.adoptDisplays([
+        DisplayDesktops(uuid: "A", desktops: [10], current: 10),
+        DisplayDesktops(uuid: "B", desktops: [30], current: 30),
+    ], names: nil)
+    #expect(s.wsOrder.count == 2)
+    #expect(s.workspace(on: 30)?.label == "2")
+}
+
+/// No displays at all is a transient — sleep, a reconfiguration in flight —
+/// and must leave the workspaces exactly where they were.
+@Test func noDisplaysLeavesTheWorkspacesAlone() {
+    var s = desktops([10], names: ["a", "b"])
+    let before = s.workspaces
+    s.adoptDisplays([], names: nil)
+    #expect(s.workspaces == before)
+}
+
+// MARK: - Showing
+
+@Test func showingAHiddenWorkspaceMakesItActiveThere() {
+    var s = desktops([10], names: ["a", "b"])
+    let b = s.wsOrder[1]
+    s.show(b, on: 10)
+    #expect(s.active[10] == b)
+    #expect(s.workspaces[b]?.desktop == 10)
+}
+
+/// Showing a workspace that is on screen elsewhere swaps the two displays,
+/// so neither is left showing nothing: `move space display`.
+@Test func showingAWorkspaceFromTheOtherDisplaySwapsThem() {
+    var s = desktops([10, 20], names: ["a", "b"])
+    let a = s.active[10]!, b = s.active[20]!
+    s.show(a, on: 20)
+    #expect(s.active[20] == a)
+    #expect(s.active[10] == b)
+    #expect(s.workspaces[a]?.desktop == 20)
+    #expect(s.workspaces[b]?.desktop == 10)
+}
+
+// MARK: - Editing the list and restarting
+
+@Test func relabelRenamesAddsAndDropsOnlyWhatIsSafeToDrop() {
+    var s = desktops([10], names: ["a", "b", "c", "d"])
+    s.file(42, in: s.wsOrder[3], laidOut: true)
+    s.relabel(["x", "y"])
+    #expect(s.persistedNames() == ["x", "y", "d"])  // "c" was empty and hidden
+    s.relabel(["x", "y", "z", "w"])
+    #expect(s.persistedNames() == ["x", "y", "z", "w"])
+    #expect(s.workspaces[s.wsOrder[2]]?.contains(42) == true)
+}
+
+/// What `labels.json` records has to survive being read back: the count is
+/// the count, with no desktops folded into it.
+@Test func workspaceNamesSurviveARestart() {
+    let one = [DisplayDesktops(uuid: "A", desktops: [10, 20, 30], current: 10)]
     var first = SpaceState()
-    first.adoptDesktops([10, 20, 30], names: ["one", "two", "three"], mode: .virtual, anchor: 1)
-    let afterFirstLaunch = first.persistedNames()
-    #expect(first.wsOrder.count == 3)
-
-    // Second launch: fresh state, no [[space]] decls, names from the file.
+    first.adoptDisplays(one, names: ["one", "two", "three"])
     var second = SpaceState()
-    second.adoptDesktops([10, 20, 30], names: afterFirstLaunch, mode: .virtual, anchor: 1)
-    #expect(second.wsOrder.count == 3)
-    #expect(second.persistedNames() == afterFirstLaunch)
-
-    // And a third, because a ratchet needs two steps to show itself.
-    var third = SpaceState()
-    third.adoptDesktops([10, 20, 30], names: second.persistedNames(), mode: .virtual, anchor: 1)
-    #expect(third.wsOrder.count == 3)
-    #expect(third.persistedNames() == afterFirstLaunch)
+    second.adoptDisplays(one, names: first.persistedNames())
+    #expect(second.persistedNames() == ["one", "two", "three"])
 }
 
-/// Declared `[[space]]` labels still say how many workspaces the anchor hosts,
-/// which is the case `anchorCount` exists for.
-@Test func declaredSpacesSetTheAnchorCount() {
-    var s = SpaceState()
-    s.adoptDesktops(
-        [10, 20], names: ["a", "b", "c", "d"], mode: .virtual, anchor: 1, anchorCount: 4
-    )
-    // Four on the anchor, plus the one desktop 20 holds on its own.
-    #expect(s.wsOrder.count == 5)
-    #expect(s.workspaces.values.filter { $0.desktop == 10 }.count == 4)
-    #expect(s.workspaces.values.filter { $0.desktop == 20 }.count == 1)
+/// Membership survives a daemon restart by ordinal: windows go back into the
+/// workspace they were in rather than all into the first.
+@Test func membershipSurvivesARestartByOrdinal() {
+    var first = desktops([10], names: ["a", "b"])
+    first.file(42, in: first.wsOrder[1], laidOut: true)
+    first.file(43, in: first.wsOrder[0], laidOut: false)
+    let saved = first.persistedMembership()
+    var second = desktops([10], names: ["a", "b"])
+    second.seedMembership(saved)
+    #expect(second.workspace(holding: 42) == second.wsOrder[1])
+    #expect(second.workspace(holding: 43) == second.wsOrder[0])
 }
 
-/// A mode change cannot be left to the ordinary sweep: that path passes
-/// `names: nil`, meaning "keep what is already named", so turning `virtual`
-/// off left the anchor's hidden workspaces in place holding windows nothing
-/// would ever unpark. Clearing the set is what makes the next sweep re-seed.
-@Test func resetWorkspacesClearsTheSetButKeepsMacOSsFacts() {
-    var s = SpaceState()
-    s.adoptDesktops([10, 20], names: ["a", "b", "c"], mode: .virtual, anchor: 1, anchorCount: 2)
+@Test func resetWorkspacesClearsTheSetButKeepsTheDesktops() {
+    var s = desktops([10, 20], names: ["a", "b", "c"])
     s.recentWorkspace = s.wsOrder.first
-    #expect(!s.workspaces.isEmpty)
-
     s.resetWorkspaces()
     #expect(s.workspaces.isEmpty)
     #expect(s.active.isEmpty)
     #expect(s.wsOrder.isEmpty)
     #expect(s.recentWorkspace == nil)
-    // Which desktops exist is macOS's fact, not weft's, so it stays.
     #expect(s.order == [10, 20])
-
-    // And the next adopt rebuilds from the config, in the other mode.
-    s.adoptDesktops([10, 20], names: ["a", "b"], mode: .native)
+    #expect(s.managed == ["D10": 10, "D20": 20])
+    s.adoptDisplays(displays([10, 20]), names: ["a", "b"])
     #expect(s.wsOrder.count == 2)
-    #expect(s.workspaces.values.filter { $0.desktop == 10 }.count == 1)
 }
 
-/// An anchor naming no desktop is clamped rather than refused — a sweep has to
-/// produce a usable state whatever the file says. This pins that it clamps to
-/// a real desktop, which is what lets `query workspaces` report the difference
-/// between what was asked for and what happened.
-@Test func anchorPastTheLastDesktopClampsToIt() {
-    var s = SpaceState()
-    s.adoptDesktops([10], names: ["a", "b"], mode: .virtual, anchor: 3, anchorCount: 2)
-    #expect(s.wsOrder.count == 2)
-    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
+// MARK: - Moving a float between displays
+
+@Test func aFloatKeepsItsPlaceRelativeToTheDisplayItMovesTo() {
+    let small = Frame(x: 0, y: 0, width: 1000, height: 800)
+    let big = Frame(x: 1000, y: 0, width: 2000, height: 1600)
+    // Pushed into the top-right corner of the small display…
+    let f = translate(Frame(x: 600, y: 0, width: 400, height: 300), from: small, to: big)
+    // …lands in the top-right corner of the big one.
+    #expect(f == Frame(x: 2600, y: 0, width: 400, height: 300))
+    // Too big for the target: shrinks to fit rather than hanging off it.
+    let g = translate(Frame(x: 0, y: 0, width: 1800, height: 1500), from: big, to: small)
+    #expect(g.width == 1000 && g.height == 800 && g.x == 0 && g.y == 0)
+}
+
+// MARK: - Numbered workspaces on demand
+
+@Test func aNumberPastTheEndCreatesWorkspacesUpToIt() {
+    var s = desktops([10])
+    #expect(s.wsOrder.count == 1)
+    let four = s.resolveOrCreateWorkspace("4")
+    #expect(s.persistedNames() == ["1", "2", "3", "4"])
+    #expect(four == s.wsOrder[3])
+    #expect(s.workspaces[four!]?.desktop == 10)
+    // A desktop-id-sized number is not a request for a thousand workspaces.
+    #expect(s.resolveOrCreateWorkspace("4242") == nil)
+    #expect(s.resolveOrCreateWorkspace("nope") == nil)
+    #expect(s.wsOrder.count == 4)
 }

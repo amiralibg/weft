@@ -7,11 +7,11 @@ import Testing
 // this, membership WAS the layout, and every such window stayed on screen
 // whichever workspace was showing.
 
-/// Three workspaces on one desktop, the virtual shape: the one case where a
-/// window's desktop does not say which workspace it is in.
+/// Three workspaces on one desktop: a window's desktop does not say which
+/// workspace it is in.
 private func anchor() -> (SpaceState, [WorkspaceID]) {
     var s = SpaceState()
-    s.adoptDesktops([9], names: ["a", "b", "c"], mode: .virtual, anchor: 1, anchorCount: 3)
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [9], current: 9)], names: ["a", "b", "c"])
     return (s, s.wsOrder)
 }
 

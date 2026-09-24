@@ -24,9 +24,9 @@ small native app. A shortcut is handled inside weft the instant you press it —
 nothing is launched per keypress — so focusing, moving, resizing and switching
 windows happens with no wait, and weft stays out of the way the rest of the time.
 
-It talks to the WindowServer through SkyLight and moves windows through the
-Accessibility API, so it manages **native macOS spaces** rather than inventing
-its own.
+It keeps its own **workspaces** on one macOS desktop per display, so switching
+and moving windows are instant and work for every window — with System
+Integrity Protection left exactly as it is.
 
 - **Two layouts per space** — `bsp` (binary split) and `float` (no tiling at
   all). Switch a space between them at runtime; window membership and focus
@@ -166,40 +166,30 @@ by hand is always the one-liner at the top of this file.
 
 ## Workspaces
 
-A **workspace** is weft's: a named set of windows with its own layout. A
-**desktop** is macOS's: what Mission Control shows and a swipe switches. Weft
-has two ways of putting one inside the other, set in **Settings › Workspaces**
-or under `[general]`:
+A **workspace** is weft's: a named set of windows with its own layout, what
+`⌥1`…`⌥9` and your `[[space]]` blocks refer to. Weft keeps them on **one macOS
+desktop per display**. Switching moves the windows you are not using just off
+the edge of the screen and puts the others back: instant, nothing animates,
+and it works on every window — including a terminal with its title bar hidden.
+Sending a window to another workspace is the same, and so is a rule's
+`space = "…"`.
 
-```toml
-[general]
-workspaces = "virtual"   # several workspaces on one desktop — the default
-workspace-anchor = 1     # which desktop hosts them, by Mission Control order
-```
+- **Numbers need no setup.** `space focus 4` creates workspaces up to 4 the
+  first time you use it. `[[space]]` blocks give them names and layouts.
+- **Several displays.** Each display shows one workspace. `space focus` shows a
+  workspace on the display you are on, or moves focus to it if it is already on
+  screen elsewhere; `move space display east` sends the current workspace to
+  the other display and brings that one's back.
+- **Other macOS desktops and full-screen apps keep working.** Weft pauses on a
+  display while one of them is showing and resumes when you come back. It never
+  switches desktops for you. `weftctl doctor` shows which desktop weft manages
+  on each display and whether it is paused.
+- **Restarts keep your workspaces.** An update or a restart puts every window
+  back in the workspace it was in.
+- **The cost:** Mission Control on weft's desktop shows a thin sliver for each
+  hidden window, the same trade AeroSpace makes.
 
-- **`virtual`** (the default for new installs). Every `[[space]]` is a
-  workspace on the anchor desktop, and each of your other desktops keeps one of
-  its own. Switching parks the outgoing windows just off screen and brings the
-  incoming ones back — no desktop animation, and sending a window to another
-  workspace works for any window, including one with no title bar to hold. A
-  rule's `space = "…"` places windows by default. The cost: Mission Control on
-  the anchor desktop shows a thin sliver for each hidden window.
-- **`native`**. One workspace per macOS desktop, the behaviour before 0.9.12.
-  Switching is macOS's own; sending a window elsewhere is the title-bar carry
-  described under [System Integrity Protection](#system-integrity-protection),
-  which plays two desktop animations and cannot hold a window without a title
-  bar.
-
-**Upgrading does not change your mode.** An install that finds an existing
-`weft.toml` without the key writes `workspaces = "native"` into it, so `⌥2`
-means what it meant yesterday. Switch in Settings when you want to; the engine
-picks it up live and puts every parked window back on screen first, so nothing
-is left hidden by the change.
-
-Setup explains both before asking which you want, and the menu's **How Weft
-Works…** reopens that explanation any time. `weftctl doctor` prints the mode
-the engine is actually running and the host desktop it settled on. The design,
-and what it measured, is in [`docs/WORKSPACES.md`](docs/WORKSPACES.md).
+The design, and what it measured, is in [`docs/REDESIGN.md`](docs/REDESIGN.md).
 
 ## Permissions
 
@@ -251,56 +241,22 @@ loads no code into any other process.
 | Feature | With SIP on |
 |---|---|
 | Tiling, focus, shortcuts, rules, stacks, borders, the switcher | Yes |
-| Switching desktops (`space focus`) | Yes — instant, weft's own Dock swipe, macOS 26.6 or later |
-| Sending a window to another desktop (`space move-window`, `alt-shift-1…5` in the shipped config) | Yes — see below |
-| A rule's `space = "…"` | Yes — on by default under `virtual`; under `native`, opt-in with `follow-space-rules = true` |
-| Keeping a window on every desktop (`sticky`) | macOS can, per application; weft does not drive it — see below |
+| Switching workspaces (`space focus`) | Yes — instant |
+| Sending a window to a workspace (`space move-window`), and a rule's `space = "…"` | Yes — instant, any window |
+| Keeping a window visible on every workspace (`sticky`) | Yes |
+| Switching or moving windows between **macOS desktops** | Not done — see below |
 
-This was going to need a scripting addition injected into Dock, the way yabai
-does it: SIP partly off, `sudo`, and a table of Dock byte patterns to re-derive
-on most macOS releases. It turned out not to. macOS 27 refuses every SkyLight
-route for moving another app's window between desktops — sixteen were tried,
-and three of them return success while doing nothing — but it does not refuse
-the gesture a person uses. Weft holds the window by its title bar, presses your
-"move a space" shortcut once per desktop of travel, and lets go. Accessibility,
-which weft already needs, is the only requirement.
+macOS refuses every route an ordinary process has for moving another app's
+window between its own desktops — sixteen SkyLight calls were tried, and three
+return success while doing nothing. What remains is simulated input (holding a
+title bar while pressing a desktop shortcut) and private Dock gestures, and both
+broke on macOS updates. So weft does not drive macOS desktops at all: its
+workspaces do that job, on one desktop per display, and nothing there depends on
+what a macOS update changes about Dock.
 
-The cost is that you see it happen: the screen changes desktop on the way,
-about a second per desktop travelled. Because it is visible either way,
-`space move-window` **goes with the window** by default — the alternative is
-changing desktop and then changing back, which is one more switch to end up
-somewhere you probably did not want to be. Add `--no-follow` when you mean to
-stay put:
-
-```toml
-"alt-shift-2" = "space move-window 2"              # send it there and follow
-"alt-ctrl-2"  = "space move-window 2 --no-follow"  # send it there, stay here
-```
-
-It is not fine unprompted — a rule fires when an app opens, which may be while
-you are typing in something else — so under `native` a rule's `space =` does
-nothing until you set `follow-space-rules = true`. Under `virtual` a rule's move
-is a park, which nobody sees, so it is on unless you turn it off.
-
-Weft reads whichever keys you have bound to "Move left/right a space" rather
-than assuming ⌃← / ⌃→, so a remapped shortcut works and an unbound one is
-reported instead of silently doing nothing. `weftctl doctor` says which.
-
-**If this feels slow**, what you are waiting for is macOS's own space-switch
-animation — one per desktop the window travels. Weft's fast Dock swipe, the one
-`space focus` uses, is refused while a window is being held, so the carry has to
-use the keyboard shortcut and that plays the full transition. System Settings ›
-Accessibility › Display › **Reduce motion** turns it into a crossfade, which is
-the only lever there is. Everything else weft used to spend on a move — a dead
-API call, a grab it re-guessed every time, a fixed settle — is gone.
-
-Sticky is the one verb weft does not implement. The WindowServer takes the "on
-every desktop" tag from an ordinary connection and silently drops it, so weft
-cannot do it per window. macOS itself can do it per *application*, and that does
-work with SIP on: right-click the app's icon in the Dock → Options → All
-Desktops. It persists, and it is one click, which is why weft does not wrap it.
-
-Weft does not use yabai's scripting addition, even when one is loaded.
+The private calls weft does use are looked up by name when it starts rather
+than linked, each one checked by a self-test. A macOS update that removes one
+costs the feature that uses it, never the launch — `weftctl doctor` lists them.
 
 ## Default keybindings
 
@@ -312,7 +268,7 @@ QWERTY, Colemak and Dvorak.
 |---|---|
 | `⌥H` `⌥J` `⌥K` `⌥L` | Focus the window left / down / up / right |
 | `⌥⇧H` `⌥⇧J` `⌥⇧K` `⌥⇧L` | Move the focused window that way |
-| `⌥1`…`⌥5` | Go to workspace 1–5 (desktop 1–5 under `native`) |
+| `⌥1`…`⌥5` | Go to workspace 1–5 |
 | `⌥⇧1`…`⌥⇧5` | Send the focused window to that workspace |
 | `⌥Tab` | Back to the workspace you came from |
 | `⌥F` | Zoom the window to fill the space; again to restore |
@@ -338,9 +294,8 @@ of a save — layout changes, new keybinds and new rules all take effect without
 restarting anything.
 
 The shipped [`examples/weft.toml`](examples/weft.toml) is deliberately generic:
-no named spaces, no per-app placement, both integrations off. It behaves the
-same on a Mac with one desktop as on one with nine. Named spaces and app
-placement are in it as commented-out worked examples.
+no named workspaces, no per-app placement, both integrations off. Named
+workspaces and app placement are in it as commented-out worked examples.
 
 ```toml
 [general]
@@ -381,11 +336,9 @@ so your comments and any key it does not recognise survive untouched.
 open -a WeftBar --args --settings
 ```
 
-> **A note on `[[space]]`.** Labels are handed out in Mission Control order, so
-> there must be at least as many desktops as blocks. Declare more and the extras
-> have nowhere to land — and every keybind and rule naming them fails *silently*.
-> `weftctl doctor` and the Settings window both report this; add the desktops in
-> Mission Control first.
+> **A note on `[[space]]`.** Each block is a workspace, in the order `space
+> focus 1`, `2`, … count. Declare as many as you like — they are weft's, not
+> macOS desktops, so there is nothing to create in Mission Control.
 
 ## Command line
 
@@ -410,7 +363,7 @@ weftctl service restart
 the daemon's *own* permissions (not `weftctl`'s — TCC is per binary, and asking
 the wrong process is how a green checklist sits next to a weft that cannot move
 a window), validates the config with line numbers, and cross-checks it against
-reality: rules and keybinds pointing at desktops that do not exist, integrations
+reality: rules and keybinds pointing at workspaces that do not exist, integrations
 switched on whose binary is not installed.
 
 ## Integrations
