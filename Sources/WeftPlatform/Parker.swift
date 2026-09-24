@@ -26,9 +26,23 @@ import WeftCore
 
 public struct Parker: Sendable {
     public let ledger: ParkLedger
+    /// Hides and shows through Accessibility when the WindowServer move is
+    /// gone or failed its launch self-test. Nil refuses to park instead.
+    public let fallback: AXParkMover?
 
-    public init(ledger: ParkLedger = ParkLedger()) {
+    public init(ledger: ParkLedger = ParkLedger(), fallback: AXParkMover? = nil) {
         self.ledger = ledger
+        self.fallback = fallback
+    }
+
+    /// One path per launch, decided by the self-test: a window parked through
+    /// SkyLight and shown through Accessibility is the S4 desync.
+    private var publicPath: Bool { !PrivateAPI.canMoveWindows }
+
+    private func move(_ wid: WindowID, to point: CGPoint) -> Bool {
+        if publicPath { return fallback?.move(wid, to: point) ?? false }
+        var p = point
+        return SLSMoveWindow(WorldReader.cid, wid, &p) == 0
     }
 
     /// How close to its recorded corner a window has to be for weft to accept
@@ -158,7 +172,7 @@ public struct Parker: Sendable {
         guard !fresh.isEmpty else { return outcome }
         // Checked here rather than on entry: only a park that would move
         // something needs the answer, and asking is what runs the self-test.
-        guard PrivateAPI.canMoveWindows else {
+        guard !publicPath || fallback != nil else {
             let check = PrivateAPI.report.checks.first { $0.name == PrivateAPI.CheckName.windowMove.rawValue }
             throw ParkError.unsupported(check?.detail ?? "not run")
         }
@@ -171,12 +185,23 @@ public struct Parker: Sendable {
 
         // Only now.
         for entry in fresh {
-            var p = CGPoint(x: entry.parkedAt.x, y: entry.parkedAt.y)
-            if SLSMoveWindow(WorldReader.cid, entry.wid, &p) == 0 {
+            if move(entry.wid, to: CGPoint(x: entry.parkedAt.x, y: entry.parkedAt.y)) {
                 outcome.parked.append(entry.wid)
             } else {
                 outcome.refused.append(entry.wid)
             }
+        }
+        // Accessibility may clamp: macOS keeps part of a window reachable. The
+        // ledger has to name where each window really is, or the corner check
+        // would read it as someone else's window and never bring it back.
+        if publicPath, !outcome.parked.isEmpty {
+            var landed = held + fresh
+            for i in landed.indices where outcome.parked.contains(landed[i].wid) {
+                if let live = WorldReader.frame(of: landed[i].wid) {
+                    landed[i].parkedAt = ParkedWindow.Spot(x: live.x, y: live.y)
+                }
+            }
+            try? ledger.save(landed.filter { !outcome.refused.contains($0.wid) })
         }
 
         // The one kind of stale entry that is not safe to leave. Everywhere
@@ -186,7 +211,8 @@ public struct Parker: Sendable {
         // This one claims a window is hidden when it is on screen *and weft is
         // still running*, so the next park skips it as already done and it is
         // never hidden at all. Take it back out.
-        if !outcome.refused.isEmpty {
+        // (The public path has already rewritten it, landed spots and all.)
+        if !outcome.refused.isEmpty, !publicPath {
             let stuck = Set(outcome.refused)
             do {
                 try ledger.save((held + fresh).filter { !stuck.contains($0.wid) })
@@ -319,8 +345,7 @@ public struct Parker: Sendable {
                 outcome.notOurs.append(entry.wid)
                 continue
             }
-            var p = CGPoint(x: entry.frame.x, y: entry.frame.y)
-            if SLSMoveWindow(WorldReader.cid, entry.wid, &p) == 0 {
+            if move(entry.wid, to: CGPoint(x: entry.frame.x, y: entry.frame.y)) {
                 outcome.restored.append(entry.wid)
             } else {
                 outcome.refused.append(entry.wid)

@@ -550,7 +550,29 @@ Each phase can ship on its own as the next 0.9.x release.
      card switches only through the inspector's "Show Now".
 6. **Public-path parity.** AX hide/show in parallel, `NSPanel` borders, and
    the marker window. Run the whole daemon with `WEFT_PUBLIC_ONLY=1` and check
-   that nothing is missing, only slower.
+   that nothing is missing, only slower. **Done for 0.9.15** (`Sources/WeftPlatform/PublicPaths.swift`):
+   - `PublicPaths.windowID(of:)` replaces every `_AXUIElementGetWindow`
+     call: the private answer first, and — only when the symbol is gone, never
+     on an ordinary failure — the AX element's frame matched against the app's
+     windows in the public window list, title breaking ties.
+   - Without `SLSCopyManagedDisplaySpaces` the world is one synthetic desktop
+     per display (a stable hash of its uuid), windows are placed by which
+     display holds most of them, and weft tiles and switches workspaces as
+     before; it only loses pausing on other desktops. A missing
+     current-desktop call falls back to the first desktop instead of reading
+     every display as paused. Window bounds fall back to the window list.
+   - `Parker` hides through Accessibility (`AXParkMover`) when the
+     WindowServer move fails its self-test — one path per launch — and records
+     where each window really landed, since AX can clamp.
+   - `WEFT_PUBLIC_ONLY=1` turns every private symbol off in weftd and
+     weftctl; `weftctl doctor` then lists what each missing call costs.
+     `PrivateAPI.essential` is empty: nothing is broken by a missing symbol,
+     only slower or less.
+   - Per-app AX calls already time out at 150 ms, so one frozen app cannot
+     stall the others.
+   - Not done: `NSPanel` borders (borders are off without SkyLight), and the
+     marker window — the synthetic topology made it unnecessary. The AX
+     fallback hides one window at a time rather than in parallel per app.
 7. **Budgets in the release checklist**, plus `weftctl doctor --selftest`,
    which the maintainer runs on each macOS beta before it ships.
 

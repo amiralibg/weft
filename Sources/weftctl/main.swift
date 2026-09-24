@@ -49,6 +49,10 @@ func localQuery(_ kind: String) -> Never {
     exit(0)
 }
 
+// Same switch as weftd's, so `WEFT_PUBLIC_ONLY=1 weftctl doctor` shows what
+// this Mac looks like to weft with no private calls at all.
+if PublicPaths.publicOnlyRequested { PublicPaths.disablePrivateSymbols() }
+
 let args = Array(CommandLine.arguments.dropFirst())
 guard !args.isEmpty, !["help", "--help", "-h"].contains(args[0]) else { usage() }
 

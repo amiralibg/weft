@@ -74,13 +74,9 @@ private func axCallback(
         // The element *is* the new window. Naming it costs one local call and
         // lets the daemon wait for this window specifically; 0 happens for a
         // window still being assembled, and falls back to a plain sweep.
-        var wid: UInt32 = 0
-        let named = _AXUIElementGetWindow(element, &wid) == .success && wid != 0
-        sinkHolder.fire(.windowCreated(pid: pid, wid: named ? wid : nil))
+        sinkHolder.fire(.windowCreated(pid: pid, wid: PublicPaths.windowID(of: element, pid: pid)))
     case focusedChanged:
-        var wid: UInt32 = 0
-        let ok = _AXUIElementGetWindow(element, &wid) == .success && wid != 0
-        sinkHolder.fire(.windowFocused(ok ? wid : nil))
+        sinkHolder.fire(.windowFocused(PublicPaths.windowID(of: element)))
     default:
         break
     }
@@ -368,8 +364,7 @@ public final class ObserverSet: @unchecked Sendable {
               let elements = value as? [AXUIElement]
         else { return nil }
         for el in elements {
-            var found: UInt32 = 0
-            if _AXUIElementGetWindow(el, &found) == .success, found == wid {
+            if PublicPaths.windowID(of: el) == wid {
                 return el
             }
         }

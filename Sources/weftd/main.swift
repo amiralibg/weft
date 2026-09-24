@@ -36,13 +36,13 @@ final class Daemon: @unchecked Sendable {
     /// WindowServer, binding AX elements and applying frames all happen here,
     /// touching `core` only for the microseconds of the state swap.
     private let syncQueue = DispatchQueue(label: "weft.sync", qos: .userInitiated)
-    private let applier = AXApplier()
+    private let applier: AXApplier
     private let hub = SubscriberHub()
     private let bus = EventBus()
     private let observers = ObserverSet()
     /// Hides and shows a workspace's windows, with a crash-safe ledger read at
     /// startup (WORKSPACES.md, "Park and unpark").
-    private let parker = Parker()
+    private let parker: Parker
     /// Windows weft is moving between displays itself, and when it started.
     /// The WindowServer can still report the display a window is leaving for
     /// a moment, and a sweep in that moment would read the move as the user
@@ -137,6 +137,11 @@ final class Daemon: @unchecked Sendable {
     private let launchedTrusted = AXIsProcessTrusted()
 
     init?() {
+        // Hiding falls back to Accessibility when the WindowServer move fails
+        // its self-test; the two share one applier and its per-app queues.
+        let applier = AXApplier()
+        self.applier = applier
+        self.parker = Parker(fallback: AXParkMover(applier: applier))
         core.setSpecific(key: coreKey, value: 1)
         let layout = SpaceControl.displayLayout()
         guard !layout.isEmpty else {
@@ -4348,6 +4353,13 @@ fputs("weftd: \(WeftVersion.full) starting (pid \(ProcessInfo.processInfo.proces
 // park, and the second line of every log says whether this macOS still does
 // what weft relies on. A missing symbol no longer stops the launch; this is
 // where it is said instead.
+// `WEFT_PUBLIC_ONLY=1`: run as if this macOS had none of the private calls,
+// to exercise every public fallback on purpose. Before the report, which it
+// changes.
+if PublicPaths.publicOnlyRequested {
+    let n = PublicPaths.disablePrivateSymbols()
+    fputs("weftd: WEFT_PUBLIC_ONLY — \(n) private symbols turned off; public paths only\n", stderr)
+}
 let privateAPI = PrivateAPI.report
 fputs("weftd: \(privateAPI.macOS) — \(privateAPI.summary)\n", stderr)
 if let lost = privateAPI.missing.first(where: { PrivateAPI.essential.contains($0) }) {

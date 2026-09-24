@@ -15,8 +15,8 @@ import Testing
         let names = PrivateAPI.symbols.map { $0.name }
         #expect(names.count == Int(weft_private_symbol_count()))
         #expect(Set(names).count == names.count)
-        // The ones weft cannot tile without are in the table at all.
-        #expect(PrivateAPI.essential.isSubset(of: Set(names)))
+        // Everything doctor explains is a symbol weft actually uses.
+        #expect(Set(PrivateAPI.impact.keys).isSubset(of: Set(names)))
     }
 
     /// A canary rather than a unit test: on a macOS that no longer exports one of
@@ -39,6 +39,26 @@ import Testing
         #expect(report.missing.contains("SLSTransactionCreate"))
         #expect(!report.passed(.transaction))
         #expect(report.summary.contains("SLSTransactionCreate"))
+    }
+
+    /// Without SkyLight's topology, weft still sees every display, each with
+    /// one desktop that is showing — the degraded mode it tiles in.
+    @Test func withoutTheTopologyEachDisplayHasOneDesktop() {
+        #expect(weft_private_symbol_simulate_missing("SLSCopyManagedDisplaySpaces", true))
+        defer { weft_private_symbol_simulate_missing("SLSCopyManagedDisplaySpaces", false) }
+        #expect(PublicPaths.isMissing("SLSCopyManagedDisplaySpaces"))
+        let (displays, spaces) = WorldReader.readDisplaysAndSpaces(cid: SLSMainConnectionID())
+        #expect(displays.count == SpaceControl.displayLayout().count)
+        for d in displays {
+            #expect(d.spaces == [PublicPaths.syntheticDesktop(for: d.uuid)])
+            #expect(d.currentSpace == d.spaces.first)
+        }
+        #expect(spaces.allSatisfy { $0.isCurrent && !$0.isFullscreen })
+    }
+
+    @Test func aSymbolThatIsPresentIsNotMissing() {
+        #expect(!PublicPaths.isMissing("SLSCopyManagedDisplaySpaces"))
+        #expect(!PublicPaths.isMissing("no such symbol"))
     }
 
     /// Needs a logged-in WindowServer session, which a CI runner is not promised.

@@ -120,8 +120,7 @@ public final class AXApplier: @unchecked Sendable {
                     appEl, kAXWindowsAttribute as CFString, &value
                 ) == .success, let elements = value as? [AXUIElement] {
                     for el in elements {
-                        var wid: UInt32 = 0
-                        if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                        if let wid = PublicPaths.windowID(of: el) {
                             found.append((wid, el))
                         }
                     }
@@ -130,8 +129,7 @@ public final class AXApplier: @unchecked Sendable {
                     var singleVal: CFTypeRef?
                     if AXUIElementCopyAttributeValue(appEl, attr as CFString, &singleVal) == .success,
                        let el = singleVal as! AXUIElement? {
-                        var wid: UInt32 = 0
-                        if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                        if let wid = PublicPaths.windowID(of: el) {
                             found.append((wid, el))
                         }
                     }
@@ -718,6 +716,16 @@ public final class AXApplier: @unchecked Sendable {
 
     // MARK: - Rescue
 
+    /// Put a window at `frame` through Accessibility and wait for the answer.
+    /// The public way to park one, when the WindowServer move is not there.
+    @discardableResult
+    public func placeSynchronously(_ wid: WindowID, pid: Int32, at frame: Frame) -> Bool {
+        guard resolveElement(for: wid, pid: pid) != nil else { return false }
+        var ok = false
+        queue(for: pid).sync { ok = self.setFrameOnQueue(frame, wid: wid, pid: pid) == nil }
+        return ok
+    }
+
     /// Bring a window that is off every display back to a real frame.
     ///
     /// The nudge protocol (S4). An SLS move puts the window back where the
@@ -777,8 +785,7 @@ public final class AXApplier: @unchecked Sendable {
         if AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &value) == .success,
            let elements = value as? [AXUIElement] {
             for el in elements {
-                var w: UInt32 = 0
-                if _AXUIElementGetWindow(el, &w) == .success, w != 0 {
+                if let w = PublicPaths.windowID(of: el) {
                     lock.withLock { windowElements[WindowID(w)] = el }
                     if WindowID(w) == wid {
                         return el
@@ -791,8 +798,7 @@ public final class AXApplier: @unchecked Sendable {
             var singleVal: CFTypeRef?
             if AXUIElementCopyAttributeValue(appEl, attr as CFString, &singleVal) == .success,
                let el = singleVal as! AXUIElement? {
-                var w: UInt32 = 0
-                if _AXUIElementGetWindow(el, &w) == .success, w != 0 {
+                if let w = PublicPaths.windowID(of: el) {
                     lock.withLock { windowElements[WindowID(w)] = el }
                     if WindowID(w) == wid {
                         return el
@@ -1108,8 +1114,7 @@ public enum FocusedWindow {
             guard AXUIElementCopyAttributeValue(appEl, attr as CFString, &value) == .success,
                   let el = value as! AXUIElement?
             else { continue }
-            var wid: UInt32 = 0
-            if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+            if let wid = PublicPaths.windowID(of: el) {
                 return WindowID(wid)
             }
         }

@@ -284,18 +284,31 @@ public enum Doctor {
             print("    \(privateAPI.macOS)")
         } else {
             let essentialLost = privateAPI.missing.contains { PrivateAPI.essential.contains($0) }
-                || !privateAPI.passed(.connection) || !privateAPI.passed(.topology)
             print("[\(essentialLost ? "\u{2717}" : "!")] Private macOS calls: \(found) of "
-                + "\(privateAPI.symbols.count) found, \(privateAPI.failed.count) self-test(s) failed")
+                + "\(privateAPI.symbols.count) found — weft is using public paths for the rest")
             print("    \(privateAPI.macOS)")
+            // What changes, once per effect: several symbols can cost the same
+            // thing, and the ones with no entry are minor.
+            var said = Set<String>()
+            var minor = 0
             for name in privateAPI.missing {
-                print("    - \(name) is missing: \(PrivateAPI.impact[name] ?? "a minor feature") stops working")
+                guard let effect = PrivateAPI.impact[name] else { minor += 1; continue }
+                if said.insert(effect).inserted { print("    - \(effect)") }
             }
-            for check in privateAPI.failed {
-                print("    - \(check.name) failed: \(check.detail)")
+            if minor > 0 { print("    - and \(minor) minor call(s)") }
+            // A failed self-test is news only when every symbol is there: a
+            // missing one fails its checks as a matter of course.
+            if privateAPI.missing.isEmpty {
+                for check in privateAPI.failed {
+                    print("    - self-test \(check.name) failed: \(check.detail)")
+                }
             }
-            print("    A macOS update changed something weft relies on. Nothing else is")
-            print("    affected, and weft keeps running; please report this with the lines above.")
+            if PublicPaths.publicOnlyRequested {
+                print("    (WEFT_PUBLIC_ONLY is set, so this is on purpose.)")
+            } else {
+                print("    A macOS update changed something weft relies on. weft keeps running;")
+                print("    please report this with the lines above.")
+            }
             if essentialLost { allOk = false }
         }
 

@@ -58,14 +58,14 @@ public enum WorldReader {
 
     static func readDisplaysAndSpaces(cid: SLConnectionID) -> ([Display], [Space]) {
         guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else {
-            return ([], [])
+            return PublicPaths.isMissing("SLSCopyManagedDisplaySpaces") ? syntheticTopology() : ([], [])
         }
         var displays: [Display] = []
         var spaces: [Space] = []
 
         for displayDict in raw {
             guard let uuid = displayDict["Display Identifier"] as? String else { continue }
-            let current = SLSpaceID(SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
+            var current = SLSpaceID(SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
             var spaceIDs: [SpaceID] = []
 
             let spaceDicts = displayDict["Spaces"] as? [[String: Any]] ?? []
@@ -92,7 +92,27 @@ public enum WorldReader {
                 ))
             }
 
+            // No answer for which desktop is showing (the call is gone): the
+            // first. Pausing on another desktop needs the real answer; tiling
+            // does not.
+            if current == 0, let first = spaceIDs.first {
+                current = first
+                for i in spaces.indices where spaces[i].displayUUID == uuid { spaces[i].isCurrent = spaces[i].id == first }
+            }
             displays.append(Display(uuid: uuid, spaces: spaceIDs, currentSpace: current))
+        }
+        return (displays, spaces)
+    }
+
+    /// Displays and desktops from public CoreGraphics alone: one desktop per
+    /// display, always showing. See `PublicPaths.syntheticDesktop`.
+    static func syntheticTopology() -> ([Display], [Space]) {
+        var displays: [Display] = []
+        var spaces: [Space] = []
+        for d in SpaceControl.displayLayout() {
+            let sid = PublicPaths.syntheticDesktop(for: d.uuid)
+            displays.append(Display(uuid: d.uuid, spaces: [sid], currentSpace: sid))
+            spaces.append(Space(id: sid, type: 0, displayUUID: d.uuid, isCurrent: true, windows: []))
         }
         return (displays, spaces)
     }
@@ -113,7 +133,9 @@ public enum WorldReader {
     /// Current space per display, without building a whole world. Used by the
     /// space-focus verification loop, which must not pay for a window sweep.
     public static func currentSpaces() -> [String: SpaceID] {
-        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [:] }
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else {
+            return SpaceControl.currentSpaceByDisplay()
+        }
         var out: [String: SpaceID] = [:]
         for displayDict in raw {
             guard let uuid = displayDict["Display Identifier"] as? String else { continue }
@@ -187,9 +209,17 @@ public enum WorldReader {
             ? axBoundWindowIDs(pids: Set(candidates.map { $0.pid }))
             : []
 
+        // Without SkyLight's window-to-desktop map, a window is on the
+        // synthetic desktop of the display it is on.
+        let publicSpaces = PublicPaths.isMissing("SLSCopySpacesForWindows")
+        let layout = publicSpaces ? SpaceControl.displayLayout() : []
         var out: [WindowInfo] = []
         for c in candidates {
-            let spaceIDs = spacesForWindow(cid: cid, wid: c.wid)
+            let spaceIDs = publicSpaces
+                ? windowBounds(cid: cid, wid: c.wid)
+                    .flatMap { r in PublicPaths.display(of: Frame(x: r.minX, y: r.minY, width: r.width, height: r.height), among: layout) }
+                    .map { [PublicPaths.syntheticDesktop(for: $0)] } ?? []
+                : spacesForWindow(cid: cid, wid: c.wid)
             guard !spaceIDs.isEmpty else { continue }
             guard let frame = windowBounds(cid: cid, wid: c.wid) else { continue }
             out.append(WindowInfo(
@@ -248,7 +278,11 @@ public enum WorldReader {
 
     static func windowBounds(cid: SLConnectionID, wid: WindowID) -> CGRect? {
         var rect = CGRect.zero
-        return SLSGetWindowBounds(cid, wid, &rect) == 0 ? rect : nil
+        let rc = SLSGetWindowBounds(cid, wid, &rect)
+        if rc == 0 { return rect }
+        // The public window list has the same bounds; it is only slower.
+        guard rc == Int32(CGError.notImplemented.rawValue), let f = PublicPaths.frame(of: wid) else { return nil }
+        return CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
     }
 
     /// Every window the WindowServer has ordered in, on any display. One
@@ -300,8 +334,7 @@ public enum WorldReader {
                 appEl, kAXWindowsAttribute as CFString, &value
             ) == .success, let elements = value as? [AXUIElement] {
                 for el in elements {
-                    var wid: UInt32 = 0
-                    if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                    if let wid = PublicPaths.windowID(of: el) {
                         out.insert(wid)
                     }
                 }
@@ -310,8 +343,7 @@ public enum WorldReader {
                 var singleVal: CFTypeRef?
                 if AXUIElementCopyAttributeValue(appEl, attr as CFString, &singleVal) == .success,
                    let el = singleVal as! AXUIElement? {
-                    var wid: UInt32 = 0
-                    if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                    if let wid = PublicPaths.windowID(of: el) {
                         out.insert(wid)
                     }
                 }

@@ -20,7 +20,11 @@ public enum SpaceControl {
         let cid = WorldReader.cid
         let arr = [NSNumber(value: wid)] as CFArray
         guard let result = SLSCopySpacesForWindows(cid, 0x7, arr) as? [NSNumber] else {
-            return []
+            guard PublicPaths.isMissing("SLSCopySpacesForWindows"),
+                  let frame = WorldReader.frame(of: wid),
+                  let display = PublicPaths.display(of: frame, among: displayLayout())
+            else { return [] }
+            return [PublicPaths.syntheticDesktop(for: display)]
         }
         return result.map { $0.uint64Value }
     }
@@ -171,11 +175,22 @@ extension SpaceControl {
     /// setup.
     public static func currentSpaceByDisplay() -> [String: SpaceID] {
         let cid = SLSMainConnectionID()
-        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [:] }
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else {
+            let (displays, _) = PublicPaths.isMissing("SLSCopyManagedDisplaySpaces")
+                ? WorldReader.syntheticTopology() : ([], [])
+            return Dictionary(uniqueKeysWithValues: displays.map { ($0.uuid, $0.currentSpace) })
+        }
         var out: [String: SpaceID] = [:]
         for displayDict in raw {
             guard let uuid = displayDict["Display Identifier"] as? String else { continue }
-            out[uuid] = SpaceID(SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
+            var current = SpaceID(SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
+            // No answer (the call is gone): the first desktop, as WorldReader
+            // decides it. Zero would read as "paused" on every display.
+            if current == 0 {
+                let first = (displayDict["Spaces"] as? [[String: Any]])?.first
+                current = (first?["id64"] as? NSNumber)?.uint64Value ?? 0
+            }
+            out[uuid] = current
         }
         return out
     }

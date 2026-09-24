@@ -70,30 +70,28 @@ public enum PrivateAPI {
         case transaction
     }
 
-    /// What stops working when a symbol is missing, for `weftctl doctor`.
-    /// A symbol not listed here costs something minor enough that its name
-    /// says it.
+    /// What a missing symbol costs, for `weftctl doctor`. Every one has a
+    /// public path now (`PublicPaths`), so these read as slower or less,
+    /// never as broken. A symbol not listed costs something its name says.
     public static let impact: [String: String] = [
-        "SLSMainConnectionID": "everything — weft cannot talk to the WindowServer",
-        "SLSCopyManagedDisplaySpaces": "finding windows and desktops",
-        "SLSManagedDisplayGetCurrentSpace": "knowing which desktop is showing",
-        "SLSCopySpacesForWindows": "knowing which desktop a window is on",
-        "SLSGetWindowBounds": "reading window frames (tiling falls back to what it asked for)",
-        "SLSMoveWindow": "hiding and showing workspaces",
+        "SLSMainConnectionID": "every WindowServer speed-up; weft runs on public paths alone",
+        "SLSCopyManagedDisplaySpaces": "knowing about other macOS desktops — weft manages one desktop per display and cannot pause",
+        "SLSManagedDisplayGetCurrentSpace": "knowing which desktop is showing — weft cannot pause on another one",
+        "SLSCopySpacesForWindows": "knowing a window's desktop exactly — weft goes by which display it is on",
+        "SLSGetWindowBounds": "fast window frames — read from the public window list instead",
+        "SLSMoveWindow": "instant hiding — workspaces switch through Accessibility, about 30 ms a window",
         "SLSTransactionCreate": "moving several windows on one frame (drags may tear)",
         "SLSNewWindow": "weft's own borders",
         "SLWindowContextCreate": "weft's own borders",
         "CGSNewRegionWithRectList": "weft's own borders",
-        "_AXUIElementGetWindow": "matching windows to Accessibility — windows cannot be tiled",
+        "_AXUIElementGetWindow": "fast window matching — matched by position and size instead",
         "SLSSpaceGetType": "skipping native fullscreen desktops",
-        "SLSCopyActiveMenuBarDisplayIdentifier": "knowing which display has focus",
+        "SLSCopyActiveMenuBarDisplayIdentifier": "knowing which display has focus — the main display is assumed",
     ]
 
-    /// Missing any of these means weft cannot tile at all, rather than
-    /// losing one feature.
-    public static let essential: Set<String> = [
-        "SLSMainConnectionID", "SLSCopyManagedDisplaySpaces", "_AXUIElementGetWindow",
-    ]
+    /// Symbols weft cannot work without. None, since every one has a public
+    /// path; kept so doctor can tell "slower" from "broken" if that changes.
+    public static let essential: Set<String> = []
 
     public static var symbols: [PrivateAPIReport.Symbol] {
         (0..<weft_private_symbol_count()).compactMap { i in
