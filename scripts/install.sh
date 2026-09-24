@@ -104,11 +104,11 @@ echo "==> installing launchd service"
 echo "==> health check"
 "$BINDIR/weftctl" doctor || true
 
-# Give weftd a moment to initialize its socket before opening Setup.
+# Give weftd a moment to initialize its socket before WeftBar asks it anything.
 sleep 1
 
 echo
-echo "==> opening Setup"
+echo "==> starting WeftBar (Setup opens by itself only if a permission is missing)"
 if [ "${WEFT_NO_OPEN:-0}" = 1 ]; then
     echo "    skipped (WEFT_NO_OPEN=1) — open $APPDIR/WeftBar.app when ready"
 else

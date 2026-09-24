@@ -315,7 +315,7 @@ case ":$PATH:" in
        echo "  export PATH=\"$BINDIR:\$PATH\"" ;;
 esac
 
-# Give weftd a moment to initialize its socket before opening Setup.
+# Give weftd a moment to initialize its socket before WeftBar asks it anything.
 sleep 1
 
 if [ "${WEFT_NO_SERVICE:-0}" != 1 ]; then
@@ -363,7 +363,7 @@ fi
 
 echo
 echo "Check status:   weftctl doctor"
-echo "Settings:       open -a WeftBar --args --settings"
+echo "Settings:       the WeftBar menu-bar icon › Settings…  (or: open -a WeftBar --args --settings, with WeftBar quit)"
 # Not a curl one-liner: uninstall.sh needs lib-agents.sh beside it to put the
 # user's own yabai/skhd launchd agents back by the labels it recorded.
 if [ -f "$STAGE/uninstall.sh" ]; then
@@ -373,9 +373,23 @@ else
 fi
 echo
 
+# WeftBar decides for itself whether Setup is needed: it opens Setup only when
+# a permission is missing or Setup was never finished. Saying "opening Setup"
+# here promised a window that, on an ordinary upgrade, correctly never came.
+#
+# An upgrade from before 0.9.15 is different: workspaces changed model then
+# (one managed desktop per display, no more native mode), so it opens Settings
+# on the Workspaces pane, where the new display map shows what changed.
+case "$UPGRADE_FROM" in
+    *"weft 0.9."[0-9]" "* | *"weft 0.9.1"[0-4]" "* | *"an older build"*) WHATS_NEW=1 ;;
+    *) WHATS_NEW=0 ;;
+esac
 if [ "${WEFT_NO_OPEN:-0}" = 1 ]; then
-    say "not opening Setup (WEFT_NO_OPEN=1) — open $APPDIR/WeftBar.app when ready"
+    say "not opening WeftBar (WEFT_NO_OPEN=1) — open $APPDIR/WeftBar.app when ready"
+elif [ "$WHATS_NEW" = 1 ]; then
+    say "opening Settings › Workspaces — workspaces work differently since 0.9.15"
+    open "$APPDIR/WeftBar.app" --args --settings --tab workspaces
 else
-    say "opening Setup"
+    say "starting WeftBar in the menu bar (Setup opens by itself only if a permission is missing)"
     open "$APPDIR/WeftBar.app"
 fi
