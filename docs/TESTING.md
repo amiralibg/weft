@@ -216,6 +216,34 @@ weftctl trace reset
 weftctl query trace
 ```
 
+## H2. Release checklist — budgets and every macOS beta
+
+Run before tagging a release, on a release build, and on every macOS beta
+before it ships (REDESIGN.md, "Performance"). Each command exits non-zero on
+a miss.
+
+```bash
+weftctl doctor --selftest                     # hide and show a test window, WindowServer path
+WEFT_PUBLIC_ONLY=1 weftctl doctor --selftest  # the same with no private calls at all
+WEFT_PUBLIC_ONLY=1 weftctl doctor             # what each missing private call would cost
+weftctl bench idle 60                         # leave the machine alone for a minute
+weftctl bench "space focus recent" -n 50      # needs two workspaces with windows in them
+```
+
+| | budget | measured 2026-09-24, macOS 27.0 |
+|---|---|---|
+| hide one window, WindowServer | < 10 ms (self-test warns above) | 2.5 ms including the ledger fsync |
+| hide one window, Accessibility | — (slower by design) | 52 ms, clamped 27 pt short vertically |
+| show one window | — | 0.8 ms / 3.5 ms |
+| `weftd` idle CPU | ≤ 0.5 % over 60 s (`bench idle`) | not yet measured on a release build |
+| `weftd` memory | ≤ 40 MB resident (`bench idle`) | not yet measured on a release build |
+| workspace switch, 20 windows / 6 apps | < 60 ms (`bench "space focus recent"`) | not yet measured |
+
+The self-test's window belongs to a second `weftctl` process: Accessibility
+requests are answered on the target's main thread, and weft hides other apps'
+windows, never its own. It is up for about a second and nothing else is
+touched.
+
 ## I. What to send back when reporting
 
 ```bash

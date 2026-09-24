@@ -16,9 +16,11 @@ func usage() -> Never {
           weftctl exec '<shell command>'            # run it through /bin/sh
           weftctl subscribe [--all]    # live event stream (Ctrl-C to exit)
           weftctl doctor               # diagnostic health check
+          weftctl doctor --selftest    # hide and show a test window, timed (every macOS beta)
           weftctl logs [-n N] [-f]     # the daemon's log, for a bug report
           weftctl rescue               # bring back windows stranded off every display
           weftctl bench <cmd> [-n N]   # latency benchmark, histogram, daemon phases
+          weftctl bench idle [secs]    # weftd's CPU and memory while nothing happens
           weftctl trace reset          # clear the daemon's phase samples
           weftctl migrate [--write]    # migrate yabai/skhd configuration
           weftctl config tidy                   # drop settings weft no longer reads
@@ -64,7 +66,11 @@ if ["--version", "-v", "version"].contains(args[0]) {
 ignoreSIGPIPE()
 
 // 1. Doctor command
+if args[0] == "__selftest-window" { LiveSelfTest.serveWindow() }
 if args[0] == "doctor" {
+    if args.contains("--selftest") {
+        exit(LiveSelfTest.run() ? 0 : 1)
+    }
     Doctor.run()
     exit(0)
 }
@@ -113,6 +119,10 @@ if args[0] == "migrate" {
 }
 
 // 4. Bench command
+if args[0] == "bench", args.count >= 2, args[1] == "idle" {
+    let seconds = args.count >= 3 ? Int(args[2]) ?? 60 : 60
+    exit(IdleBench.run(seconds: seconds) ? 0 : 1)
+}
 if args[0] == "bench" {
     guard args.count >= 2 else {
         fputs("usage: weftctl bench <command> [-n count]\n", stderr)

@@ -228,7 +228,7 @@ public final class AXApplier: @unchecked Sendable {
             // window (a game, a kiosk view) is always large, and floating one
             // of those would be much worse than tiling a badge.
             var bounds = CGRect.zero
-            if SLSGetWindowBounds(self.cid, wid, &bounds) == 0,
+            if Self.readBounds(wid, &bounds) == 0,
                bounds.width < 480 || bounds.height < 320
             {
                 var button: CFTypeRef?
@@ -525,7 +525,7 @@ public final class AXApplier: @unchecked Sendable {
         var moved = false
         for (wid, frame) in frames {
             var pre = CGRect.zero
-            let readable = SLSGetWindowBounds(cid, wid, &pre) == 0
+            let readable = Self.readBounds(wid, &pre) == 0
             let needsMove = !readable
                 || abs(pre.minX - frame.x) > 0.5 || abs(pre.minY - frame.y) > 0.5
             let needsResize = !readable
@@ -715,6 +715,15 @@ public final class AXApplier: @unchecked Sendable {
     }
 
     // MARK: - Rescue
+
+    /// A window's bounds, as `SLSGetWindowBounds` returns them — 0 on success
+    /// — falling back to the public window list when that call is gone, so
+    /// the verify step works on the public path too.
+    static func readBounds(_ wid: WindowID, _ out: inout CGRect) -> Int32 {
+        guard let r = WorldReader.windowBounds(cid: WorldReader.cid, wid: wid) else { return 1 }
+        out = r
+        return 0
+    }
 
     /// Put a window at `frame` through Accessibility and wait for the answer.
     /// The public way to park one, when the WindowServer move is not there.
@@ -914,7 +923,7 @@ public final class AXApplier: @unchecked Sendable {
             // verdict; size drift is app constraint, not refusal).
             if !slsOK { return .noAXElement }
             var rect = CGRect.zero
-            guard SLSGetWindowBounds(cid, wid, &rect) == 0 else { return .boundsUnreadable }
+            guard Self.readBounds(wid, &rect) == 0 else { return .boundsUnreadable }
             let posOK = abs(rect.minX - target.x) <= verifyTolerance
                 && abs(rect.minY - target.y) <= verifyTolerance
             lock.withLock {
@@ -930,6 +939,19 @@ public final class AXApplier: @unchecked Sendable {
             return posOK ? nil : .positionRejected(want: target, got: rect.origin)
         }
 
+        // How the result is read back. Normally the WindowServer's bounds; on
+        // the public path the app's own answer through the element just
+        // written, because the public window list reports a move late and a
+        // correct write read too early looks refused.
+        let publicBounds = slsStatus == Int32(CGError.notImplemented.rawValue)
+        func readBack(_ out: inout CGRect) -> Int32 {
+            if publicBounds, let f = PublicPaths.axFrame(el) {
+                out = CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
+                return 0
+            }
+            return Self.readBounds(wid, &out)
+        }
+
         // Is the size already right? An AX size write is the expensive half of
         // this — it forces the app through a full relayout, and a browser or
         // an Electron window can spend tens of milliseconds there. Moving a
@@ -942,7 +964,7 @@ public final class AXApplier: @unchecked Sendable {
         // swallowed the 2pt steps a slow drag is made of, so a resize would
         // simply not happen until the cursor moved far enough in one event.
         var pre = CGRect.zero
-        let preReadable = SLSGetWindowBounds(cid, wid, &pre) == 0
+        let preReadable = readBack(&pre) == 0
         let sizeAlreadyRight = preReadable
             && abs(pre.width - frame.width) <= 0.5
             && abs(pre.height - frame.height) <= 0.5
@@ -989,7 +1011,7 @@ public final class AXApplier: @unchecked Sendable {
         var rect = CGRect.zero
         var posOK = false
         var haveRect = false
-        if SLSGetWindowBounds(cid, wid, &rect) == 0 {
+        if readBack(&rect) == 0 {
             haveRect = true
             posOK = abs(rect.minX - target.x) <= verifyTolerance
                 && abs(rect.minY - target.y) <= verifyTolerance
@@ -999,7 +1021,7 @@ public final class AXApplier: @unchecked Sendable {
                     Trace.time("ax.correction", detail: "\(who) \(order)") {
                         AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
                     }
-                    if SLSGetWindowBounds(cid, wid, &rect) == 0 {
+                    if readBack(&rect) == 0 {
                         posOK = abs(rect.minX - target.x) <= verifyTolerance
                             && abs(rect.minY - target.y) <= verifyTolerance
                     } else { haveRect = false }
@@ -1007,10 +1029,14 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         tVerify.end(detail: who)
-        let ok = slsOK && haveRect && posOK
+        // Where the window is decides it, not which route got it there. The
+        // WindowServer move is the fast half, and it is gone on the public
+        // path; requiring it failed every frame write there, and a window whose
+        // writes all fail is struck out as a quirk and floated.
+        let ok = haveRect && posOK
         let reason: FailureReason? = ok ? nil
-            : !slsOK ? .windowServerRefused(slsStatus)
             : !haveRect ? .boundsUnreadable
+            : !slsOK ? .windowServerRefused(slsStatus)
             : .positionRejected(want: target, got: rect.origin)
         // Record echo suppression only on real success; on failure leave any
         // prior expectation alone so observer Moved/Resized events are treated

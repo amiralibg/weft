@@ -109,7 +109,7 @@ public enum PublicPaths {
         abs(a.x - b.x) <= 1 && abs(a.y - b.y) <= 1 && abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
     }
 
-    private static func axFrame(_ el: AXUIElement) -> Frame? {
+    static func axFrame(_ el: AXUIElement) -> Frame? {
         var posRef: CFTypeRef?, sizeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
               AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
@@ -171,13 +171,32 @@ public final class AXParkMover: @unchecked Sendable {
         self.applier = applier
     }
 
+    /// How far from the asked-for spot a window may land and still count as
+    /// moved: macOS keeps up to ~50 points of a window reachable (S4, S9).
+    static let clampAllowance = 100.0
+
     public func move(_ wid: WindowID, to point: CGPoint) -> Bool {
         guard let pid = PublicPaths.ownerPID(of: wid),
               let current = WorldReader.frame(of: wid)
         else { return false }
-        return applier.placeSynchronously(
+
+        if applier.placeSynchronously(
             wid, pid: pid,
             at: Frame(x: point.x, y: point.y, width: current.width, height: current.height)
-        )
+        ) { return true }
+        // Clamped is still moved: parking asks for a spot macOS will not quite
+        // allow, and the parker records where the window really went. The
+        // public window list catches up with an Accessibility move a moment
+        // late, so the landing is waited for — briefly, and only here.
+        let deadline = Date().addingTimeInterval(0.4)
+        repeat {
+            if let landed = WorldReader.frame(of: wid),
+               abs(landed.x - point.x) <= Self.clampAllowance,
+               abs(landed.y - point.y) <= Self.clampAllowance {
+                return true
+            }
+            usleep(20_000)
+        } while Date() < deadline
+        return false
     }
 }

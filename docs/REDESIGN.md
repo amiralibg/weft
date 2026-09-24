@@ -574,7 +574,20 @@ Each phase can ship on its own as the next 0.9.x release.
      marker window — the synthetic topology made it unnecessary. The AX
      fallback hides one window at a time rather than in parallel per app.
 7. **Budgets in the release checklist**, plus `weftctl doctor --selftest`,
-   which the maintainer runs on each macOS beta before it ships.
+   which the maintainer runs on each macOS beta before it ships. **Done for 0.9.15:**
+   - `weftctl doctor --selftest` parks and unparks a window owned by a second
+     weftctl process, times both, and checks the two properties the design
+     rests on: one point left on screen, and the window still in the
+     on-screen list. `WEFT_PUBLIC_ONLY=1` runs it through Accessibility.
+   - `weftctl bench idle [secs]` samples weftd's CPU and resident memory
+     against the budgets.
+   - The checklist and the first measurements are in `docs/TESTING.md` §H2.
+   - Running the public-path self-test on real hardware found three bugs no
+     unit test could: a frame write counted as failed whenever the
+     WindowServer move was unavailable (every tile on the public path would
+     have been struck out and floated), verification through the public
+     window list reading a move before it lands, and the park mover not
+     allowing for Accessibility's clamp. All fixed.
 
 ## Still to measure
 
