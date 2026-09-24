@@ -696,3 +696,15 @@ private let ws3 = WorkspaceID(3)
     #expect(s.resolveOrCreateWorkspace("nope") == nil)
     #expect(s.wsOrder.count == 4)
 }
+
+/// A restart while another desktop is showing — an update does that — must
+/// not make that desktop weft's. The one managed before is restored first,
+/// and the display starts paused until the user goes back.
+@Test func aRestartOnAnotherDesktopKeepsTheManagedOne() {
+    var s = SpaceState()
+    s.managed = ["A": 10]   // from membership.json, this boot
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 20)], names: ["a", "b"])
+    #expect(s.managed["A"] == 10)
+    #expect(s.isPaused("A"))
+    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
+}

@@ -1318,6 +1318,9 @@ final class Daemon: @unchecked Sendable {
                 // numerics. Delete labels.json to re-adopt the config's names
                 // wholesale.
                 let declared = cfg.spaces.map { $0.label }
+                // The desktops weft managed before a restart in this boot;
+                // `adoptDisplays` keeps each one that still exists.
+                if sp.managed.isEmpty { sp.managed = Daemon.loadManaged() }
                 sp.adoptDisplays(
                     reported, names: !declared.isEmpty ? declared : Daemon.loadLabels(), pins: pins
                 )
@@ -3724,6 +3727,11 @@ final class Daemon: @unchecked Sendable {
     private struct SavedMembership: Codable {
         var boot: Int
         var workspaces: [[WindowID]]
+        /// Display uuid → the desktop weft managed there. Space ids hold for
+        /// a boot, which is exactly how long this file is believed; without it
+        /// a restart while another desktop is showing — an update does that —
+        /// would make that desktop weft's and leave the real one untiled.
+        var managed: [String: SpaceID]?
     }
 
     static func membershipFile() -> URL {
@@ -3739,17 +3747,23 @@ final class Daemon: @unchecked Sendable {
         return Int(tv.tv_sec)
     }
 
-    static func loadMembership() -> [[WindowID]] {
+    private static func loadSaved() -> SavedMembership? {
         guard let data = try? Data(contentsOf: membershipFile()),
               let saved = try? JSONDecoder().decode(SavedMembership.self, from: data),
               saved.boot == bootTime()
-        else { return [] }
-        return saved.workspaces
+        else { return nil }
+        return saved
     }
+
+    static func loadMembership() -> [[WindowID]] { loadSaved()?.workspaces ?? [] }
+
+    static func loadManaged() -> [String: SpaceID] { loadSaved()?.managed ?? [:] }
 
     private func writeMembership(_ sp: SpaceState) {
         guard !sp.wsOrder.isEmpty else { return }
-        let saved = SavedMembership(boot: Self.bootTime(), workspaces: sp.persistedMembership())
+        let saved = SavedMembership(
+            boot: Self.bootTime(), workspaces: sp.persistedMembership(), managed: sp.managed
+        )
         let url = Daemon.membershipFile()
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
