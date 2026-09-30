@@ -164,6 +164,14 @@ public enum PublicPaths {
 /// keeps 40 points of a window reachable when it is moved toward negative x,
 /// so a left-corner park leaves more showing. `Parker` records where each
 /// window actually landed, so finding it again does not depend on the clamp.
+/// The windows whose app confirmed a move, filled from several threads.
+private final class ConfirmedSet: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wids: Set<WindowID> = []
+    func insert(_ wid: WindowID) { lock.withLock { _ = wids.insert(wid) } }
+    var value: Set<WindowID> { lock.withLock { wids } }
+}
+
 public final class AXParkMover: @unchecked Sendable {
     private let applier: AXApplier
 
@@ -176,27 +184,74 @@ public final class AXParkMover: @unchecked Sendable {
     static let clampAllowance = 100.0
 
     public func move(_ wid: WindowID, to point: CGPoint) -> Bool {
-        guard let pid = PublicPaths.ownerPID(of: wid),
-              let current = WorldReader.frame(of: wid)
-        else { return false }
+        moveAll([(wid, point)]).contains(wid)
+    }
 
-        if applier.placeSynchronously(
-            wid, pid: pid,
-            at: Frame(x: point.x, y: point.y, width: current.width, height: current.height)
-        ) { return true }
+    /// `moveAll` for windows going home rather than into hiding. A move the
+    /// app confirms counts at once: nothing is recorded from the landing, so
+    /// waiting for the WindowServer's bounds to catch up — the better part of
+    /// every show — bought nothing. Only a move the app did not confirm is
+    /// waited for.
+    public func moveHome(_ moves: [(WindowID, CGPoint)]) -> Set<WindowID> {
+        moveAll(moves, trustConfirmed: true)
+    }
+
+    /// Move several windows at once; the ones that landed.
+    ///
+    /// A workspace switch hides one workspace's windows and shows another's,
+    /// and each move is a round trip to its app. One after another, with a
+    /// wait for each landing, a switch cost the sum of them: a few windows
+    /// and it was a tenth of a second or more before the screen changed.
+    /// Apps are asked at the same time — each app's own moves still go in
+    /// order on its queue in the applier — and the landings are waited for
+    /// together.
+    public func moveAll(_ moves: [(WindowID, CGPoint)], trustConfirmed: Bool = false) -> Set<WindowID> {
+        var byPid: [Int32: [(wid: WindowID, point: CGPoint, size: CGSize)]] = [:]
+        for (wid, point) in moves {
+            guard let pid = PublicPaths.ownerPID(of: wid), let current = WorldReader.frame(of: wid) else { continue }
+            byPid[pid, default: []].append((wid, point, CGSize(width: current.width, height: current.height)))
+        }
+        let groups = Array(byPid)
+        let confirmedBox = ConfirmedSet()
+        DispatchQueue.concurrentPerform(iterations: groups.count) { i in
+            let (pid, items) = groups[i]
+            for item in items {
+                let ok = applier.placeSynchronously(
+                    item.wid, pid: pid,
+                    at: Frame(x: item.point.x, y: item.point.y, width: item.size.width, height: item.size.height)
+                )
+                if ok { confirmedBox.insert(item.wid) }
+            }
+        }
         // Clamped is still moved: parking asks for a spot macOS will not quite
         // allow, and the parker records where the window really went. The
-        // public window list catches up with an Accessibility move a moment
-        // late, so the landing is waited for — briefly, and only here.
+        // WindowServer's bounds catch up with an Accessibility move a moment
+        // late, so the landing is waited for — also when the app said yes,
+        // because the parker records the landing from those bounds next.
+        var waiting = Dictionary(
+            groups.flatMap { $0.value }.map { ($0.wid, $0.point) }, uniquingKeysWith: { a, _ in a }
+        )
+        var landed: Set<WindowID> = []
+        if trustConfirmed {
+            let confirmed = confirmedBox.value
+            landed = confirmed
+            for wid in confirmed { waiting.removeValue(forKey: wid) }
+        }
         let deadline = Date().addingTimeInterval(0.4)
-        repeat {
-            if let landed = WorldReader.frame(of: wid),
-               abs(landed.x - point.x) <= Self.clampAllowance,
-               abs(landed.y - point.y) <= Self.clampAllowance {
-                return true
+        while true {
+            for (wid, point) in waiting {
+                if let at = WorldReader.frame(of: wid),
+                   abs(at.x - point.x) <= Self.clampAllowance,
+                   abs(at.y - point.y) <= Self.clampAllowance {
+                    landed.insert(wid)
+                    waiting.removeValue(forKey: wid)
+                }
             }
-            usleep(20_000)
-        } while Date() < deadline
-        return false
+            if waiting.isEmpty || Date() >= deadline { break }
+            // Short: the bounds usually catch up within a few milliseconds,
+            // and every step of the poll is a step of the switch.
+            usleep(2_000)
+        }
+        return landed
     }
 }

@@ -156,6 +156,23 @@ public enum WorldReader {
 
     private static let ownPID = ProcessInfo.processInfo.processIdentifier
 
+    /// WeftBar's focus sink (see `FocusSink`), if `pid` has one on screen.
+    /// One window-list read, no AX; only asked when a workspace empties.
+    public static func focusSink(ownedBy pid: Int32) -> WindowID? {
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for w in info where (w[kCGWindowOwnerPID as String] as? Int).map(Int32.init) == pid {
+            let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            guard (bounds["Width"] as? Double) == FocusSink.side,
+                  (bounds["Height"] as? Double) == FocusSink.side,
+                  let wid = w[kCGWindowNumber as String] as? Int, wid != 0
+            else { continue }
+            return WindowID(wid)
+        }
+        return nil
+    }
+
     static func readWindows(cid: SLConnectionID, includeAXBinding: Bool = false) -> [WindowInfo] {
         guard let info = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements],

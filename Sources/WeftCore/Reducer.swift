@@ -151,10 +151,20 @@ public enum Reducer {
         case .move(let dir):
             let frames = layout(state.tree, in: state.screen, config: state.config)
             tree = state.tree.movingIntoStack(towards: dir, frames: frames)
+        case .side(let dir):
+            tree = state.tree.stackingSide(dir)
         }
         guard tree != state.tree else { return (state, []) }
         let newState = State(tree: tree, screen: state.screen, config: state.config)
         var mutations = relayoutMutations(state: newState, previous: state)
+        // A side stacked from the other side has no focused member to come
+        // forward, and its members all sit at one frame in whatever order
+        // they were: its front member has to be raised by name.
+        if case .side = sub {
+            for front in stackPositions(in: tree).keys.sorted() where front != tree.focus {
+                mutations.append(.raise(front))
+            }
+        }
         // Any structural change here re-overlaps frames (wrap/split/unstack)
         // or flips visibility (next/prev) — the focused member ends up front.
         if let focus = tree.focus {
@@ -231,6 +241,82 @@ public enum Reducer {
                 || (abs(along - best!.along) <= 1e-9 && off < best!.off)
             {
                 best = (id, along, off)
+            }
+        }
+        return best?.id
+    }
+
+    /// Directional focus in a tiling workspace that also holds floating
+    /// windows. `tiles` are the laid-out frames of the tiles that show (no
+    /// hidden stack members); `floats` are the live frames of the floating
+    /// windows that show.
+    ///
+    /// The tree walk alone never reaches a float, and started from the tree's
+    /// focus even when the window being typed into was a float, so a float
+    /// could be neither focused nor left by key. From a tile, the tile
+    /// neighbour stands unless a float's centre lies nearer that way — so a
+    /// float between two tiles is a step between them. From a float, every
+    /// other window counts, by centre: a float overlaps what is under it, so
+    /// there are no shared edges to go by.
+    ///
+    /// When nothing lies that way, the key changes layer instead: from a
+    /// float to the tile under it, from a tile to the float over it. A float
+    /// is placed centred on the screen, so over a single tile the two share a
+    /// centre, neither lies any way of the other, and no key went from one to
+    /// the other. A tile whose stack can cycle (`stackCycles`) keeps that
+    /// fallback, and nil sends the caller to the plain reducer for it.
+    public static func focusTarget(
+        from focused: WindowID,
+        tiles: [WindowID: Frame],
+        floats: [WindowID: Frame],
+        towards dir: Direction,
+        stackCycles: Bool = false
+    ) -> WindowID? {
+        func along(_ from: Frame, _ to: Frame) -> Double {
+            switch dir {
+            case .west: return centerX(from) - centerX(to)
+            case .east: return centerX(to) - centerX(from)
+            case .north: return centerY(from) - centerY(to)
+            case .south: return centerY(to) - centerY(from)
+            }
+        }
+        if let from = tiles[focused] {
+            let tile = neighbour(of: focused, in: tiles, towards: dir)
+            let float = nearestByCentre(from: from, in: floats, excluding: focused, towards: dir)
+            guard let float, let floatFrame = floats[float] else {
+                return tile ?? (stackCycles ? nil : stacked(with: from, in: floats, excluding: focused))
+            }
+            guard let tile, let tileFrame = tiles[tile] else { return float }
+            return along(from, floatFrame) < along(from, tileFrame) ? float : tile
+        }
+        guard let from = floats[focused] else { return nil }
+        let all = tiles.merging(floats) { tile, _ in tile }
+        return nearestByCentre(from: from, in: all, excluding: focused, towards: dir)
+            ?? stacked(with: from, in: tiles, excluding: focused)
+            ?? stacked(with: from, in: floats, excluding: focused)
+    }
+
+    /// The window `from` is on top of, or under: one of the two has its
+    /// centre inside the other. The most shared area wins, ties the lower id,
+    /// so the answer does not depend on dictionary order. A float that merely
+    /// clips a tile's edge is not on it — a key pressed towards the screen
+    /// edge must not jump the other way into it.
+    static func stacked(
+        with from: Frame,
+        in frames: [WindowID: Frame],
+        excluding: WindowID
+    ) -> WindowID? {
+        func contains(_ r: Frame, _ x: Double, _ y: Double) -> Bool {
+            x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        var best: (id: WindowID, area: Double)?
+        for (id, r) in frames where id != excluding {
+            guard contains(r, centerX(from), centerY(from)) || contains(from, centerX(r), centerY(r)) else { continue }
+            let w = min(from.x + from.width, r.x + r.width) - max(from.x, r.x)
+            let h = min(from.y + from.height, r.y + r.height) - max(from.y, r.y)
+            let area = max(w, 0) * max(h, 0)
+            if best == nil || area > best!.area + 1e-9 || (abs(area - best!.area) <= 1e-9 && id < best!.id) {
+                best = (id, area)
             }
         }
         return best?.id

@@ -545,9 +545,17 @@ extension Tree {
     /// resizes made elsewhere while it was stacked go back too.
     public func unstacking() -> Tree {
         guard let root, let focused = focus,
-              let sp = stackPath(in: root, target: focused),
+              let sp = stackPath(in: root, target: focused)
+        else { return self }
+        return unstacking(at: sp)
+    }
+
+    /// Undo the stack at `sp`, whether or not focus is in it. `unstacking()`
+    /// for the stack focus is in; `stack side` for the one on a side.
+    private func unstacking(at sp: [Int]) -> Tree {
+        guard let root,
               let node = nodeAt(root, path: sp),
-              case .container(var c) = node
+              case .container(var c) = node, c.layout == .stack
         else { return self }
         if let origin = c.origin {
             let members = Set(node.windows)
@@ -555,11 +563,11 @@ extension Tree {
             case .subtree where Set(origin.node.windows) == members:
                 var copy = self
                 copy.root = replacing(root, at: sp, with: origin.node)
-                return copy.focusing(focused)
+                return copy.refocused()
             case .root where Set(origin.node.windows) == Set(root.windows):
                 var copy = self
                 copy.root = origin.node
-                return copy.focusing(focused)
+                return copy.refocused()
             default:
                 break
             }
@@ -576,7 +584,70 @@ extension Tree {
         c.origin = nil
         var copy = self
         copy.root = replacing(root, at: sp, with: .container(c))
-        return copy.focusing(focused)
+        return copy.refocused()
+    }
+
+    /// Re-point every stack on the way to the focused window at it, after a
+    /// structural change. No focus, nothing to point at.
+    private func refocused() -> Tree {
+        guard let focus else { return self }
+        return focusing(focus)
+    }
+
+    /// `stack side <dir>`: every window on that side of the layout in one
+    /// stack, and the other side left alone. Again to undo.
+    ///
+    /// The side is a child of the outermost split that runs along `dir`'s
+    /// axis, found on the way down to the focused window: in the default
+    /// spiral, `[1 | [2 / [3 | 4]]]`, `stack side east` stacks 2, 3 and 4 and
+    /// keeps 1 on the west half. `stack toggle` could not say this — it
+    /// stacks the focused window's parent, which on 2 is the pair
+    /// "2, and the 3|4 split", so the right half came back as a stack with a
+    /// split inside it.
+    ///
+    /// The side's windows are flattened into one stack, focused one in front
+    /// if it is on that side. The subtree it replaced is recorded, so undoing
+    /// puts back exactly that arrangement, ratios included.
+    public func stackingSide(_ dir: Direction) -> Tree {
+        guard let root, let path = sidePath(towards: dir), let side = nodeAt(root, path: path) else {
+            return self
+        }
+        if case .container(let c) = side, c.layout == .stack { return unstacking(at: path) }
+        let ids = side.windows
+        guard ids.count > 1 else { return self }
+        var stack = Container(
+            layout: .stack,
+            children: ids.map { .window($0) },
+            active: focus.flatMap { ids.firstIndex(of: $0) } ?? 0
+        )
+        stack.origin = StackOrigin(scope: .subtree, node: side)
+        var copy = self
+        copy.root = replacing(root, at: path, with: .container(stack))
+        // A zoomed window on that side would sit over its own stack.
+        if let zoomed = fullscreen, ids.contains(zoomed) { copy.fullscreen = nil }
+        return copy.refocused()
+    }
+
+    /// The path to the `dir` side of the outermost split along its axis,
+    /// walking from the root towards focus (the first child when nothing is
+    /// focused). Nil when no split on that path runs that way. A stack ends
+    /// the walk: its members share one frame, so it has no sides.
+    private func sidePath(towards dir: Direction) -> [Int]? {
+        guard let root else { return nil }
+        let axis: ContainerLayout = (dir == .east || dir == .west) ? .splitV : .splitH
+        let toFocus = focus.flatMap { pathTo(root, target: $0) } ?? []
+        var path: [Int] = []
+        var node = root
+        while case .container(let c) = node, c.layout != .stack, !c.children.isEmpty {
+            if c.layout == axis {
+                return path + [(dir == .east || dir == .south) ? c.children.count - 1 : 0]
+            }
+            let next = toFocus.count > path.count ? toFocus[path.count] : 0
+            guard c.children.indices.contains(next) else { return nil }
+            path.append(next)
+            node = c.children[next]
+        }
+        return nil
     }
 
     /// `stack all`: every window on the space in one stack, the focused one
@@ -817,10 +888,16 @@ private func removeNode(_ node: Node, id: WindowID) -> (Node?, WindowID?) {
         return wid == id ? (nil, nil) : (node, nil)
     case .container(let c):
         var children: [Node] = []
+        var keptRatios: [Double] = []
+        let ratios = c.ratios.count == c.children.count
+            ? c.ratios : Array(repeating: 1.0 / Double(max(c.children.count, 1)), count: c.children.count)
         var fallback: WindowID?
-        for child in c.children {
+        for (i, child) in c.children.enumerated() {
             let (kept, fb) = removeNode(child, id: id)
-            if let kept { children.append(kept) }
+            if let kept {
+                children.append(kept)
+                keptRatios.append(ratios[i])
+            }
             // Nearest surviving sibling: last kept leaf before the hole, else first after.
             if kept != nil { fallback = kept?.windows.last ?? fallback }
             else if fallback == nil { fallback = fb }
@@ -829,7 +906,15 @@ private func removeNode(_ node: Node, id: WindowID) -> (Node?, WindowID?) {
         if children.count == 1 { return (children[0], fallback ?? children[0].windows.first) }
         var collapsed = c
         collapsed.children = children
-        collapsed.ratios = Array(repeating: 1.0 / Double(children.count), count: children.count)
+        // The removed child's share goes to the others in proportion, and a
+        // container that lost nothing keeps its ratios exactly. Evening out
+        // every surviving container — which this used to do — flattened
+        // every split the user had dragged or resized, all over the tree,
+        // whenever any window closed, floated or moved away.
+        let sum = keptRatios.reduce(0, +)
+        collapsed.ratios = sum > 0
+            ? keptRatios.map { $0 / sum }
+            : Array(repeating: 1.0 / Double(children.count), count: children.count)
         return (.container(collapsed), fallback ?? children[0].windows.first)
     }
 }
@@ -846,10 +931,29 @@ private func swapNodes(_ node: Node, a: WindowID, b: WindowID) -> Node {
     }
 }
 
+/// The innermost split along `axis` that holds the window does the resizing:
+/// it owns the border next to the window. Resizing the outermost one moved a
+/// border across the screen instead and shared the step between everything
+/// on that side of it — in a nested layout a 40-point step grew the window by
+/// 20 and its neighbour by 20.
 private func resizeNode(_ node: Node, target: WindowID, axis: ResizeAxis, deltaPoints: Double, totalSize: Double) -> Node {
     guard case .container(var c) = node else { return node }
     let wantsV = (axis == .horizontal && c.layout == .splitV)
         || (axis == .vertical && c.layout == .splitH)
+    if let idx = c.children.firstIndex(where: { $0.windows.contains(target) }) {
+        // `totalSize` is this node's extent along the axis; a child of a split
+        // along it gets its share, so the step stays in points at any depth.
+        let share = wantsV ? normalizedRatios(c.ratios, count: c.children.count)[idx] : 1
+        let inner = resizeNode(
+            c.children[idx], target: target, axis: axis, deltaPoints: deltaPoints, totalSize: totalSize * share
+        )
+        // Unchanged below: no split that way, or it is at its limit — this
+        // one takes the step.
+        if inner != c.children[idx] {
+            c.children[idx] = inner
+            return .container(c)
+        }
+    }
     if wantsV, let idx = c.children.firstIndex(where: { $0.windows.contains(target) }) {
         // Grow focused child, shrink the neighbour that shares its edge.
         // Last child grows against the previous sibling, others against next.
@@ -864,7 +968,6 @@ private func resizeNode(_ node: Node, target: WindowID, axis: ResizeAxis, deltaP
         c.ratios = ratios
         return .container(c)
     }
-    c.children = c.children.map { resizeNode($0, target: target, axis: axis, deltaPoints: deltaPoints, totalSize: totalSize) }
     return .container(c)
 }
 
@@ -930,6 +1033,60 @@ public struct FloatState: Sendable, Equatable {
         var copy = self
         copy.focus = id
         return copy
+    }
+}
+
+/// A tiling tree as `membership.json` keeps it across a daemon restart: the
+/// shape, the ratios, which stack member is in front, and the focus.
+///
+/// Without it a restart put every window back in its workspace but rebuilt
+/// each tree by inserting the windows one by one, so a layout the user had
+/// arranged came back as whatever the insertion order made of it. Window ids
+/// hold for a boot, which is exactly how long the file is believed.
+///
+/// Not kept: a stack's record of what it replaced (it unstacks side by side
+/// after a restart), and the one-shot split and zoom, which are about the
+/// moment rather than the arrangement.
+public struct SavedTree: Codable, Sendable, Equatable {
+    public indirect enum SavedNode: Codable, Sendable, Equatable {
+        case window(WindowID)
+        case container(layout: ContainerLayout, ratios: [Double], active: Int, children: [SavedNode])
+    }
+
+    public var root: SavedNode?
+    public var focus: WindowID?
+
+    public init(_ tree: Tree) {
+        func save(_ node: Node) -> SavedNode {
+            switch node {
+            case .window(let id): return .window(id)
+            case .container(let c):
+                return .container(layout: c.layout, ratios: c.ratios, active: c.active, children: c.children.map(save))
+            }
+        }
+        root = tree.root.map(save)
+        focus = tree.focus
+    }
+
+    /// The tree back, repaired rather than trusted: a container left with
+    /// fewer than two children collapses into what it holds, and ratios that
+    /// do not match the children are evened out.
+    public var tree: Tree {
+        func load(_ node: SavedNode) -> Node? {
+            switch node {
+            case .window(let id): return .window(id)
+            case .container(let layout, let ratios, let active, let children):
+                let kids = children.compactMap(load)
+                guard kids.count > 1 else { return kids.first }
+                let sum = ratios.reduce(0, +)
+                return .container(ratios.count == kids.count && sum > 0 && ratios.allSatisfy { $0 > 0 }
+                    ? Container(layout: layout, children: kids, ratios: ratios.map { $0 / sum }, active: active)
+                    : Container(layout: layout, children: kids, active: active))
+            }
+        }
+        let root = self.root.flatMap(load)
+        let windows = root?.windows ?? []
+        return Tree(root: root, focus: focus.flatMap { windows.contains($0) ? $0 : nil } ?? windows.first)
     }
 }
 

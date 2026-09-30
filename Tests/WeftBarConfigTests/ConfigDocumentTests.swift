@@ -266,3 +266,50 @@ private func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .newlines
     #expect(TomlValue.steps(TomlValue.literal(steps: steps)) == steps)
     #expect(TomlValue.literal(steps: ["balance"]) == "\"balance\"")
 }
+
+/// A comment after a quoted value is not part of it — including one that
+/// itself ends in a quote, as the shipped weft.toml's border style does.
+@Test func aCommentAfterAQuotedValueIsNotPartOfIt() {
+    #expect(TomlValue.unquote(#""round"          # round follows each window's own corners; or "square""#) == "round")
+    #expect(TomlValue.unquote(#""focus west" # vim-style"#) == "focus west")
+    #expect(TomlValue.unquote(#""a # inside" # outside"#) == "a # inside")
+    #expect(TomlValue.unquote(#"'lit # eral' # c"#) == "'lit # eral'")
+}
+
+/// Numbers and booleans with a note after them read as what they are, and
+/// writing a new value keeps the note where it was.
+@Test func settingAValueKeepsTheCommentAfterIt() {
+    var doc = TomlDocument("""
+    [integrations.borders]
+    style = "round"          # round follows each window's own corners; or "square"
+    width = 2.0  # points
+    enabled = false # off for now
+    """)
+    let i = doc.firstIndex(ofHeader: "[integrations.borders]")!
+    #expect(doc.sections[i].string("style") == "round")
+    #expect(doc.sections[i].double("width") == 2.0)
+    #expect(doc.sections[i].bool("enabled") == false)
+    doc.sections[i].set("style", string: doc.sections[i].string("style")!)
+    doc.sections[i].set("width", double: 3)
+    #expect(doc.render().contains(#"style = "round"          # round follows each window's own corners; or "square""#))
+    #expect(doc.render().contains("width = 3  # points"))
+}
+
+/// A save leaves alone what it did not change: a key the file leaves out
+/// stays out while it holds the default, and a value that already says the
+/// same thing keeps the way it was written.
+@Test func aSaveDoesNotWriteDefaultsOrReformatEqualValues() {
+    var doc = TomlDocument("""
+    [integrations.borders]
+    width = 2.0
+    """)
+    let i = doc.firstIndex(ofHeader: "[integrations.borders]")!
+    doc.sections[i].set("show-inactive", bool: true, default: true)
+    doc.sections[i].set("width", double: 2)
+    #expect(doc.render() == "[integrations.borders]\nwidth = 2.0\n")
+    // Not the default, or already there: written.
+    doc.sections[i].set("show-inactive", bool: false, default: true)
+    #expect(doc.sections[i].bool("show-inactive") == false)
+    doc.sections[i].set("show-inactive", bool: true, default: true)
+    #expect(doc.sections[i].bool("show-inactive") == true)
+}

@@ -151,3 +151,22 @@ public func axWriteOrder(from current: Frame, to target: Frame) -> AXWriteOrder 
     let shrinks = target.width < current.width - 0.5 || target.height < current.height - 0.5
     return shrinks ? .sizeThenPosition : .positionThenSize
 }
+
+/// Whether a window already stands where `target` puts it, so writing the
+/// frame again can be skipped.
+///
+/// The position has to match. The size may be off by up to `sizeSlop` only
+/// when this exact frame was the last one asked for (`lastTarget`): that is
+/// an app that snapped to its own grid — a terminal's cells — and asking
+/// again gets the same answer. Allowing the slop for any target swallowed
+/// every change smaller than it: a gap raised from 8 to 13 moved the tiles
+/// that had to move and left the one that only had to shrink by four points
+/// exactly as it was.
+public func isSettled(_ actual: Frame, at target: Frame, lastTarget: Frame?, sizeSlop: Double) -> Bool {
+    guard abs(actual.x - target.x) < 1, abs(actual.y - target.y) < 1 else { return false }
+    let dw = abs(actual.width - target.width), dh = abs(actual.height - target.height)
+    if dw <= 0.5, dh <= 0.5 { return true }
+    guard dw <= sizeSlop, dh <= sizeSlop, let last = lastTarget else { return false }
+    return abs(last.x - target.x) <= 0.5 && abs(last.y - target.y) <= 0.5
+        && abs(last.width - target.width) <= 0.5 && abs(last.height - target.height) <= 0.5
+}

@@ -46,6 +46,9 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         case modeChanged
         case layoutChanged
         case stackChanged
+        /// A keybind or gesture asked for something and weft could not do
+        /// it. `title` is the command, `message` why.
+        case commandFailed
     }
 
     public var kind: Kind
@@ -59,6 +62,19 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
     public var title: String?
     public var stackIndex: Int?
     public var stackCount: Int?
+    /// `stateChanged`: the workspace showing on the focused display.
+    ///
+    /// Part of the snapshot so that switching between two empty workspaces is
+    /// a change. With only the focused window and the window list in it, the
+    /// two snapshots were identical, the bus dropped the second as a repeat,
+    /// and WeftBar stayed on the first — every switch past one empty
+    /// workspace looked like it had done nothing.
+    public var workspace: String?
+    /// `stateChanged`: the workspace showing on each display, in display
+    /// order, so a change on the other display is a change too.
+    public var showing: [String]?
+    /// `commandFailed`: why, in words meant for the user.
+    public var message: String?
 
     public init(
         kind: Kind,
@@ -71,7 +87,10 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         layout: String? = nil,
         title: String? = nil,
         stackIndex: Int? = nil,
-        stackCount: Int? = nil
+        stackCount: Int? = nil,
+        workspace: String? = nil,
+        showing: [String]? = nil,
+        message: String? = nil
     ) {
         self.kind = kind
         self.window = window
@@ -84,5 +103,8 @@ public struct DaemonEvent: Codable, Sendable, Equatable {
         self.title = title
         self.stackIndex = stackIndex
         self.stackCount = stackCount
+        self.workspace = workspace
+        self.showing = showing
+        self.message = message
     }
 }

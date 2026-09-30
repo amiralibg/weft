@@ -80,6 +80,9 @@ private struct DaemonEventHash: Hashable {
     let title: String?
     let stackIndex: Int?
     let stackCount: Int?
+    let workspace: String?
+    let showing: [String]?
+    let message: String?
 
     init(_ e: DaemonEvent) {
         kind = e.kind
@@ -93,5 +96,8 @@ private struct DaemonEventHash: Hashable {
         title = e.title
         stackIndex = e.stackIndex
         stackCount = e.stackCount
+        workspace = e.workspace
+        showing = e.showing
+        message = e.message
     }
 }

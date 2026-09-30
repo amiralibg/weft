@@ -155,7 +155,7 @@ final class Daemon: @unchecked Sendable {
             fputs("weftd: no display found\n", stderr)
             return nil
         }
-        self.screensByUUID = Dictionary(uniqueKeysWithValues: layout.map { ($0.uuid, $0.visible) })
+        self.screensByUUID = Dictionary(uniqueKeysWithValues: SpaceControl.tilingAreas(layout))
         self.displayOrder = layout.map { $0.uuid }
         loadConfigFile(initial: true)
         bus.sink = { [hub, weak self] event in
@@ -221,9 +221,18 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateMouseModifier(currentConfig().general.mouseModifier)
         input.setBorderDragEnabled(currentConfig().general.mouseBorderResize)
+        input.setWorkspaceSwipe(fingers: currentConfig().general.workspaceSwipeFingers)
         WorldReader.manageMenubarApps = currentConfig().general.manageMenubarApps
         input.onMouseGesture = { [weak self] gesture in
             self?.handleMouseGesture(gesture)
+        }
+        input.onSecureInputBlocking = { [weak self] in
+            fputs("weftd: secure input is on — macOS is withholding keystrokes from weft's keybinds\n", stderr)
+            self?.bus.emit(DaemonEvent(
+                kind: .commandFailed, title: "secure-input",
+                message: "An app has secure input on (a password field, or a terminal's Secure Keyboard Entry), "
+                    + "so macOS is hiding keystrokes from weft. Shortcuts work again once it ends."
+            ))
         }
         // The tap can come up long after launch, when the user grants Input
         // Monitoring with weftd already running. It starts from `.default`
@@ -235,6 +244,8 @@ final class Daemon: @unchecked Sendable {
             self.input.updateKeymap(cfg.keymap)
             self.input.updateMouseModifier(cfg.general.mouseModifier)
             self.input.setBorderDragEnabled(cfg.general.mouseBorderResize)
+            // The swipe's tap was refused along with the keyboard one.
+            self.input.setWorkspaceSwipe(fingers: cfg.general.workspaceSwipeFingers)
             self.syncQueue.async { [weak self] in self?.refreshDividerZones() }
             fputs("weftd: input tap installed late — keybinds are live\n", stderr)
         }
@@ -346,6 +357,7 @@ final class Daemon: @unchecked Sendable {
         // around windows it should have been putting back.
         syncQueue.async { [weak self] in
             self?.unparkFromLedger()
+            self?.restoreFloatingAndSticky()
             self?.syncFromSnapshot(initial: true)
         }
     }
@@ -354,7 +366,7 @@ final class Daemon: @unchecked Sendable {
         // Membership first: the next launch puts every window back in its
         // workspace from this, and unparking below is what makes the windows
         // visible while weft is not running.
-        writeMembership(readSpaces())
+        writeMembership(membershipSnapshot())
         parker.unparkAll()
     }
 
@@ -585,6 +597,7 @@ final class Daemon: @unchecked Sendable {
                 // that is exactly where the user's cursor already is.
                 refreshDividerZones()
                 bus.emit(stateChangedEvent())
+                scheduleMembershipSave()
                 return
             }
             if button == .left && !drag.isFloating {
@@ -600,6 +613,7 @@ final class Daemon: @unchecked Sendable {
                     }
                     applyCurrentSpace()
                     bus.emit(stateChangedEvent())
+                    scheduleMembershipSave()
                 }
             }
         }
@@ -829,6 +843,11 @@ final class Daemon: @unchecked Sendable {
             let response = self.handleCommand(command)
             if !response.ok {
                 fputs("weftd: input command failed: \(response.error ?? command)\n", stderr)
+                // Said on screen as well. A keybind that does nothing looks
+                // exactly like a keybind weft never heard, and the reason —
+                // a paused display, an unknown workspace — was only ever in
+                // this log. WeftBar shows it.
+                self.bus.emit(DaemonEvent(kind: .commandFailed, title: command, message: response.error))
             }
         }
     }
@@ -949,7 +968,7 @@ final class Daemon: @unchecked Sendable {
         let layout = SpaceControl.displayLayout()
         guard !layout.isEmpty else { return }
         screensLock.withLock {
-            screensByUUID = Dictionary(uniqueKeysWithValues: layout.map { ($0.uuid, $0.visible) })
+            screensByUUID = Dictionary(uniqueKeysWithValues: SpaceControl.tilingAreas(layout))
             displayOrder = layout.map { $0.uuid }
         }
     }
@@ -1337,7 +1356,7 @@ final class Daemon: @unchecked Sendable {
                 sp.assignOverrides(kinds: Daemon.loadLayoutOverrides())
                 // And the windows back into the workspaces they were in,
                 // when the file is from this boot.
-                sp.seedMembership(Daemon.loadMembership())
+                sp.seedMembership(Daemon.loadMembership(), trees: Daemon.loadTrees())
             } else {
                 // Displays or desktops changed at runtime: keep every
                 // workspace and label, rehome what lost its desktop, and give
@@ -1998,6 +2017,10 @@ final class Daemon: @unchecked Sendable {
         // closed windows this is the only event there is.
         evictOrderedOut()
         guard let wid else { return }
+        // weft put focus there itself, for an empty workspace. It is on no
+        // display the user chose and holds nothing: recording it would move
+        // "here" to whichever screen the sink happens to sit on.
+        if isFocusSink(wid) { return }
         // Focus may have crossed to the other display; resolve that
         // before asking whether the window is in "the current" layout.
         noteFocusedWindow(wid)
@@ -2214,7 +2237,7 @@ final class Daemon: @unchecked Sendable {
         let known: Set<String> = [
             "--all", "windowCreated", "windowDestroyed", "windowFocused",
             "spaceChanged", "appLaunched", "appTerminated", "displayChanged",
-            "stateChanged", "modeChanged",
+            "stateChanged", "modeChanged", "commandFailed",
         ]
         let filters = Array(parts.dropFirst())
         if filters.isEmpty || filters == ["--all"] { return [] }
@@ -2245,7 +2268,7 @@ final class Daemon: @unchecked Sendable {
             !Set(SpaceControl.spacesForWindow(wid)).isDisjoint(with: visible)
         }
         if let sys = systemFocusLock.withLock({ systemFocusLocked }), showing(sys) { return sys }
-        if let sys = FocusedWindow.current(), showing(sys) { return sys }
+        if let sys = FocusedWindow.current(), !isFocusSink(sys), showing(sys) { return sys }
         return currentLayout().focus
     }
 
@@ -2317,6 +2340,7 @@ final class Daemon: @unchecked Sendable {
             }
             if let sid = home { applySpaceLayout(sid) }
             bus.emit(stateChangedEvent())
+            scheduleMembershipSave()
             return IPCResponse(ok: true, output: "window \(wid) tiled")
         } else {
             let uScreen = usableScreen(for: home)
@@ -2354,6 +2378,7 @@ final class Daemon: @unchecked Sendable {
                 focusAndWarp(window: wid, pid: pid)
             }
             bus.emit(stateChangedEvent())
+            scheduleMembershipSave()
             return IPCResponse(ok: true, output: "window \(wid) floating")
         }
     }
@@ -2565,6 +2590,9 @@ final class Daemon: @unchecked Sendable {
         if case .setFocus(let wid) = command {
             return handleFocusWindow(wid)
         }
+        if case .focus(let dir) = command, let target = focusAcrossFloats(dir) {
+            return handleFocusWindow(target)
+        }
 
         let outcome = reduceOnCore(command)
         let frames = outcome.frames
@@ -2578,9 +2606,39 @@ final class Daemon: @unchecked Sendable {
         }
         // The borders moved with the windows. A stale grab zone is a click
         // swallowed where there is nothing to drag.
-        if !frames.isEmpty { refreshDividerZones() }
+        if !frames.isEmpty {
+            refreshDividerZones()
+            // The tree changed shape; a restart should find it this way.
+            scheduleMembershipSave()
+        }
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
+    }
+
+    /// Where `focus <dir>` goes on a tiling workspace that has a float
+    /// showing, or when the float is what has focus. Nil leaves the command to
+    /// the tree walk, which is all a workspace without floats needs and the
+    /// only thing that cycles a stack — so a tile whose stack can cycle that
+    /// way says so, and keeps cycling rather than stepping into a float.
+    private func focusAcrossFloats(_ dir: Direction) -> WindowID? {
+        let sp = readSpaces()
+        guard let sid = sp.currentSpace, let ws = sp.workspace(on: sid),
+              case .tiling(let tree) = ws.layout
+        else { return nil }
+        let display = displayFrame(sp.displayBySpace[sid])
+        let onScreen = WorldReader.onScreenWindowIDs()
+        var floats: [WindowID: Frame] = [:]
+        for wid in ws.loose.subtracting(tree.windows) where onScreen.contains(wid) {
+            if let f = WorldReader.frame(of: wid), f.intersects(display) { floats[wid] = f }
+        }
+        let system = systemFocusLock.withLock { systemFocusLocked }
+        let focused: WindowID? = system.flatMap { floats[$0] != nil ? $0 : nil } ?? tree.focus
+        guard let focused, !floats.isEmpty else { return nil }
+        let hidden = hiddenStackMembers(in: tree)
+        let tiles = layout(tree, in: usableScreen(for: sid), config: currentConfig().general.asTilingConfig())
+            .filter { !hidden.contains($0.key) }
+        let cycles = tree.cyclingStack(by: (dir == .east || dir == .south) ? 1 : -1) != tree
+        return Reducer.focusTarget(from: focused, tiles: tiles, floats: floats, towards: dir, stackCycles: cycles)
     }
 
     /// What reducing one command produced, before anything is written.
@@ -2645,6 +2703,24 @@ final class Daemon: @unchecked Sendable {
 
     private func handleSpace(_ sub: SpaceCommand) -> IPCResponse {
         switch sub {
+        case .focus(let target) where target == "next" || target == "prev":
+            // Stepping, from a key or a swipe. Resolved here rather than by
+            // `resolveWorkspace` alone, because what to step over depends on
+            // the pins, which are config, and a paused display has no
+            // "current" workspace to step from.
+            let sp = refreshCurrentDesktops()
+            if let display = focusedDisplayUUID(sp), sp.isPaused(display) { return pausedError(sp, display) }
+            let here = focusedDisplayUUID(sp)
+            let pinnedElsewhere = Set(currentPins(currentConfig()).compactMap { label, display in
+                display == here ? nil : sp.id(forLabel: label)
+            })
+            guard let id = sp.workspace(steppingBy: target == "next" ? 1 : -1, skipping: pinnedElsewhere),
+                  let label = sp.label(of: id)
+            else {
+                return IPCResponse(ok: false, error: "no other \(target == "next" ? "next" : "previous") workspace "
+                    + "with windows in it on this display")
+            }
+            return handleSpace(.focus(label))
         case .focus(let target):
             // From the WindowServer, not the cache: a swipe or a fullscreen app
             // the notification has not reported yet would otherwise have weft
@@ -2988,14 +3064,20 @@ final class Daemon: @unchecked Sendable {
         let outgoing = sp.workspaces[currentActive]?.members ?? []
         if !swapping, !outgoing.isEmpty {
             do {
+                let t = Trace.start("switch.park")
                 try park(outgoing, from: display)
+                t.end(detail: "\(outgoing.count) window(s)")
             } catch {
                 fputs("weftd: failed to park workspace \(currentActive): \(error)\n", stderr)
             }
         }
         // 2. Unpark the target. Nothing it holds is parked when it was showing.
         let incoming = sp.workspaces[targetWsID]?.members ?? []
-        if !incoming.isEmpty { parker.unpark(incoming) }
+        if !incoming.isEmpty {
+            let t = Trace.start("switch.unpark")
+            parker.unpark(incoming)
+            t.end(detail: "\(incoming.count) window(s)")
+        }
         if crossing { markInFlight(incoming + (swapping ? outgoing : [])) }
 
         // 3. The state.
@@ -3031,8 +3113,12 @@ final class Daemon: @unchecked Sendable {
             }
         }
 
-        // 5. Lay it out.
+        // 5. Lay it out. Nothing to lay out leaves focus on a window just
+        //    hidden, so it goes to nothing.
+        let tLayout = Trace.start("switch.layout")
         applySpaceLayout(sid, stealFocus: stealFocus)
+        tLayout.end()
+        if stealFocus, incoming.isEmpty { focusNothing() }
         // The layout focuses its own focus. A window focus was asked for that
         // is not laid out — a float — has to be focused by name.
         if let wid = focusWindow, readSpaces().workspaces[targetWsID]?.loose.contains(wid) == true,
@@ -3043,6 +3129,51 @@ final class Daemon: @unchecked Sendable {
         if !outgoing.isEmpty, !swapping { scheduleRehide() }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())
+    }
+
+    /// Give keyboard focus to nothing, for a workspace on screen that holds
+    /// nothing. Otherwise focus stays on the window just hidden, and typing
+    /// goes into a window the user cannot see.
+    ///
+    /// WeftBar keeps a window for exactly this (`FocusSink`), and focusing it
+    /// is an ordinary window focus: it becomes key, and nothing of the user's
+    /// is.
+    ///
+    /// It replaces two guesses. Finder in front with no window key is how
+    /// macOS spells "the desktop", but only while Finder has no window — and
+    /// "has no window" was read from weft's own list, which a window opened
+    /// a moment ago is not on yet: Finder came forward and made that window
+    /// key. And WeftBar, activated with no window that can be key, which
+    /// macOS is free to treat as not taking focus at all. Both remain as the
+    /// fallback for a WeftBar without the sink.
+    ///
+    /// weft's own record of focus is cleared either way. It named the window
+    /// just hidden, and `activeWindowID` counts a hidden window as showing —
+    /// it is still on weft's desktop, only parked — so `space move-window`
+    /// on an empty workspace moved a window the user could not see.
+    private func focusNothing() {
+        systemFocusLock.withLock { systemFocusLocked = nil }
+        let running = { (id: String) in NSRunningApplication.runningApplications(withBundleIdentifier: id).first }
+        if let bar = running("com.weft.bar"), let sink = WorldReader.focusSink(ownedBy: bar.processIdentifier) {
+            focusSinkLock.withLock { focusSinkLocked = sink }
+            applier.focusWindow(sink, pid: bar.processIdentifier)
+            return
+        }
+        let known = Set(allPids().values)
+        for bundleID in ["com.apple.finder", "com.weft.bar"] {
+            guard let app = running(bundleID), !known.contains(app.processIdentifier) else { continue }
+            applier.activate(pid: app.processIdentifier)
+            return
+        }
+    }
+
+    /// The last focus sink `focusNothing` used, so the focus change it causes
+    /// is recognised as weft's own and not read as the user focusing a window.
+    private var focusSinkLocked: WindowID?
+    private let focusSinkLock = NSLock()
+
+    private func isFocusSink(_ wid: WindowID) -> Bool {
+        focusSinkLock.withLock { focusSinkLocked == wid }
     }
 
     private func rescueLooseOffscreen(of id: WorkspaceID, onto display: String) {
@@ -3199,6 +3330,11 @@ final class Daemon: @unchecked Sendable {
         }
         if sourceShowing, let sourceDesktop, sourceDesktop != targetDesktop || targetShowingOn == nil {
             applySpaceLayout(sourceDesktop, raiseFocus: !follow)
+            // The last window sent away, staying put: the workspace on screen
+            // is empty and focus is on the window that just left it.
+            if !follow, let source, readSpaces().workspaces[source]?.members.isEmpty == true {
+                focusNothing()
+            }
         }
         scheduleMembershipSave()
         bus.emit(stateChangedEvent())
@@ -3277,6 +3413,7 @@ final class Daemon: @unchecked Sendable {
         // window that just arrived there.
         if !on { syncFromSnapshot() }
         bus.emit(stateChangedEvent())
+        scheduleMembershipSave()
         return IPCResponse(ok: true, output: "sticky \(on ? "on" : "off") for \(wid)")
     }
 
@@ -3629,6 +3766,12 @@ final class Daemon: @unchecked Sendable {
         applier.setEnhancedUIExempt(Set(next.general.enhancedUIExempt))
         input.updateMouseModifier(next.general.mouseModifier)
         input.setBorderDragEnabled(next.general.mouseBorderResize)
+        input.setWorkspaceSwipe(fingers: next.general.workspaceSwipeFingers)
+        if next.general.workspaceSwipeFingers != 0,
+           let clash = SystemChecks.systemSwipe(fingers: next.general.workspaceSwipeFingers) {
+            fputs("weftd: WARNING macOS's \(next.general.workspaceSwipeFingers)-finger swipe also \(clash) — "
+                + "change it in \(SystemChecks.trackpadGesturesSetting)\n", stderr)
+        }
         refreshDividerZones()
         WorldReader.manageMenubarApps = next.general.manageMenubarApps
         bordersBridge.applyConfig(next.integrations.borders, currentLayout: currentSpaceLayoutKind(), currentMode: input.currentMode)
@@ -3862,6 +4005,14 @@ final class Daemon: @unchecked Sendable {
         /// a restart while another desktop is showing — an update does that —
         /// would make that desktop weft's and leave the real one untiled.
         var managed: [String: SpaceID]?
+        /// Each workspace's tiling tree, by ordinal, so a restart puts the
+        /// arrangement back and not just the windows.
+        var trees: [SavedTree?]?
+        /// Windows floated by hand, and windows made sticky. Both are weft's
+        /// own state, nothing on screen records them, and a restart used to
+        /// tile every one of them again.
+        var floating: [WindowID]?
+        var sticky: [WindowID]?
     }
 
     static func membershipFile() -> URL {
@@ -3887,12 +4038,37 @@ final class Daemon: @unchecked Sendable {
 
     static func loadMembership() -> [[WindowID]] { loadSaved()?.workspaces ?? [] }
 
+    static func loadTrees() -> [SavedTree?] { loadSaved()?.trees ?? [] }
+
+    /// Put back which windows were floated by hand or sticky, before the
+    /// first sweep: that sweep decides what is laid out, and a float it does
+    /// not know about is tiled. Windows that have since closed drop out on
+    /// that sweep, as they would at any other time.
+    private func restoreFloatingAndSticky() {
+        guard let saved = Self.loadSaved() else { return }
+        core.sync {
+            self.manualFloat.formUnion(saved.floating ?? [])
+            self.sticky.formUnion(saved.sticky ?? [])
+        }
+    }
+
     static func loadManaged() -> [String: SpaceID] { loadSaved()?.managed ?? [:] }
 
-    private func writeMembership(_ sp: SpaceState) {
+    /// Everything `membership.json` records, taken together so the file
+    /// never pairs one moment's workspaces with another's floats.
+    private func membershipSnapshot() -> (SpaceState, floating: Set<WindowID>, sticky: Set<WindowID>) {
+        let taken = { (self.spaces, self.manualFloat, self.sticky) }
+        let (sp, floating, sticky) = isOnCore() ? taken() : core.sync(execute: taken)
+        return (sp, floating, sticky)
+    }
+
+    private func writeMembership(_ snapshot: (SpaceState, floating: Set<WindowID>, sticky: Set<WindowID>)) {
+        let sp = snapshot.0
         guard !sp.wsOrder.isEmpty else { return }
         let saved = SavedMembership(
-            boot: Self.bootTime(), workspaces: sp.persistedMembership(), managed: sp.managed
+            boot: Self.bootTime(), workspaces: sp.persistedMembership(), managed: sp.managed,
+            trees: sp.persistedTrees(),
+            floating: snapshot.floating.sorted(), sticky: snapshot.sticky.sorted()
         )
         let url = Daemon.membershipFile()
         try? FileManager.default.createDirectory(
@@ -3909,8 +4085,8 @@ final class Daemon: @unchecked Sendable {
             self.pendingMembershipSave?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let sp = self.readSpaces()
-                self.layoutSaveQueue.async { self.writeMembership(sp) }
+                let snapshot = self.membershipSnapshot()
+                self.layoutSaveQueue.async { self.writeMembership(snapshot) }
             }
             self.pendingMembershipSave = work
             self.syncQueue.asyncAfter(deadline: .now() + 1.0, execute: work)
@@ -3918,10 +4094,12 @@ final class Daemon: @unchecked Sendable {
     }
 
     private func workspaceStatuses(_ sp: SpaceState, _ cfg: ValidatedConfig) -> [SpaceStatus] {
-        SpaceStatus.workspaces(
+        let pins = currentPins(cfg)
+        return SpaceStatus.workspaces(
             in: sp,
             declaredLayout: { label in cfg.spaces.first(where: { $0.label == label })?.layout },
-            defaultLayout: cfg.general.defaultLayout
+            defaultLayout: cfg.general.defaultLayout,
+            pinnedDisplay: { pins[$0] }
         )
     }
 
@@ -3976,7 +4154,18 @@ final class Daemon: @unchecked Sendable {
                     spaces: windowSpaces[wid] ?? []
                 )
             }
-            return emit(BarStateStatus(spaces: spaces, windows: windows))
+            // weft's own record of focus, not an Accessibility round trip:
+            // this answers every event the bar hears.
+            let focused = systemFocusLock.withLock { systemFocusLocked } ?? currentLayout().focus
+            let floating = focused.map { wid in
+                isOnCore()
+                    ? manualFloat.contains(wid) || floatedByVerdict(wid)
+                    : core.sync { self.manualFloat.contains(wid) || self.floatedByVerdict(wid) }
+            }
+            return emit(BarStateStatus(
+                spaces: spaces, windows: windows,
+                focusedDisplay: focusedDisplayUUID(sp), focusedFloating: floating
+            ))
         case "trace":
             return emit(Trace.stats())
         case "state":
@@ -4255,7 +4444,14 @@ final class Daemon: @unchecked Sendable {
 
     private func stateChangedEvent() -> DaemonEvent {
         let layout = currentLayout()
-        return DaemonEvent(kind: .stateChanged, focus: layout.focus, windows: layout.windows.sorted())
+        let sp = readSpaces()
+        func label(_ uuid: String?) -> String? {
+            uuid.flatMap { sp.managed[$0] }.flatMap { sp.active[$0] }.flatMap { sp.workspaces[$0]?.label }
+        }
+        return DaemonEvent(
+            kind: .stateChanged, focus: layout.focus, windows: layout.windows.sorted(),
+            workspace: label(focusedDisplayUUID(sp)), showing: sp.displays.compactMap(label)
+        )
     }
 
     private func describe() -> String {

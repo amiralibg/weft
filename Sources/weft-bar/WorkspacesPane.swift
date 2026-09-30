@@ -77,6 +77,16 @@ enum DisplayCatalog {
         let uuid = resolvePin(DisplayPin(value), among: ids)
         return displays.first { $0.id == uuid }
     }
+
+    /// What to write for pinning `row` to `display`: the file's own value when
+    /// it already names that display, else the catalog's. Picking the display
+    /// a workspace was already on turned `display = "main"` into
+    /// `display = "built-in"` — the same screen today, a different rule the
+    /// day a monitor takes the menu bar, and not what the user wrote.
+    static func pinValue(_ display: CanvasDisplay, for row: SpaceRow, in displays: [CanvasDisplay]) -> String {
+        let written = row.origin?.string("display") ?? ""
+        return resolve(written, in: displays)?.id == display.id ? written : display.pinValue
+    }
 }
 
 // MARK: - Apps
@@ -247,6 +257,7 @@ struct WorkspacesPane: View {
         return WorkspaceCard(
             number: number,
             row: row,
+            layout: store.layout(of: row),
             apps: store.rules(for: row.label).map(AssignedApp.of),
             pinnedTo: DisplayCatalog.resolve(row.display, in: displays)?.name
                 ?? (row.display.isEmpty ? nil : "\(row.display) (not connected)"),
@@ -256,6 +267,12 @@ struct WorkspacesPane: View {
         )
         .matchedGeometryEffect(id: row.id, in: cards)
         .onTapGesture {
+            withAnimation(spring) { selection = selection == row.id ? nil : row.id }
+        }
+        // A tap gesture is invisible to VoiceOver and Full Keyboard Access:
+        // without these a card could be read but never opened.
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
             withAnimation(spring) { selection = selection == row.id ? nil : row.id }
         }
         .draggable(row.label)
@@ -271,7 +288,7 @@ struct WorkspacesPane: View {
     private func pin(_ label: String, to display: CanvasDisplay) {
         guard let row = store.spaces.first(where: { $0.label == label }) else { return }
         withAnimation(spring) {
-            store.pinSpace(row.id, to: display.pinValue)
+            store.pinSpace(row.id, to: DisplayCatalog.pinValue(display, for: row, in: displays))
             selection = row.id
         }
     }
@@ -289,7 +306,7 @@ private struct DisplayCanvas: View {
     let running: Bool
     let onPin: (String, CanvasDisplay) -> Void
 
-    private func tile(_ d: CanvasDisplay) -> DisplayTile {
+    private func tile(_ d: CanvasDisplay, compact: Bool) -> DisplayTile {
         let pinned: [String] = spaces
             .filter { DisplayCatalog.resolve($0.display, in: displays)?.id == d.id }
             .map(\.label)
@@ -298,6 +315,7 @@ private struct DisplayCanvas: View {
             live: status?.displays.first { $0.uuid == d.id },
             pinned: pinned,
             multiple: displays.count > 1,
+            compact: compact,
             running: running,
             onPin: { onPin($0, d) }
         )
@@ -341,7 +359,10 @@ private struct DisplayCanvas: View {
             let placement = Placement(displays, in: geo.size)
             ZStack(alignment: .topLeading) {
                 ForEach(displays) { d in
-                    tile(d)
+                    // A laptop screen next to a 4K one is drawn a few dozen
+                    // points tall, and its name, workspace and pins no
+                    // longer fit in their own places.
+                    tile(d, compact: placement.size(of: d).height < 110)
                         .frame(width: placement.size(of: d).width, height: placement.size(of: d).height)
                         .position(placement.center(of: d))
                 }
@@ -366,6 +387,9 @@ private struct DisplayTile: View {
     let live: WorkspacesStatus.Display?
     let pinned: [String]
     let multiple: Bool
+    /// Too small for the name along the top: everything goes in one
+    /// centred column, smaller.
+    let compact: Bool
     let running: Bool
     let onPin: (String) -> Void
     @SwiftUI.State private var targeted = false
@@ -390,54 +414,71 @@ private struct DisplayTile: View {
                 Rectangle().fill(Color.black.opacity(0.3)).frame(height: 7)
                 Spacer(minLength: 0)
             }
-            VStack(spacing: 6) {
+            VStack(spacing: compact ? 3 : 6) {
                 Spacer(minLength: 0)
+                if compact {
+                    HStack(spacing: 3) {
+                        if live?.paused == true {
+                            Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                                .help("Another macOS desktop or a fullscreen app is showing here. weft picks up again when you come back.")
+                        }
+                        Text(display.name)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .font(.system(size: 9, weight: .semibold))
+                }
                 if let showing = live?.showing, running {
                     Text(showing)
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(.system(size: compact ? 13 : 17, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                         .contentTransition(.opacity)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, compact ? 8 : 12)
+                        .padding(.vertical, compact ? 2 : 5)
                         .background(Capsule().fill(.black.opacity(0.28)))
                 }
                 if !pinned.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "pin.fill").font(.system(size: 8))
-                        Text(pinned.joined(separator: " · ")).lineLimit(1)
+                    HStack(spacing: 3) {
+                        Image(systemName: "pin.fill").font(.system(size: compact ? 7 : 8))
+                        Text(pinned.joined(separator: compact ? "·" : " · ")).lineLimit(1)
                     }
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: compact ? 9 : 10, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
+                    .minimumScaleFactor(0.7)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(6)
-            VStack {
-                HStack {
-                    Text(display.name)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(1)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(.black.opacity(0.25)))
-                    Spacer(minLength: 0)
-                    if live?.paused == true {
-                        Label("Paused", systemImage: "pause.circle.fill")
+            .padding(.horizontal, compact ? 10 : 6)
+            .padding(.vertical, 6)
+            if !compact {
+                VStack {
+                    HStack {
+                        Text(display.name)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 6)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(1)
+                            .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill(.black.opacity(0.35)))
-                            .help("Another macOS desktop or a fullscreen app is showing here. weft picks up again when you come back.")
+                            .background(Capsule().fill(.black.opacity(0.25)))
+                        Spacer(minLength: 0)
+                        if live?.paused == true {
+                            Label("Paused", systemImage: "pause.circle.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(.black.opacity(0.35)))
+                                .help("Another macOS desktop or a fullscreen app is showing here. weft picks up again when you come back.")
+                        }
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .padding(.top, 11)
+                .padding(.horizontal, 7)
             }
-            .padding(.top, 11)
-            .padding(.horizontal, 7)
             if let corner {
                 ParkMarker(corner: corner)
             } else if multiple, live != nil {
@@ -502,6 +543,8 @@ private struct ParkMarker: View {
 private struct WorkspaceCard: View {
     let number: Int
     let row: SpaceRow
+    /// `row.layout`, or the default when it has none of its own.
+    let layout: String
     let apps: [AssignedApp]
     let pinnedTo: String?
     let showing: Bool
@@ -523,9 +566,9 @@ private struct WorkspaceCard: View {
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Image(systemName: row.layout == "float" ? "square.on.square" : "rectangle.split.2x1")
+                Image(systemName: layout == "float" ? "square.on.square" : "rectangle.split.2x1")
                     .foregroundStyle(.secondary)
-                    .help(row.layout == "float" ? "Floating" : "Tiling")
+                    .help(layout == "float" ? "Floating" : "Tiling")
             }
             HStack(spacing: -7) {
                 ForEach(apps.prefix(5)) { app in
@@ -644,7 +687,7 @@ private struct WorkspaceInspector: View {
                 VStack(alignment: .leading, spacing: 10) {
                     FieldTitle("Layout")
                     Picker("Layout", selection: Binding(
-                        get: { row.layout },
+                        get: { store.layout(of: row) },
                         set: { store.setLayout(row.id, to: $0) }
                     )) {
                         Label("Tiling", systemImage: "rectangle.split.2x1").tag("bsp")
@@ -653,7 +696,7 @@ private struct WorkspaceInspector: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     DesktopPreview(
-                        layout: row.layout,
+                        layout: store.layout(of: row),
                         inner: store.innerGap,
                         outer: store.outerTop,
                         bordersOn: store.bordersEnabled,
@@ -675,7 +718,12 @@ private struct WorkspaceInspector: View {
                         let resolved = DisplayCatalog.resolve(row.display, in: displays)
                         Picker("Display", selection: Binding(
                             get: { resolved?.pinValue ?? row.display },
-                            set: { store.pinSpace(row.id, to: $0) }
+                            set: { value in
+                                let picked = displays.first { $0.pinValue == value }
+                                store.pinSpace(row.id, to: picked.map {
+                                    DisplayCatalog.pinValue($0, for: row, in: displays)
+                                } ?? value)
+                            }
                         )) {
                             Text("Whichever display I'm on").tag("")
                             ForEach(displays) { d in

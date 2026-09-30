@@ -159,9 +159,12 @@ public struct TomlDocument {
 extension TomlSection {
     public static func normalize(_ key: String) -> String { TomlValue.unquote(key).lowercased() }
 
+    /// The value as written, without a comment after it on the line.
     public func rawValue(_ key: String) -> String? {
         let target = Self.normalize(key)
-        for case .pair(let k, let v) in entries where Self.normalize(k) == target { return v }
+        for case .pair(let k, let v) in entries where Self.normalize(k) == target {
+            return TomlValue.splitComment(v).value
+        }
         return nil
     }
 
@@ -183,12 +186,12 @@ extension TomlSection {
     }
 
     /// Replace the value in place, keeping the key where the user put it and
-    /// keeping whatever comment sits above it.
+    /// keeping whatever comment sits above it or after it on the line.
     public mutating func setRaw(_ key: String, _ value: String) {
         let target = Self.normalize(key)
         for i in entries.indices {
-            if case .pair(let k, _) = entries[i], Self.normalize(k) == target {
-                entries[i] = .pair(key: k, value: value)
+            if case .pair(let k, let old) = entries[i], Self.normalize(k) == target {
+                entries[i] = .pair(key: k, value: value + TomlValue.splitComment(old).comment)
                 return
             }
         }
@@ -199,14 +202,44 @@ extension TomlSection {
         entries.insert(.pair(key: key, value: value), at: insertAt)
     }
 
-    public mutating func set(_ key: String, string value: String) { setRaw(key, TomlValue.quote(value)) }
-    public mutating func set(_ key: String, bool value: Bool) { setRaw(key, value ? "true" : "false") }
-    public mutating func set(_ key: String, int value: Int) { setRaw(key, String(value)) }
+    // The typed setters leave a value that already reads as `value` exactly
+    // as the user wrote it: `width = 2.0` stays `2.0`, a literal string stays
+    // literal. Every save rewrote every key the window owns, so opening
+    // Settings and moving one slider reformatted lines nobody touched.
+    public mutating func set(_ key: String, string value: String) {
+        if string(key) == value { return }
+        setRaw(key, TomlValue.quote(value))
+    }
+    public mutating func set(_ key: String, bool value: Bool) {
+        if bool(key) == value { return }
+        setRaw(key, value ? "true" : "false")
+    }
+    public mutating func set(_ key: String, int value: Int) {
+        if int(key) == value { return }
+        setRaw(key, String(value))
+    }
     /// Trailing `.0` kept off whole numbers — `width = 4` reads better than
     /// `width = 4.0`, and the parser takes either.
     public mutating func set(_ key: String, double value: Double) {
         let rounded = (value * 100).rounded() / 100
+        if let current = double(key), (current * 100).rounded() / 100 == rounded { return }
         setRaw(key, rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded))
+    }
+
+    // The same, for a key the file may leave out: absent and the default stays
+    // absent, so a file that never chose keeps following the default and does
+    // not grow a line for every setting the window happens to show.
+    public mutating func set(_ key: String, string value: String, default def: String) {
+        if rawValue(key) == nil, value == def { return }
+        set(key, string: value)
+    }
+    public mutating func set(_ key: String, bool value: Bool, default def: Bool) {
+        if rawValue(key) == nil, value == def { return }
+        set(key, bool: value)
+    }
+    public mutating func set(_ key: String, int value: Int, default def: Int) {
+        if rawValue(key) == nil, value == def { return }
+        set(key, int: value)
     }
 
     public mutating func remove(_ key: String) {
@@ -243,15 +276,40 @@ extension TomlSection {
 
 public enum TomlValue {
     public static func unquote(_ s: String) -> String {
-        var t = s.trimmingCharacters(in: .whitespaces)
-        // Strip a trailing inline comment on an unquoted value.
-        if !t.hasPrefix("\""), let hash = t.firstIndex(of: "#") {
-            t = String(t[t.startIndex..<hash]).trimmingCharacters(in: .whitespaces)
-        }
+        let t = splitComment(s).value
         guard t.count >= 2, t.hasPrefix("\""), t.hasSuffix("\"") else { return t }
         let inner = String(t.dropFirst().dropLast())
         return inner.replacingOccurrences(of: "\\\"", with: "\"")
             .replacingOccurrences(of: "\\\\", with: "\\")
+    }
+
+    /// A value and the comment after it on its line: `"round"  # or "square"`
+    /// is `"round"` and `  # or "square"`. A `#` inside a string is part of
+    /// the string. Stripping only unquoted values' comments read that line as
+    /// the string `round"  # or "square`, wrote it back escaped, and every
+    /// save after that was refused — no change in Settings reached the file.
+    /// `comment` keeps the spacing before the `#`, so writing a new value
+    /// with it leaves the line looking as the user wrote it.
+    public static func splitComment(_ raw: String) -> (value: String, comment: String) {
+        var inBasic = false, inLiteral = false, escaped = false
+        for i in raw.indices {
+            let c = raw[i]
+            if inBasic {
+                if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { inBasic = false }
+            } else if inLiteral {
+                if c == "'" { inLiteral = false }
+            } else if c == "\"" {
+                inBasic = true
+            } else if c == "'" {
+                inLiteral = true
+            } else if c == "#" {
+                let before = raw[..<i]
+                let kept = before.reversed().drop { $0 == " " || $0 == "\t" }.count
+                let spacing = before.dropFirst(kept)
+                return (before.trimmingCharacters(in: .whitespaces), String(spacing) + String(raw[i...]))
+            }
+        }
+        return (raw.trimmingCharacters(in: .whitespaces), "")
     }
 
     public static func quote(_ s: String) -> String {

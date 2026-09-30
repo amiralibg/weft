@@ -1,4 +1,5 @@
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import WeftCore
@@ -119,10 +120,33 @@ private final class TapBox: @unchecked Sendable {
     var onCommand: ((String) -> Void)?
     var onModeChange: ((String) -> Void)?
     var onMouseGesture: ((MouseGesture) -> Void)?
+    /// A modifier some binding uses just went down. Secure input shows up
+    /// here and nowhere else: it hides key-downs from the tap but lets
+    /// modifier changes through, so this is the one moment weft can notice
+    /// that the chord about to be typed will never reach it.
+    var onBoundModifierDown: (() -> Void)?
+    /// Every modifier any binding in any mode uses. Recomputed with the
+    /// keymap, so the tap tests one mask rather than walking the chords.
+    var boundModifiers: CGEventFlags = []
+    /// Modifiers down at the last flags change, so only a press is reported
+    /// and not every release or repeat.
+    var lastFlags: CGEventFlags = []
 
     init(keymap: Keymap) {
         self.keymap = keymap
         self.mode = keymap.initialMode
+        self.boundModifiers = Self.modifiers(of: keymap)
+    }
+
+    /// Shift counts only for a binding that has nothing else: every capital
+    /// letter is a shift press, and `alt-shift-1` starts with alt anyway.
+    static func modifiers(of keymap: Keymap) -> CGEventFlags {
+        let others: CGEventFlags = [.maskAlternate, .maskCommand, .maskControl]
+        return keymap.modes.values.flatMap(\.keys).reduce(into: CGEventFlags()) { out, chord in
+            let mods = CGEventFlags(rawValue: chord.mods)
+            let primary = mods.intersection(others)
+            out.formUnion(primary.isEmpty ? mods.intersection(.maskShift) : primary)
+        }
     }
 }
 
@@ -229,8 +253,18 @@ private func tapCallback(
         return Unmanaged.passUnretained(event)
     }
 
+    if type == .flagsChanged {
+        let now = event.flags.intersection([.maskAlternate, .maskShift, .maskCommand, .maskControl])
+        let report: (() -> Void)? = box.lock.withLock {
+            let pressed = now.subtracting(box.lastFlags)
+            box.lastFlags = now
+            return pressed.isDisjoint(with: box.boundModifiers) ? nil : box.onBoundModifierDown
+        }
+        report?()
+        return Unmanaged.passUnretained(event)  // observe, pass
+    }
     guard type == .keyDown else {
-        return Unmanaged.passUnretained(event)  // incl. flagsChanged: observe, pass
+        return Unmanaged.passUnretained(event)
     }
 
     let keycode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -348,6 +382,67 @@ public final class InputManager: @unchecked Sendable {
 
     public var currentMode: String { box.lock.withLock { box.mode } }
 
+    /// Touched only on the tap thread.
+    private var gestureTap: GestureTap?
+    private var swipeFingers = 0
+
+    /// Turn the workspace swipe on for `fingers` fingers, or off with 0.
+    /// A swipe left sends `space focus next` and right `space focus prev`,
+    /// through the same path as a keybind — so one that cannot be done says
+    /// why, like a key would.
+    public func setWorkspaceSwipe(fingers: Int) {
+        loop.perform { [weak self] in
+            guard let self, fingers != self.swipeFingers || (fingers != 0 && self.gestureTap == nil) else { return }
+            self.gestureTap?.uninstall()
+            self.gestureTap = nil
+            self.swipeFingers = fingers
+            guard fingers > 0 else { return }
+            let tap = GestureTap(fingers: fingers) { [weak self] swipe in
+                self?.forwardCommand(swipe == .left ? "space focus next" : "space focus prev")
+            }
+            if tap.install() {
+                self.gestureTap = tap
+            } else {
+                fputs("weftd: could not listen to the trackpad for the workspace swipe — "
+                    + "is Input Monitoring on?\n", stderr)
+            }
+        }
+    }
+
+    /// Called once each time secure input is found blocking the keybinds:
+    /// the first time a bound modifier goes down while it is on, and not
+    /// again until it has been seen off.
+    ///
+    /// Secure input — a password field, a terminal's Secure Keyboard Entry,
+    /// `sudo` in a terminal that turns it on by itself — makes the
+    /// WindowServer withhold every key-down from event taps, system-wide,
+    /// for as long as the app holding it wants. The tap still hears the
+    /// modifiers, which is how this notices, but never the key: `alt-1`
+    /// goes to the app and weft cannot know it was pressed. There is no
+    /// notification for secure input starting or stopping, so rather than
+    /// poll, the check runs when a chord is starting to be typed.
+    public var onSecureInputBlocking: (() -> Void)? {
+        get { lock.withLock { _onSecureInputBlocking } }
+        set { lock.withLock { _onSecureInputBlocking = newValue } }
+    }
+
+    private var _onSecureInputBlocking: (() -> Void)?
+    /// Off the tap thread: `IsSecureEventInputEnabled` is a round trip to
+    /// the WindowServer, and the tap callback may not wait on anything.
+    private let secureCheck = DispatchQueue(label: "weft.input.secure", qos: .utility)
+    /// Touched only on `secureCheck`.
+    private var secureReported = false
+
+    private func checkSecureInput() {
+        secureCheck.async { [weak self] in
+            guard let self else { return }
+            let on = IsSecureEventInputEnabled()
+            defer { self.secureReported = on }
+            guard on, !self.secureReported else { return }
+            self.lock.withLock { self._onSecureInputBlocking }?()
+        }
+    }
+
     public init(keymap: Keymap = .default) {
         self.box = TapBox(keymap: keymap)
     }
@@ -357,6 +452,7 @@ public final class InputManager: @unchecked Sendable {
     public func updateKeymap(_ keymap: Keymap) {
         box.lock.withLock {
             box.keymap = keymap
+            box.boundModifiers = TapBox.modifiers(of: keymap)
             if box.keymap.modes[box.mode] == nil {
                 box.mode = keymap.initialMode
             }
@@ -476,6 +572,7 @@ public final class InputManager: @unchecked Sendable {
             self.box.lock.withLock {
                 self.box.onCommand = { [weak self] cmd in self?.forwardCommand(cmd) }
                 self.box.onModeChange = { [weak self] mode in self?.forwardMode(mode) }
+                self.box.onBoundModifierDown = { [weak self] in self?.checkSecureInput() }
             }
             result.value = true
             done.signal()

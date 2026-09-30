@@ -175,3 +175,47 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
     #expect(tree.fullscreen == 1)
     #expect(tree.moving(1, towards: .east) == tree)
 }
+
+@Test func resizingMovesTheBorderNextToTheWindowByThatManyPoints() {
+    // [[1 | 3] | 2]: 1's right-hand border is the one it shares with 3. The
+    // outer border used to move instead, and 1 grew by half the step.
+    let screen = Frame(x: 0, y: 0, width: 1000, height: 600)
+    let inner = Container(layout: .splitV, children: [.window(1), .window(3)], ratios: [0.5, 0.5])
+    let root = Container(layout: .splitV, children: [.container(inner), .window(2)], ratios: [0.5, 0.5])
+    var tree = Tree()
+    tree.root = .container(root)
+    tree.focus = 1
+    let start = tree
+    tree = tree.resizing(focused: 1, axis: .horizontal, delta: 40, totalSize: 1000)
+    let frames = layout(tree, in: screen, config: .none)
+    #expect(near(frames[1]!.width, 290))
+    #expect(near(frames[3]!.width, 210))
+    #expect(near(frames[2]!.width, 500))
+
+    // At its limit the inner split passes the step out.
+    var grown = start
+    for _ in 0..<20 { grown = grown.resizing(focused: 1, axis: .horizontal, delta: 40, totalSize: 1000) }
+    let wide = layout(grown, in: screen, config: .none)
+    #expect(wide[2]!.width < 500)
+}
+
+@Test func removingAWindowKeepsTheOtherSplitsAsTheyWere() {
+    // [[1 | 3] 70% | 2 30%]: 3 leaves. Its container collapses into 1, and
+    // the 70/30 split it sat in is not evened out.
+    let inner = Container(layout: .splitV, children: [.window(1), .window(3)], ratios: [0.5, 0.5])
+    let root = Container(layout: .splitV, children: [.container(inner), .window(2)], ratios: [0.7, 0.3])
+    var tree = Tree()
+    tree.root = .container(root)
+    let after = layout(tree.removing(3), in: moveScreen, config: .none)
+    #expect(near(after[1]!.width, 700))
+    #expect(near(after[2]!.width, 300))
+
+    // Three across at 50/30/20: the middle one's share goes to the others in
+    // proportion, 5:2.
+    let three = Container(layout: .splitV, children: [.window(1), .window(2), .window(3)], ratios: [0.5, 0.3, 0.2])
+    var wide = Tree()
+    wide.root = .container(three)
+    let two = layout(wide.removing(2), in: moveScreen, config: .none)
+    #expect(near(two[1]!.width, 1000 * 5.0 / 7))
+    #expect(near(two[3]!.width, 1000 * 2.0 / 7))
+}

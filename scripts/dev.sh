@@ -7,6 +7,8 @@
 #   ./scripts/dev.sh check        doctor, both hide/show self-tests, 20 s idle bench
 #   ./scripts/dev.sh logs         follow the engine's log
 #   ./scripts/dev.sh snapshots    render every Settings pane and Setup page to PNG
+#   ./scripts/dev.sh preview      play Setup on screen, page by page, to watch
+#                                 its motion (no menu-bar item, no hotkeys)
 #   ./scripts/dev.sh status       which weft is installed: a release, or a local build
 #   ./scripts/dev.sh release      go back to the latest published release
 #
@@ -170,6 +172,10 @@ case "${1:-install}" in
         echo "Rendered into $OUT"
         open "$OUT"
         ;;
+    preview)
+        swift build --package-path "$DIR" >/dev/null
+        "$DIR/.build/debug/weft-bar" --preview-setup >/dev/null
+        ;;
     status)
         status
         ;;
@@ -180,7 +186,7 @@ case "${1:-install}" in
         bash "$DIR/scripts/install-release.sh"
         ;;
     -h|--help|help)
-        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         die "unknown command '$1' — try ./scripts/dev.sh help"

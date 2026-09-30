@@ -16,7 +16,11 @@ import WeftConfig
 struct SpaceRow: Identifiable, Equatable {
     var id = UUID()
     var label: String = ""
-    var layout: String = "bsp"
+    /// `layout = …` as written. Nil follows `default-layout`, which is what a
+    /// block without the key means to weftd; writing the default out on the
+    /// first save pinned every workspace to it, and changing the default
+    /// afterwards then changed none of them.
+    var layout: String?
     /// `display = …` as written: "main", "secondary", a number, or part of a
     /// display's name. Empty means it shows on whichever display you are on.
     var display: String = ""
@@ -107,6 +111,7 @@ final class ConfigStore: ObservableObject {
     @Published var defaultLayout = "bsp"
     @Published var mouseModifier = "alt"
     @Published var mouseBorderResize = true
+    @Published var workspaceSwipeFingers = 0
     @Published var mouseFollowsFocus = true
     @Published var focusFollowsMouse = false
     /// Whether a rule's `space = "…"` also switches to that workspace. The
@@ -217,6 +222,7 @@ final class ConfigStore: ObservableObject {
         defaultLayout = g?.string("default-layout") ?? "bsp"
         mouseModifier = g?.string("mouse-modifier") ?? "alt"
         mouseBorderResize = g?.bool("mouse-border-resize") ?? true
+        workspaceSwipeFingers = g?.int("workspace-swipe-fingers") ?? 0
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
         followSpaceRules = g?.bool("follow-space-rules") ?? false
@@ -282,7 +288,7 @@ final class ConfigStore: ObservableObject {
             let s = document.sections[i]
             return SpaceRow(
                 label: s.string("label") ?? "",
-                layout: s.string("layout") ?? "bsp",
+                layout: s.string("layout"),
                 display: s.rawValue("display").map(TomlValue.unquote) ?? "",
                 origin: s
             )
@@ -408,21 +414,22 @@ final class ConfigStore: ObservableObject {
         let i = document.ensureSection("[general]")
         var s = document.sections[i]
         s.set("inner-gap", int: innerGap)
-        s.set("stack-offset", int: stackOffset)
+        s.set("stack-offset", int: stackOffset, default: 8)
         s.setRaw("outer-gap", TomlValue.sidesLiteral(
             top: outerTop, bottom: outerBottom, left: outerLeft, right: outerRight))
         s.set("default-layout", string: defaultLayout)
-        s.set("mouse-modifier", string: mouseModifier)
-        s.set("mouse-border-resize", bool: mouseBorderResize)
-        s.set("mouse-follows-focus", bool: mouseFollowsFocus)
-        s.set("focus-follows-mouse", bool: focusFollowsMouse)
+        s.set("mouse-modifier", string: mouseModifier, default: "alt")
+        s.set("mouse-border-resize", bool: mouseBorderResize, default: true)
+        s.set("workspace-swipe-fingers", int: workspaceSwipeFingers, default: 0)
+        s.set("mouse-follows-focus", bool: mouseFollowsFocus, default: true)
+        s.set("focus-follows-mouse", bool: focusFollowsMouse, default: false)
         // Retired in 0.9.15: one workspace model, so these two only ever
         // produce a warning. Saving from Settings is a good moment to drop them.
         s.remove("workspaces")
         s.remove("workspace-anchor")
-        s.set("follow-space-rules", bool: followSpaceRules)
-        s.set("manage-menubar-apps", bool: manageMenubarApps)
-        s.set("check-for-updates", bool: checkForUpdates)
+        s.set("follow-space-rules", bool: followSpaceRules, default: false)
+        s.set("manage-menubar-apps", bool: manageMenubarApps, default: false)
+        s.set("check-for-updates", bool: checkForUpdates, default: true)
         s.setRaw("reserve", TomlValue.sidesLiteral(
             top: reserveTop, bottom: reserveBottom, left: reserveLeft, right: reserveRight))
         document.sections[i] = s
@@ -436,7 +443,7 @@ final class ConfigStore: ObservableObject {
             let i = document.ensureSection("[integrations.borders]")
             var s = document.sections[i]
             s.set("enabled", bool: bordersEnabled)
-            s.set("supervise", bool: bordersSupervise)
+            s.set("supervise", bool: bordersSupervise, default: true)
             // Written only when it is not the default, so a file that never
             // chose keeps following it.
             if bordersBackend == "janky" {
@@ -454,7 +461,7 @@ final class ConfigStore: ObservableObject {
                     #"{ bsp = "\#(bordersActiveColor)", float = "\#(bordersActiveColor)" }"#
                 )
             }
-            s.set("show-inactive", bool: bordersShowInactive)
+            s.set("show-inactive", bool: bordersShowInactive, default: true)
             if bordersInactiveColor.isEmpty {
                 s.remove("inactive-color")
             } else {
@@ -479,8 +486,8 @@ final class ConfigStore: ObservableObject {
             let i = document.ensureSection("[integrations.sketchybar]")
             var s = document.sections[i]
             s.set("enabled", bool: sketchybarEnabled)
-            s.set("bar-name", string: sketchybarBarName)
-            s.set("coalesce-ms", int: sketchybarCoalesceMs)
+            s.set("bar-name", string: sketchybarBarName, default: "sketchybar")
+            s.set("coalesce-ms", int: sketchybarCoalesceMs, default: 16)
             document.sections[i] = s
         }
     }
@@ -488,7 +495,11 @@ final class ConfigStore: ObservableObject {
     private func writeSpaces() {
         syncBlocks(header: "[[space]]", rows: spaces) { row, section in
             section.set("label", string: row.label)
-            section.set("layout", string: row.layout)
+            if let layout = row.layout {
+                section.set("layout", string: layout)
+            } else {
+                section.remove("layout")
+            }
             if row.display.isEmpty {
                 section.remove("display")
             } else if let n = Int(row.display) {
@@ -617,7 +628,7 @@ final class ConfigStore: ObservableObject {
     }
 
     func addSpace() {
-        spaces.append(SpaceRow(label: "space\(spaces.count + 1)", layout: defaultLayout))
+        spaces.append(SpaceRow(label: "space\(spaces.count + 1)"))
         markDirty()
     }
 
@@ -751,9 +762,15 @@ extension ConfigStore {
         markDirty()
     }
 
+    /// The layout a workspace gets: its own, else `default-layout`.
+    func layout(of row: SpaceRow) -> String { row.layout ?? defaultLayout }
+
     func setLayout(_ id: SpaceRow.ID, to layout: String) {
-        guard let i = spaces.firstIndex(where: { $0.id == id }), spaces[i].layout != layout else { return }
-        spaces[i].layout = layout
+        guard let i = spaces.firstIndex(where: { $0.id == id }), self.layout(of: spaces[i]) != layout else { return }
+        // Picking the default goes back to following it: the picker has no
+        // third "default" choice, and floating a workspace and tiling it again
+        // should leave the file as it was.
+        spaces[i].layout = layout == defaultLayout ? nil : layout
         markDirty()
     }
 

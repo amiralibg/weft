@@ -319,6 +319,11 @@ public enum ActionCatalog {
               "", command: "stack unstack", phrase: "take the window out of its stack"),
         fixed("stack.all", .stacks, "square.stack.3d.up", "Stack every window on the workspace",
               "Again to undo.", command: "stack all", phrase: "stack every window on the workspace"),
+        one("stack.side", .stacks, "rectangle.righthalf.inset.filled", "Stack one side of the workspace",
+            "Every window on that side in one stack; the rest stays tiled. Again to undo.",
+            prefix: "stack side", .direction) {
+            "stack the windows on the \(ActionWords.directions[$0] ?? $0)"
+        },
         one("stack.move", .stacks, "square.stack.3d.forward.dottedline", "Put the window in a stack",
             "Join the stack beside it.", prefix: "stack move", .direction) {
             "put the window in the stack \(ActionWords.towards[$0] ?? $0)"

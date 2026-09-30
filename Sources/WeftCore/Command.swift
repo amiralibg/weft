@@ -79,6 +79,9 @@ public enum StackCommand: Sendable, Equatable {
     case all
     /// Put the focused window into the neighbour's stack in `dir`.
     case move(Direction)
+    /// Every window on the `dir` side of the layout in one stack; again to
+    /// undo. The right half as a stack, the left half left alone.
+    case side(Direction)
 }
 
 public enum QueryKind: String, Sendable, Equatable {
@@ -316,7 +319,7 @@ extension Command {
             case "all":
                 guard parts.count == 2 else { throw CommandParseError.badArgs(input) }
                 return .stack(.all)
-            case "split", "move":
+            case "split", "move", "side":
                 guard parts.count == 3 else { throw CommandParseError.badArgs(input) }
                 let dir: Direction
                 switch parts[2] {
@@ -326,7 +329,11 @@ extension Command {
                 case "south", "down": dir = .south
                 default: throw CommandParseError.badArgs(input)
                 }
-                return parts[1] == "split" ? .stack(.split(dir)) : .stack(.move(dir))
+                switch parts[1] {
+                case "split": return .stack(.split(dir))
+                case "side": return .stack(.side(dir))
+                default: return .stack(.move(dir))
+                }
             default: throw CommandParseError.badArgs(input)
             }
         case "insert":

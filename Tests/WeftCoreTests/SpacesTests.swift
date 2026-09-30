@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import WeftCore
 
@@ -654,6 +655,48 @@ private let ws3 = WorkspaceID(3)
     #expect(second.workspace(holding: 43) == second.wsOrder[0])
 }
 
+/// A restart puts the arrangement back, not just the windows: the saved tree
+/// survives JSON and seeding, and the sweep then only adds and removes.
+@Test func theTreeSurvivesARestart() throws {
+    // [1 | [2 / 3]] at 70/30, then 3 zoomed into focus.
+    let inner = Container(layout: .splitH, children: [.window(2), .window(3)], ratios: [0.4, 0.6])
+    let root = Container(layout: .splitV, children: [.window(1), .container(inner)], ratios: [0.7, 0.3])
+    var first = desktops([10], names: ["a", "b"])
+    first.setLayout(.tiling(Tree(root: .container(root), focus: 3)), of: first.wsOrder[1])
+    let trees = first.persistedTrees()
+    #expect(trees[0] == nil)  // empty workspaces save nothing
+    let data = try JSONEncoder().encode(trees)
+    let decoded = try JSONDecoder().decode([SavedTree?].self, from: data)
+
+    var second = desktops([10], names: ["a", "b"])
+    second.seedMembership(first.persistedMembership(), trees: decoded)
+    guard case .tiling(let tree)? = second.workspaces[second.wsOrder[1]]?.layout else {
+        Issue.record("not tiling"); return
+    }
+    #expect(tree.root == .container(root))
+    #expect(tree.focus == 3)
+    #expect(second.workspaces[second.wsOrder[1]]?.loose.isEmpty == true)
+}
+
+/// A saved tree is repaired, not trusted: a container left with one child
+/// collapses, bad ratios even out, and a focus that is not in it moves.
+@Test func aDamagedSavedTreeIsRepaired() {
+    let saved = SavedTree.SavedNode.container(layout: .splitV, ratios: [1], active: 0, children: [
+        .window(1),
+        .container(layout: .splitH, ratios: [0.5], active: 0, children: [.window(2)]),
+        .window(3),
+    ])
+    var s = SavedTree(Tree())
+    s.root = saved
+    s.focus = 99
+    let tree = s.tree
+    #expect(tree.windows == [1, 2, 3])
+    #expect(tree.focus == 1)
+    guard case .container(let c)? = tree.root else { Issue.record("no container"); return }
+    #expect(c.children == [.window(1), .window(2), .window(3)])
+    #expect(c.ratios.count == 3 && abs(c.ratios[0] - 1.0 / 3) < 1e-9)
+}
+
 @Test func resetWorkspacesClearsTheSetButKeepsTheDesktops() {
     var s = desktops([10, 20], names: ["a", "b", "c"])
     s.recentWorkspace = s.wsOrder.first
@@ -742,4 +785,38 @@ private let ws3 = WorkspaceID(3)
     #expect(s.persistedNames() == ["a", "web", "c"])
     #expect(s.wsOrder[1] == b)
     #expect(s.workspaces[b]?.contains(42) == true)
+}
+
+// MARK: - Stepping (`space focus next` / `prev`, the trackpad swipe)
+
+@Test func steppingSkipsEmptyWorkspacesAndWraps() {
+    var s = desktops([10], names: ["a", "b", "c", "d"])
+    let id = { (label: String) in s.id(forLabel: label)! }
+    s.file(1, in: id("c"), laidOut: true)
+    s.file(2, in: id("d"), laidOut: true)
+    #expect(s.currentWorkspace == id("a"))
+    #expect(s.workspace(steppingBy: 1) == id("c"))  // b is empty
+    #expect(s.workspace(steppingBy: -1) == id("d"))  // wraps round
+    #expect(s.resolveWorkspace("next") == id("c"))
+    #expect(s.resolveWorkspace("prev") == id("d"))
+    #expect(s.workspace(steppingBy: 1, skipping: [id("c")]) == id("d"))
+}
+
+@Test func steppingWithNowhereToGoIsNil() {
+    var s = desktops([10], names: ["a", "b"])
+    s.file(1, in: s.id(forLabel: "a")!, laidOut: true)
+    // The only workspace with windows is the one already showing.
+    #expect(s.workspace(steppingBy: 1) == nil)
+    #expect(s.workspace(steppingBy: -1) == nil)
+}
+
+@Test func steppingPassesOverTheWorkspaceOnTheOtherDisplay() {
+    var s = desktops([10, 20], names: ["a", "b", "c"])
+    let id = { (label: String) in s.id(forLabel: label)! }
+    s.focusedDisplay = "D10"
+    s.file(1, in: id("b"), laidOut: true)
+    s.file(2, in: id("c"), laidOut: true)
+    #expect(s.showingDisplay(of: id("b")) == "D20")
+    // b has windows but is on screen over there: stepping lands on c.
+    #expect(s.workspace(steppingBy: 1) == id("c"))
 }

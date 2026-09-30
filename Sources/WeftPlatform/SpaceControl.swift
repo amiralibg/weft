@@ -35,6 +35,9 @@ public enum SpaceControl {
     /// but in AppKit's bottom-left space, and only the *primary* screen sits
     /// at AppKit's origin — so the flip to the top-left space AX and SLS share
     /// must go through the primary's height, never each screen's own.
+    /// `visibleFrame` takes the menu bar off the main display only, in a
+    /// process without an `NSApplication` — which weftd is. `tilingAreas`
+    /// takes every other display's off too.
     ///
     /// Active, not online: a mirrored secondary would otherwise contribute a
     /// duplicate rect for the same pixels.
@@ -89,6 +92,40 @@ public enum SpaceControl {
         // share an x, which vertically stacked monitors do.
         return out.sorted {
             $0.frame.x == $1.frame.x ? $0.frame.y < $1.frame.y : $0.frame.x < $1.frame.x
+        }
+    }
+
+    /// What layouts tile into on each display, by uuid: `visible`, less any
+    /// menu bar at the top of that display.
+    ///
+    /// With "Displays have separate Spaces" on, every display has a menu bar,
+    /// but `visibleFrame` in a process with no `NSApplication` leaves the
+    /// strip in on all but the main one. Tiles at the top of a second display
+    /// were aimed under its menu bar, macOS moved them back down, and weft
+    /// floated them as windows that refuse to be placed. Creating an
+    /// `NSApplication` fixed the frame and made every WindowServer call weftd
+    /// made take up to half a second: an app whose events are never read is
+    /// one the WindowServer waits on. The menu bars are read from the window
+    /// list instead, which is where they are.
+    public static func tilingAreas(_ layout: [DisplayFrames]) -> [(String, Frame)] {
+        let bars = menuBarFrames()
+        return layout.map { ($0.uuid, belowMenuBars($0.visible, display: $0.frame, menuBars: bars)) }
+    }
+
+    /// The WindowServer's menu bar windows on screen, top-left origin. One
+    /// per display with separate Spaces on; none while the menu bar hides
+    /// itself, which is the right answer then too.
+    static func menuBarFrames() -> [Frame] {
+        let level = Int(CGWindowLevelForKey(.mainMenuWindow))
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        return info.compactMap { w -> Frame? in
+            guard (w[kCGWindowLayer as String] as? Int) == level,
+                  let b = w[kCGWindowBounds as String] as? [String: Double],
+                  let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"],
+                  height > 0, height < 100
+            else { return nil }
+            return Frame(x: x, y: y, width: width, height: height)
         }
     }
 

@@ -22,9 +22,30 @@ final class SpaceRowView: NSView {
         self.displayIndex = displayIndex
         self.icons = icons
         self.onClick = onClick
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 32))
+        super.init(frame: NSRect(x: 0, y: 0, width: 320 + Self.gutter, height: 32))
+        // Drawn by hand, so without these VoiceOver read every row as blank.
+        let name = space.label.isEmpty ? "\(space.id)" : space.label
+        let count = space.windows.count
+        setAccessibilityElement(true)
+        setAccessibilityRole(.menuItem)
+        setAccessibilityLabel(
+            "Workspace \(name), \(space.layout)"
+                + (space.current ? ", showing" : "")
+                + ", \(count == 0 ? "empty" : count == 1 ? "1 window" : "\(count) windows")"
+        )
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The menu's checkmark column, which a custom view does not get: the
+    /// layout items below are checked, and without this the rows started a
+    /// column left of the display names above them.
+    private static let gutter: CGFloat = 18
+
+    override func accessibilityPerformPress() -> Bool {
+        enclosingMenuItem?.menu?.cancelTracking()
+        onClick()
+        return true
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -47,14 +68,14 @@ final class SpaceRowView: NSView {
         let fg: NSColor = hot ? .white : .labelColor
 
         // Pill with space index
-        let pill = NSRect(x: 12, y: 7, width: 20, height: 18)
+        let pill = NSRect(x: 12 + Self.gutter, y: 7, width: 20, height: 18)
         (space.current ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
         NSBezierPath(roundedRect: pill, xRadius: 5, yRadius: 5).fill()
         drawCentered("\(displayIndex)", in: pill, color: .white, size: 11)
 
         // Space label
         let name = space.label.isEmpty ? "\(space.id)" : space.label
-        drawText(name, at: NSPoint(x: 40, y: 8), color: fg, size: 13, bold: space.current)
+        drawText(name, at: NSPoint(x: 40 + Self.gutter, y: 8), color: fg, size: 13, bold: space.current)
 
         // Layout badge
         let badge = space.layout.uppercased()
@@ -62,7 +83,7 @@ final class SpaceRowView: NSView {
             .font: NSFont.systemFont(ofSize: 9, weight: .bold),
             .foregroundColor: hot ? NSColor.white.withAlphaComponent(0.8) : NSColor.tertiaryLabelColor
         ]
-        (badge as NSString).draw(at: NSPoint(x: 100, y: 10), withAttributes: bAttrs)
+        (badge as NSString).draw(at: NSPoint(x: 100 + Self.gutter, y: 10), withAttributes: bAttrs)
 
         // App icons
         var x = bounds.width - 12 - 20
@@ -109,8 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The status item redraws from a cached snapshot; nothing on this
         // thread ever waits for the daemon to answer.
         state.onChange = { [weak self] in self?.updateTitle() }
+        state.onCommandFailed = { command, message in
+            Toast.shared.show(Toast.headline(for: command), message)
+        }
         state.start()
         updateTitle()
+        FocusSinkWindow.shared.install()
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(spaceChanged),
@@ -342,18 +367,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let byID = Dictionary(state.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // One section per display, in the order displays first appear, with
+        // each workspace under its own display wherever it sits in the list.
+        // Starting a section at every change of display counted a display
+        // again each time the list went back to it — "Display 3" on a Mac
+        // with two.
+        var displayOrder: [String] = []
+        for space in spaces where !displayOrder.contains(space.display) {
+            displayOrder.append(space.display)
+        }
+        let grouped = displayOrder.flatMap { d in spaces.filter { $0.display == d } }
+        let titles = DisplayIdentity.titles(for: displayOrder, among: SpaceControl.displayIdentities())
         var lastDisplay = ""
-        var displayCount = 1
-        var spaceIdx = 1
 
-        for space in spaces {
+        for space in grouped {
             if space.display != lastDisplay {
                 if !lastDisplay.isEmpty { menu.addItem(.separator()) }
-                let h = NSMenuItem(title: "Display \(displayCount)", action: nil, keyEquivalent: "")
+                let n = displayOrder.firstIndex(of: space.display) ?? 0
+                let h = NSMenuItem(title: titles[n], action: nil, keyEquivalent: "")
                 h.isEnabled = false
                 menu.addItem(h)
                 lastDisplay = space.display
-                displayCount += 1
             }
 
             let icons: [NSImage] = space.windows.compactMap { wid in
@@ -367,12 +401,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             let item = NSMenuItem()
             let sName = space.label.isEmpty ? "\(space.id)" : space.label
-            item.view = SpaceRowView(space: space, displayIndex: spaceIdx, icons: icons) { [weak self] in
+            // The workspace's own ordinal — what `space focus <n>` counts —
+            // not its row, which grouping by display can move.
+            let ordinal = (spaces.firstIndex { $0.label == space.label && $0.display == space.display } ?? 0) + 1
+            item.view = SpaceRowView(space: space, displayIndex: ordinal, icons: icons) { [weak self] in
                 BarIPC.post("space focus \(sName)")
                 self?.state.refresh()
             }
             menu.addItem(item)
-            spaceIdx += 1
         }
 
         addControls(menu)
@@ -382,12 +418,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Layout Switchers
+        // Checked for the workspace the menu bar names, and with the same
+        // glyph, so the text lines up with the rows below that have icons.
+        let current = state.daemonUp == false ? nil : state.currentSpace?.layout
         let bspItem = NSMenuItem(title: "BSP Layout", action: #selector(setLayoutBSP), keyEquivalent: "")
         bspItem.target = self
+        bspItem.image = Self.layoutIcon("bsp")
+        bspItem.state = current == "bsp" ? .on : .off
         menu.addItem(bspItem)
 
         let floatItem = NSMenuItem(title: "Float Layout", action: #selector(setLayoutFloat), keyEquivalent: "")
         floatItem.target = self
+        floatItem.image = Self.layoutIcon("float")
+        floatItem.state = current == "float" ? .on : .off
         menu.addItem(floatItem)
 
         menu.addItem(.separator())
@@ -395,12 +438,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Floating one window, rather than the whole space. Bindable as
         // `float toggle`, but it needs to be reachable without a keybind —
         // a config migrated from a skhdrc that never bound it had no way in.
+        // Says which way it goes: "Float" on a floating window promised
+        // something the toggle would then undo.
+        let tiles = state.focusedFloating == true
         let floatWindowItem = NSMenuItem(
-            title: "Float Focused Window", action: #selector(toggleFloatWindow), keyEquivalent: ""
+            title: tiles ? "Tile Focused Window" : "Float Focused Window",
+            action: #selector(toggleFloatWindow), keyEquivalent: ""
         )
         floatWindowItem.target = self
         floatWindowItem.image = NSImage(
-            systemSymbolName: "macwindow.badge.plus", accessibilityDescription: nil
+            systemSymbolName: tiles ? "rectangle.split.2x1" : "macwindow.badge.plus", accessibilityDescription: nil
         )
         menu.addItem(floatWindowItem)
 
@@ -633,6 +680,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 if let i = CommandLine.arguments.firstIndex(of: "--render-snapshots"), i + 1 < CommandLine.arguments.count {
     NSApplication.shared.setActivationPolicy(.prohibited)
     MainActor.assumeIsolated { SnapshotRenderer.run(into: CommandLine.arguments[i + 1]) }
+}
+if CommandLine.arguments.contains("--preview-setup") {
+    NSApplication.shared.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated { SnapshotRenderer.previewSetup() }
 }
 #endif
 

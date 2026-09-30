@@ -108,3 +108,50 @@ private func statuses(_ s: SpaceState, declared: [String: LayoutKind] = [:]) -> 
     #expect(try JSONDecoder().decode(WorkspacesStatus.self, from: data) == sent)
     #expect(sent.displaysWithExtraDesktops.map(\.uuid) == ["A"])
 }
+
+/// A hidden workspace pinned to another display is listed on that display —
+/// where showing it puts it — and a showing one where it is.
+@Test func aHiddenPinnedWorkspaceIsReportedOnItsPinnedDisplay() {
+    var s = SpaceState()
+    s.nextWorkspaceID = 900
+    s.adoptDisplays(
+        [
+            DisplayDesktops(uuid: "DISPLAY-A", desktops: [11], current: 11),
+            DisplayDesktops(uuid: "DISPLAY-B", desktops: [21], current: 21),
+        ],
+        names: ["1", "2", "3"]
+    )
+    let pins = ["3": "DISPLAY-B", "1": "DISPLAY-B"]
+    let out = SpaceStatus.workspaces(
+        in: s, declaredLayout: { _ in nil }, defaultLayout: .bsp, pinnedDisplay: { pins[$0] }
+    )
+    let byLabel = Dictionary(uniqueKeysWithValues: out.map { ($0.label, $0) })
+    #expect(byLabel["3"]?.current == false)
+    #expect(byLabel["3"]?.display == "DISPLAY-B")
+    #expect(byLabel["3"]?.id == 21)
+    for status in out where status.current {
+        // Showing is a fact, not a pin.
+        #expect(s.displayBySpace[status.id] == status.display)
+    }
+}
+
+/// The menu bar names the workspace on the display focus is on, not the
+/// first display's.
+@Test func theBarNamesTheWorkspaceOnTheFocusedDisplay() throws {
+    func status(_ label: String, _ display: String, current: Bool) -> SpaceStatus {
+        SpaceStatus(id: 1, label: label, layout: "bsp", windows: [], current: current, display: display)
+    }
+    let spaces = [
+        status("1", "A", current: false), status("2", "A", current: true),
+        status("7", "B", current: true), status("8", "B", current: false),
+    ]
+    #expect(BarStateStatus.current(in: spaces, focusedDisplay: "B")?.label == "7")
+    #expect(BarStateStatus.current(in: spaces, focusedDisplay: "A")?.label == "2")
+    // Unknown or missing (an older daemon): the first showing, as before.
+    #expect(BarStateStatus.current(in: spaces, focusedDisplay: nil)?.label == "2")
+    #expect(BarStateStatus.current(in: spaces, focusedDisplay: "C")?.label == "2")
+
+    let sent = BarStateStatus(spaces: spaces, windows: [], focusedDisplay: "B")
+    let data = try JSONEncoder().encode(sent)
+    #expect(try JSONDecoder().decode(BarStateStatus.self, from: data) == sent)
+}

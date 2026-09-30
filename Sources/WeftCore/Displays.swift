@@ -96,6 +96,23 @@ public enum DisplayPin: Sendable, Equatable {
     }
 }
 
+/// `visible` with a menu bar at the top of `display` taken off it. A bar
+/// counts when it starts at the display's top edge and lies within its width;
+/// one already outside `visible` (the main display's, which `visibleFrame`
+/// removes itself) changes nothing.
+public func belowMenuBars(_ visible: Frame, display: Frame, menuBars: [Frame]) -> Frame {
+    var out = visible
+    for bar in menuBars
+    where abs(bar.y - display.y) < 1 && bar.x >= display.x - 1 && bar.x + bar.width <= display.x + display.width + 1 {
+        let top = bar.y + bar.height
+        if out.y < top {
+            out.height -= top - out.y
+            out.y = top
+        }
+    }
+    return out
+}
+
 /// A connected display, as pin resolution needs it.
 public struct DisplayIdentity: Sendable, Equatable {
     public var uuid: String
@@ -114,6 +131,20 @@ public struct DisplayIdentity: Sendable, Equatable {
     /// Built in by the display's own answer, or failing that by the name
     /// macOS gives the Mac's screen.
     var looksBuiltIn: Bool { isBuiltIn || name.lowercased().contains("built-in") }
+
+    /// What to call each of `uuids` in a list of displays: the name System
+    /// Settings shows, numbered when two displays share it (two of the same
+    /// monitor), and "Display N" — its place in the list — when it has none
+    /// or is not connected.
+    public static func titles(for uuids: [String], among displays: [DisplayIdentity]) -> [String] {
+        let names = uuids.map { uuid in displays.first { $0.uuid == uuid }?.name ?? "" }
+        return names.enumerated().map { i, name in
+            guard !name.isEmpty else { return "Display \(i + 1)" }
+            let same = names.enumerated().filter { $0.element == name }.map(\.offset)
+            guard same.count > 1, let n = same.firstIndex(of: i) else { return name }
+            return "\(name) \(n + 1)"
+        }
+    }
 }
 
 /// The display a pin names, among `displays` given west to east. Nil when it

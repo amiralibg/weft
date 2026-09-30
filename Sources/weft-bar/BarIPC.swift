@@ -26,19 +26,30 @@ public enum BarIPC {
     /// resulting snapshot into duplicate UI refreshes.
     ///
     /// Blocking; returns when the stream ends. Callers reconnect.
-    public static func subscribeToState(onEvent: @escaping () -> Void) -> Bool {
+    ///
+    /// `onFailure` hears the commands a keybind or gesture asked for that
+    /// weft could not carry out: the command and why.
+    public static func subscribeToState(
+        onEvent: @escaping () -> Void,
+        onFailure: @escaping (_ command: String, _ message: String) -> Void = { _, _ in }
+    ) -> Bool {
         IPCClient.subscribe(
-            path: IPCPaths.socketPath(), command: "subscribe stateChanged"
+            path: IPCPaths.socketPath(), command: "subscribe stateChanged commandFailed"
         ) { line in
             guard let data = line.data(using: .utf8),
-                  let event = try? JSONDecoder().decode(StreamEvent.self, from: data),
-                  event.kind == "stateChanged"
+                  let event = try? JSONDecoder().decode(StreamEvent.self, from: data)
             else { return }
-            onEvent()
+            switch event.kind {
+            case "stateChanged": onEvent()
+            case "commandFailed": onFailure(event.title ?? "", event.message ?? "")
+            default: break
+            }
         }
     }
 
     private struct StreamEvent: Decodable {
         var kind: String
+        var title: String?
+        var message: String?
     }
 }

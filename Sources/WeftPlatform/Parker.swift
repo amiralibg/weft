@@ -5,6 +5,10 @@
 // else: 0.2 ms a window, no animation, and the application is never told, so
 // there is nothing for it to clamp or refuse (S9).
 //
+// Where that move does not land — macOS 27 accepts it for another app's
+// window and leaves the window where it was — both directions go through
+// Accessibility instead (`AXParkMover`), decided on the launch's first park.
+//
 // S4's nudge does not apply here. A window parked through SkyLight and
 // unparked through Accessibility needs one, because the app still believes the
 // position it had before the park and writing that same position back through
@@ -35,14 +39,48 @@ public struct Parker: Sendable {
         self.fallback = fallback
     }
 
-    /// One path per launch, decided by the self-test: a window parked through
-    /// SkyLight and shown through Accessibility is the S4 desync.
-    private var publicPath: Bool { !PrivateAPI.canMoveWindows }
+    /// One path per launch, decided by the self-test and by the first real
+    /// move (`PrivateAPI.canMoveOtherAppsWindows`): a window parked through
+    /// SkyLight and shown through Accessibility is the S4 desync. The path
+    /// can change once, on the launch's first park, and only when the
+    /// WindowServer move turned out not to land — so nothing was ever really
+    /// parked through it to be shown the other way.
+    private var publicPath: Bool { !PrivateAPI.canMoveOtherAppsWindows }
 
     private func move(_ wid: WindowID, to point: CGPoint) -> Bool {
-        if publicPath { return fallback?.move(wid, to: point) ?? false }
-        var p = point
-        return SLSMoveWindow(WorldReader.cid, wid, &p) == 0
+        if !publicPath {
+            let rc = PrivateAPI.moveOtherAppsWindow(WorldReader.cid, wid, to: point)
+            if rc != PrivateAPI.moveUntrusted { return rc == 0 }
+            // This move is the one that found the WindowServer move does not
+            // land. The window has not moved; move it the way that does.
+        }
+        return fallback?.move(wid, to: point) ?? false
+    }
+
+    /// `move` for a set, the ones that went. The WindowServer move is 0.2 ms
+    /// a window and stays one at a time; through Accessibility each move is a
+    /// round trip to its app, so the apps are asked at once. The first move
+    /// always goes alone: on a launch's first park it is the one that finds
+    /// out which of the two paths this macOS needs.
+    ///
+    /// `home`: the windows are being shown, and a move the app confirms needs
+    /// no wait for the WindowServer to agree (`AXParkMover.moveHome`).
+    private func moveAll(_ moves: [(WindowID, CGPoint)], home: Bool = false) -> Set<WindowID> {
+        guard let first = moves.first else { return [] }
+        var moved: Set<WindowID> = []
+        var rest = moves
+        // Alone only while the path is undecided; once it is, every move goes
+        // the one way.
+        if !publicPath {
+            if move(first.0, to: first.1) { moved.insert(first.0) }
+            rest.removeFirst()
+        }
+        if publicPath, let fallback {
+            moved.formUnion(home ? fallback.moveHome(rest) : fallback.moveAll(rest))
+        } else {
+            for (wid, point) in rest where move(wid, to: point) { moved.insert(wid) }
+        }
+        return moved
     }
 
     /// How close to its recorded corner a window has to be for weft to accept
@@ -161,8 +199,9 @@ public struct Parker: Sendable {
         }
 
         // Only now.
+        let moved = moveAll(fresh.map { ($0.wid, CGPoint(x: $0.parkedAt.x, y: $0.parkedAt.y)) })
         for entry in fresh {
-            if move(entry.wid, to: CGPoint(x: entry.parkedAt.x, y: entry.parkedAt.y)) {
+            if moved.contains(entry.wid) {
                 outcome.parked.append(entry.wid)
             } else {
                 outcome.refused.append(entry.wid)
@@ -173,12 +212,21 @@ public struct Parker: Sendable {
         // would read it as someone else's window and never bring it back.
         if publicPath, !outcome.parked.isEmpty {
             var landed = held + fresh
+            var moved = false
             for i in landed.indices where outcome.parked.contains(landed[i].wid) {
-                if let live = WorldReader.frame(of: landed[i].wid) {
+                if let live = WorldReader.frame(of: landed[i].wid),
+                   abs(live.x - landed[i].parkedAt.x) > Self.spotTolerance
+                    || abs(live.y - landed[i].parkedAt.y) > Self.spotTolerance {
                     landed[i].parkedAt = ParkedWindow.Spot(x: live.x, y: live.y)
+                    moved = true
                 }
             }
-            try? ledger.save(landed.filter { !outcome.refused.contains($0.wid) })
+            // Written again only when a window landed somewhere other than
+            // its spot, or one was refused: the write is an fsync, and a park
+            // that went exactly to plan has nothing new to record.
+            if moved || !outcome.refused.isEmpty {
+                try? ledger.save(landed.filter { !outcome.refused.contains($0.wid) })
+            }
         }
 
         // The one kind of stale entry that is not safe to leave. Everywhere
@@ -380,6 +428,7 @@ public struct Parker: Sendable {
         // already holds would be an fsync for a no-op.
         guard !entries.isEmpty else { return outcome }
         var stillParked = keeping
+        var ours: [ParkedWindow] = []
         for entry in entries {
             guard let live = WorldReader.frame(of: entry.wid),
                   abs(live.x - entry.parkedAt.x) <= Self.spotTolerance,
@@ -388,7 +437,11 @@ public struct Parker: Sendable {
                 outcome.notOurs.append(entry.wid)
                 continue
             }
-            if move(entry.wid, to: CGPoint(x: entry.frame.x, y: entry.frame.y)) {
+            ours.append(entry)
+        }
+        let moved = moveAll(ours.map { ($0.wid, CGPoint(x: $0.frame.x, y: $0.frame.y)) }, home: true)
+        for entry in ours {
+            if moved.contains(entry.wid) {
                 outcome.restored.append(entry.wid)
             } else {
                 outcome.refused.append(entry.wid)

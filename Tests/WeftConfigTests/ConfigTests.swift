@@ -671,3 +671,17 @@ private func exampleText() throws -> String {
             """)
     }
 }
+
+@Test func workspaceSwipeFingers() throws {
+    #expect(try loadConfig("").general.workspaceSwipeFingers == 0)  // off unless asked
+    #expect(try loadConfig("[general]\nworkspace-swipe-fingers = 3\n").general.workspaceSwipeFingers == 3)
+    #expect(try loadConfig("[general]\nworkspace-swipe-fingers = 4\n").general.workspaceSwipeFingers == 4)
+    // Two fingers is scrolling; anything else is a typo.
+    #expect(throws: ConfigError.self) { try loadConfig("[general]\nworkspace-swipe-fingers = 2\n") }
+    #expect(throws: ConfigError.self) { try loadConfig("[general]\nworkspace-swipe-fingers = true\n") }
+}
+
+@Test func stackSideIsAValidKeybind() throws {
+    let cfg = try loadConfig("[keys]\n\"alt-s\" = \"stack side east\"\n")
+    #expect(!cfg.keymap.modes.isEmpty)
+}

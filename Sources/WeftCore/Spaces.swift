@@ -323,8 +323,34 @@ public struct SpaceState: Sendable, Equatable {
     /// Resolve `space focus <…>` targets: label first, then 1-based ordinal,
     /// then a raw space id (keeps alt-digit keybinds working after renames —
     /// "1" means the first workspace even when it isn't named so).
+    /// The workspace `step` places along from the one on the focused
+    /// display, in the configured order, wrapping around.
+    ///
+    /// For stepping through workspaces — `space focus next` on a key, or a
+    /// swipe — so it passes over the ones there is no point landing on:
+    /// empty ones (with a dozen named workspaces, a swipe would otherwise
+    /// crawl through all the empty ones), ones showing on another display
+    /// (focusing those moves the pointer, not the workspace), and any in
+    /// `skipping`, which the daemon fills with those pinned elsewhere. Nil
+    /// when there is nowhere else to go.
+    public func workspace(steppingBy step: Int, skipping: Set<WorkspaceID> = []) -> WorkspaceID? {
+        guard let current = currentWorkspace, let at = wsOrder.firstIndex(of: current), step != 0 else {
+            return nil
+        }
+        let n = wsOrder.count
+        for i in 1..<max(n, 1) {
+            let id = wsOrder[((at + i * step.signum()) % n + n) % n]
+            guard !skipping.contains(id), workspaces[id]?.members.isEmpty == false else { continue }
+            if showingDisplay(of: id).map({ $0 != focusedDisplay }) ?? false { continue }
+            return id
+        }
+        return nil
+    }
+
     public func resolveWorkspace(_ text: String) -> WorkspaceID? {
         if text == "recent" { return recentWorkspace }
+        if text == "next" { return workspace(steppingBy: 1) }
+        if text == "prev" { return workspace(steppingBy: -1) }
         if let id = id(forLabel: text) { return id }
         // A bare integer is an ordinal first (that is what the user types on
         // alt-3) and only falls through to a raw space id when it is too large
@@ -655,11 +681,35 @@ public struct SpaceState: Sendable, Equatable {
     /// They go in as loose members; the sweep moves the ones weft lays out
     /// into the layout, and drops any that no longer exist. A window already
     /// filed somewhere keeps that.
-    public mutating func seedMembership(_ saved: [[WindowID]]) {
+    ///
+    /// `trees` puts each tiling workspace's saved arrangement back first, so
+    /// the sweep keeps it — it only inserts windows a tree lacks and removes
+    /// the ones that have closed. A workspace whose layout is not a tree, or
+    /// already holds windows, keeps what it has.
+    public mutating func seedMembership(_ saved: [[WindowID]], trees: [SavedTree?] = []) {
+        for (i, saved) in trees.enumerated() where i < wsOrder.count {
+            let id = wsOrder[i]
+            guard let saved, case .tiling(let current)? = workspaces[id]?.layout, current.windows.isEmpty
+            else { continue }
+            var tree = saved.tree
+            for wid in tree.windows where workspace(holding: wid) != nil {
+                tree = tree.removing(wid)
+            }
+            workspaces[id]?.layout = .tiling(tree)
+        }
         for (i, wids) in saved.enumerated() where i < wsOrder.count {
             for wid in wids where workspace(holding: wid) == nil {
                 workspaces[wsOrder[i]]?.loose.insert(wid)
             }
+        }
+    }
+
+    /// Every tiling workspace's tree by ordinal, for `membership.json`; nil
+    /// for one that is not tiling or holds nothing.
+    public func persistedTrees() -> [SavedTree?] {
+        wsOrder.map { id -> SavedTree? in
+            guard case .tiling(let tree)? = workspaces[id]?.layout, !tree.windows.isEmpty else { return nil }
+            return SavedTree(tree)
         }
     }
 

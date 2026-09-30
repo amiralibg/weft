@@ -213,8 +213,14 @@ struct ShortcutEditor: View {
             }
             .padding(16)
         }
-        .frame(width: 620, height: 660)
+        // A sheet hangs below the Settings toolbar and is never shrunk to
+        // fit, so it has to fit the smallest Settings window (620 tall, less
+        // the toolbar). At 660 its Cancel and Add buttons were below the
+        // bottom of the default window. The middle scrolls.
+        .frame(width: 620, height: Self.height)
     }
+
+    static let height: CGFloat = 560
 
     @ViewBuilder
     private var notices: some View {

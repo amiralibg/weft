@@ -51,6 +51,15 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
+    /// Fingers for a horizontal trackpad swipe that steps through workspaces
+    /// (`space focus next`/`prev`), or 0 for none. 3 or 4.
+    ///
+    /// weft keeps one macOS desktop per display, so the system's own swipe
+    /// between desktops has nothing of weft's to go to — at best it bounces,
+    /// at worst it lands on a desktop weft does not manage and pauses it.
+    /// Off by default: it means reading every trackpad gesture, and the same
+    /// swipe in System Settings has to be moved off these fingers first.
+    public var workspaceSwipeFingers: Int
     /// Whether a rule's `space = "…"` also switches to that workspace.
     ///
     /// A rule always places the window: the workspace it names is a park away,
@@ -80,6 +89,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
+        workspaceSwipeFingers: Int = 0,
         followSpaceRules: Bool = false,
         enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
@@ -94,6 +104,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
+        self.workspaceSwipeFingers = workspaceSwipeFingers
         self.followSpaceRules = followSpaceRules
         self.enhancedUIExempt = enhancedUIExempt
         self.reserve = reserve
@@ -454,6 +465,13 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "focus-follows-mouse":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.focusFollowsMouse = b
+            case "workspace-swipe-fingers":
+                // Two is scrolling; five is not a thing a trackpad reports
+                // reliably. Anything but 0, 3 or 4 is a typo.
+                guard case .int(let n) = v, [0, 3, 4].contains(n) else {
+                    throw err(path, "expected 0 (off), 3 or 4")
+                }
+                general.workspaceSwipeFingers = n
             case "scroll-animation-ms":
                 warnings.append(ConfigWarning(
                     line: doc.lines[path] ?? 0,

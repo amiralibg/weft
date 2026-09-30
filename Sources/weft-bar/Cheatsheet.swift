@@ -112,8 +112,11 @@ final class CheatsheetModel: ObservableObject {
                 // `describe` speaks weft's own vocabulary — every command is
                 // spelled `space …`. What the user calls it depends on the
                 // mode, and this is the single place that translates.
-                if category == "Spaces" {
-                    category = WorkspaceVocabulary.plural
+                // Any bucket that describes: Layout and Stacks name the
+                // workspace too ("Even out every split on this space"). Not
+                // Run or Other, which show the user's own command as written.
+                if category == "Spaces" { category = WorkspaceVocabulary.plural }
+                if category != "Run" && category != "Other" {
                     summary = WorkspaceVocabulary.rephrase(summary)
                 }
                 out.append(KeybindEntry(
@@ -166,7 +169,7 @@ final class CheatsheetModel: ObservableObject {
         case "space" where words.count >= 2 && words[1] == "layout":
             return ("Layout", "Switch this space to the \(rest(2)) layout")
         case "window":
-            if command.contains("zoom-fullscreen") { return ("Layout", "Zoom the window to fill the space") }
+            if command.contains("zoom-fullscreen") { return ("Layout", "Zoom the window to fill the screen") }
             if command.contains("split") { return ("Layout", "Flip the split under the window") }
             return ("Layout", command)
         case "exec":
@@ -227,6 +230,9 @@ final class CheatsheetModel: ObservableObject {
         case "prev": return "Previous window in the stack"
         case "unstack": return "Pull the window out of its stack"
         case "all": return "Every window on this space in one stack, or back out"
+        case "side" where words.count > 2:
+            let side = ActionWords.directions[words[2]] ?? words[2]
+            return "Every window on the \(side) in one stack, or back out"
         case "move" where words.count > 2: return "Put this window in the stack to the \(words[2])"
         case "split" where words.count > 2: return "Pull the window to the \(words[2]) into this stack"
         default: return words.joined(separator: " ")
@@ -290,7 +296,7 @@ struct CheatsheetView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                TextField("Filter — a chord, a command, or a space name", text: $model.query)
+                TextField("Filter — a chord, a command, or a \(WorkspaceVocabulary.noun) name", text: $model.query)
                     .textFieldStyle(.plain)
                 if !model.query.isEmpty {
                     Button { model.query = "" } label: { Image(systemName: "xmark.circle.fill") }

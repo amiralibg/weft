@@ -65,6 +65,37 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// Words the sidebar search matches, beyond the title: what each pane
+    /// holds, in the words someone looking for it would use.
+    var keywords: [String] {
+        switch self {
+        case .general:
+            return ["gap", "gaps", "spacing", "space", "padding", "edges", "margin", "layout", "tiling",
+                    "floating", "bsp", "stack", "mouse", "pointer", "focus follows", "modifier", "resize", "drag"]
+        case .appearance:
+            return ["border", "borders", "outline", "color", "colour", "accent", "thickness", "width",
+                    "corners", "round", "square", "focused", "janky"]
+        case .workspaces:
+            return ["workspace", "spaces", "desktop", "desktops", "display", "displays", "monitor", "screen",
+                    "pin", "mission control", "order"]
+        case .shortcuts:
+            return ["keys", "keybinds", "keybindings", "hotkeys", "keyboard", "chord", "bindings", "add shortcut"]
+        case .apps:
+            return ["rules", "rule", "float", "tile", "application", "bundle", "title", "window"]
+        case .advanced:
+            return ["engine", "restart", "update", "updates", "version", "permissions", "setup", "welcome",
+                    "tour", "onboarding", "config", "toml", "file", "uninstall", "modes", "sketchybar",
+                    "jankyborders", "bar", "command line", "weftctl", "menu-bar apps"]
+        }
+    }
+
+    func matches(_ query: String) -> Bool {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return true }
+        return title.localizedCaseInsensitiveContains(query)
+            || keywords.contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+
     /// `--tab <name>` on the command line. The old tab names keep working, so
     /// a support answer written last month still opens the right page.
     init?(launchName: String) {
@@ -92,6 +123,7 @@ struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
     @State private var section: SettingsSection?
+    @State private var query = ""
 
     init(store: ConfigStore, health: EngineHealth, section: SettingsSection = .general) {
         self.store = store
@@ -102,7 +134,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $section) {
-                ForEach(SettingsSection.allCases) { item in
+                ForEach(SettingsSection.allCases.filter { $0.matches(query) }) { item in
                     Label {
                         Text(item.title)
                     } icon: {
@@ -112,7 +144,20 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
+            .animation(.chrome, value: query)
+            .safeAreaInset(edge: .top) {
+                SidebarSearchField(query: $query)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+            }
             .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
+            .onChange(of: query) { _, query in
+                // Jump to the first pane that has what is being searched for.
+                if !(section ?? .general).matches(query),
+                   let first = SettingsSection.allCases.first(where: { $0.matches(query) }) {
+                    section = first
+                }
+            }
             .safeAreaInset(edge: .bottom) {
                 EngineCard(health: health).padding(12)
             }
@@ -122,14 +167,15 @@ struct SettingsView: View {
                 // a hard cut. Keyed by section, so nothing inside a pane
                 // re-animates while you work in it.
                 .id(section ?? .general)
-                .transition(.opacity.combined(with: .offset(y: 8)))
-                .animation(.easeOut(duration: 0.2), value: section)
+                .transition(.opacity.combined(with: .offset(y: 10)))
+                .animation(.stage, value: section)
                 .navigationTitle((section ?? .general).title)
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) { SaveStateBadge(store: store) }
                 }
         }
-        .frame(minWidth: 840, minHeight: 600)
+        // Tall enough for the shortcut editor's sheet below the toolbar.
+        .frame(minWidth: 840, minHeight: 620)
         .onAppear { health.start() }
         .onDisappear { health.stop() }
         .onReceive(NotificationCenter.default.publisher(for: .weftShowSettingsSection)) { note in
@@ -147,6 +193,46 @@ struct SettingsView: View {
         case .apps: AppsPane(store: store)
         case .advanced: AdvancedPane(store: store, health: health)
         }
+    }
+}
+
+/// Finds a pane by what is in it, not only by its name: "border" finds
+/// Appearance, "gap" finds General.
+private struct SidebarSearchField: View {
+    @Binding var query: String
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField("Search", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .focused($isFocused)
+                .onExitCommand { query = "" }
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear the search")
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .background(Color.primary.opacity(isFocused ? 0.09 : 0.06), in: .rect(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(isFocused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1)
+        )
+        .animation(.hover, value: query.isEmpty)
+        .animation(.hover, value: isFocused)
     }
 }
 
@@ -232,6 +318,27 @@ private struct GeneralPane: View {
                     Text("Shift ⇧").tag("shift")
                 }
             }
+
+            Section {
+                Picker("Swipe between \(WorkspaceVocabulary.noun)s", selection: store.bind(\.workspaceSwipeFingers)) {
+                    Text("Off").tag(0)
+                    Text("Three fingers").tag(3)
+                    Text("Four fingers").tag(4)
+                }
+            } header: {
+                Text("Trackpad")
+            } footer: {
+                if store.workspaceSwipeFingers != 0 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Swipe left for the next \(WorkspaceVocabulary.noun) with windows in it, right for the previous.")
+                        if let clash = SystemChecks.systemSwipe(fingers: store.workspaceSwipeFingers) {
+                            Text("macOS’s own \(store.workspaceSwipeFingers)-finger swipe \(clash) too. "
+                                + "Move it to other fingers or turn it off in \(SystemChecks.trackpadGesturesSetting).")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
     }
@@ -298,7 +405,7 @@ private struct LayoutPicker: View {
                 ForEach(options) { option in
                     let on = selection == option.id
                     Button {
-                        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+                        withAnimation(.tile) {
                             selection = option.id
                         }
                     } label: {
@@ -374,8 +481,10 @@ struct DesktopPreview: View {
                 }
             }
             .animation(.spring(response: 0.42, dampingFraction: 0.84), value: layout)
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: inner)
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: outer)
+            .animation(.tile, value: inner)
+            .animation(.tile, value: outer)
+            .animation(.tile, value: border)
+            .animation(.tile, value: corner)
         }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
@@ -474,14 +583,14 @@ private struct AppearancePane: View {
             Section {
                 Toggle("Show a border around windows", isOn: store.bind(\.bordersEnabled))
                 Group {
-                    ColorPicker(
-                        "Focused window",
-                        selection: Binding(
-                            get: { Color(hex: store.bordersActiveColor) ?? .weft },
-                            set: { store.setActiveColor($0.argbHex) }
-                        ),
-                        supportsOpacity: false
-                    )
+                    LabeledContent("Focused window") {
+                        BorderColorSwatches(
+                            selection: Binding(
+                                get: { Color(hex: store.bordersActiveColor) ?? .weft },
+                                set: { store.setActiveColor($0.argbHex) }
+                            )
+                        )
+                    }
                     DoubleSliderRow(title: "Thickness", value: store.bind(\.bordersWidth), range: 1...12)
                     Picker("Corners", selection: store.bind(\.bordersStyle)) {
                         Text("Match the window").tag("round")
@@ -524,6 +633,72 @@ private struct AppearancePane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// A row of colours for the focused window's border, plus a well for any
+/// other: most people want one of a handful, and a colour panel is a long
+/// way to go for weft's own blue.
+private struct BorderColorSwatches: View {
+    @Binding var selection: Color
+
+    private static let presets: [(name: String, color: Color)] = [
+        ("weft blue", .weft),
+        ("Violet", Color(.sRGB, red: 0.733, green: 0.604, blue: 0.969, opacity: 1)),
+        ("Pink", Color(.sRGB, red: 0.969, green: 0.463, blue: 0.557, opacity: 1)),
+        ("Orange", Color(.sRGB, red: 1.0, green: 0.62, blue: 0.392, opacity: 1)),
+        ("Yellow", Color(.sRGB, red: 0.878, green: 0.686, blue: 0.408, opacity: 1)),
+        ("Green", Color(.sRGB, red: 0.62, green: 0.808, blue: 0.416, opacity: 1)),
+        ("Teal", Color(.sRGB, red: 0.451, green: 0.855, blue: 0.792, opacity: 1)),
+        ("White", Color(.sRGB, red: 0.92, green: 0.93, blue: 0.96, opacity: 1)),
+    ]
+
+    var body: some View {
+        let current = selection.argbHex
+        HStack(spacing: 8) {
+            ForEach(Self.presets, id: \.name) { preset in
+                Swatch(color: preset.color, isSelected: preset.color.argbHex == current) {
+                    withAnimation(.chrome) { selection = preset.color }
+                }
+                .help(preset.name)
+                .accessibilityLabel(preset.name)
+            }
+            Divider().frame(height: 18).padding(.horizontal, 2)
+            // The well shows the colour itself, so a colour that is none of
+            // the presets is still plain to see.
+            ColorPicker("Other colour", selection: $selection, supportsOpacity: false)
+                .labelsHidden()
+                .help("Any other colour")
+        }
+    }
+
+    private struct Swatch: View {
+        let color: Color
+        let isSelected: Bool
+        let action: () -> Void
+        @State private var isHovering = false
+
+        var body: some View {
+            Button(action: action) {
+                Circle()
+                    .fill(color.gradient)
+                    .frame(width: 18, height: 18)
+                    .overlay(Circle().strokeBorder(.black.opacity(0.15), lineWidth: 0.5))
+                    .padding(3)
+                    .overlay {
+                        Circle()
+                            .strokeBorder(color, lineWidth: 1.5)
+                            .opacity(isSelected ? 1 : 0)
+                            .scaleEffect(isSelected ? 1 : 0.7)
+                    }
+                    .scaleEffect(isHovering && !isSelected ? 1.12 : 1)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PressableStyle())
+            .onHover { hovering in withAnimation(.hover) { isHovering = hovering } }
+            .animation(.chrome, value: isSelected)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        }
     }
 }
 
@@ -1279,6 +1454,14 @@ private struct AdvancedPane: View {
                     Text(health.needsPermissions
                         ? "Something weft needs is still switched off."
                         : "Accessibility, Input Monitoring and Screen Recording are in place.")
+                }
+                LabeledContent {
+                    Button("Show Again") { OnboardingWindowController.shared.showTour() }
+                        .weftGlassButton()
+                        .controlSize(.small)
+                } label: {
+                    Text("Welcome tour")
+                    Text("What a workspace is, the permissions, and the keys worth knowing — one screen each.")
                 }
             } header: {
                 Text("Permissions")

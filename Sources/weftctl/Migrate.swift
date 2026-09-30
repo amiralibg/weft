@@ -45,7 +45,7 @@ public enum Migrate {
         var mouseModifier = "alt"
         var defaultLayout = "bsp"
         var spaces: [(index: Int, label: String, layout: String?)] = []
-        var rules: [(app: String, manage: Bool?, space: String?)] = []
+        var rules: [(app: String, title: String?, manage: Bool?, space: String?)] = []
         var bindings: [(chord: String, cmd: String)] = []
         // skhd modes: `:: resize @` declares one, `alt + shift - r ; resize`
         // enters it, `resize < h : …` binds inside it, `resize < escape ;
@@ -127,13 +127,23 @@ public enum Migrate {
                 if line.contains("rule --add") {
                     // yabai -m rule --add app="^System Settings$" manage=off
                     var appName = ""
+                    var title: String? = nil
                     var manage: Bool? = nil
                     var spaceTarget: String? = nil
 
+                    // Kept as the regex it is, anchors and all: weft matches
+                    // `app` and `title` as regexes too, unanchored, first rule
+                    // wins. Stripping `^…$` turned `^Code$` into `Code`, which
+                    // also matches "T3 Code", and the earlier rule took it.
                     if let r = line.range(of: #"app="([^"]+)""#, options: .regularExpression) {
                         let m = String(line[r])
-                        appName = m.replacingOccurrences(of: "app=\"", with: "").replacingOccurrences(of: "\"", with: "")
-                        appName = appName.replacingOccurrences(of: "^", with: "").replacingOccurrences(of: "$", with: "")
+                        appName = String(m.dropFirst("app=\"".count).dropLast())
+                    }
+                    // Dropping this made a rule for one Picture-in-Picture
+                    // window a rule for every window of the app.
+                    if let r = line.range(of: #"title="([^"]+)""#, options: .regularExpression) {
+                        let m = String(line[r])
+                        title = String(m.dropFirst("title=\"".count).dropLast())
                     }
                     if line.contains("manage=off") {
                         manage = false
@@ -143,8 +153,11 @@ public enum Migrate {
                         spaceTarget = m.replacingOccurrences(of: "space=", with: "").replacingOccurrences(of: "\"", with: "")
                     }
 
-                    if !appName.isEmpty {
-                        rules.append((appName, manage, spaceTarget))
+                    if !appName.isEmpty,
+                       !rules.contains(where: {
+                           $0.app == appName && $0.title == title && $0.manage == manage && $0.space == spaceTarget
+                       }) {
+                        rules.append((appName, title, manage, spaceTarget))
                     }
                 }
             }
@@ -414,9 +427,18 @@ public enum Migrate {
         }
 
         if !rules.isEmpty {
-            for r in rules {
+            // weft takes the first rule that matches; yabai applies every one,
+            // so its order carries no meaning. A rule naming a title is about
+            // some of an app's windows, and has to come before the rule about
+            // all of them or it never matches — a Picture-in-Picture rule
+            // after the browser's own was tiled with the browser.
+            let ordered = rules.filter { $0.title != nil } + rules.filter { $0.title == nil }
+            for r in ordered {
                 toml += "[[rule]]\n"
-                toml += "app = \"\(r.app)\"\n"
+                toml += "app = \(tomlString(r.app))\n"
+                if let t = r.title {
+                    toml += "title = \(tomlString(t))\n"
+                }
                 if let m = r.manage {
                     toml += "manage = \(m)\n"
                 }
@@ -488,4 +510,10 @@ public enum Migrate {
             print("# Run 'weftctl migrate --write' to save this to ~/.config/weft/weft.toml")
         }
     }
+}
+
+/// A TOML basic string. A yabai rule is a regex, and a regex is full of
+/// backslashes (`Picture\.in\.Picture`) that TOML reads as escapes.
+private func tomlString(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
 }

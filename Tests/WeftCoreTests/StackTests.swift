@@ -376,3 +376,70 @@ private let peekConfig = TilingConfig(
     #expect(hiddenStackMembers(in: tree(1, 2, 3)).isEmpty)
     #expect(hiddenStackMembers(in: Tree()).isEmpty)
 }
+
+// MARK: - stack side
+
+@Test func stackSideEastStacksTheWholeRightHalf() {
+    // Spiral: [1 | [2 / [3 | 4]]]. `stack toggle` on 2 would stack "2, and
+    // the 3|4 split"; `stack side east` stacks 2, 3 and 4 flat.
+    let t = tree(1, 2, 3, 4).focusing(2).stackingSide(.east)
+    let frames = layout(t, in: stackScreen, config: .none)
+    #expect(frames[2] == frames[3])
+    #expect(frames[3] == frames[4])
+    #expect(frames[2]!.x == 500)
+    #expect(frames[2]!.width == 500)
+    #expect(frames[2]!.height == 800)
+    // The west half is untouched.
+    #expect(frames[1] == Frame(x: 0, y: 0, width: 500, height: 800))
+    #expect(t.focus == 2)
+    #expect(stackPositions(in: t)[2] == StackPosition(index: 1, count: 3))
+}
+
+@Test func stackSideAgainRestoresTheExactLayout() {
+    var before = tree(1, 2, 3, 4).focusing(3)
+    // A resized split inside the side must come back as it was.
+    let state = State(tree: before, screen: stackScreen, config: .none)
+    before = Reducer.reduce(state, .resize(.right, 50)).0.tree
+    let stacked = before.stackingSide(.east)
+    #expect(stacked != before)
+    let undone = stacked.stackingSide(.east)
+    #expect(layout(undone, in: stackScreen, config: .none) == layout(before, in: stackScreen, config: .none))
+    #expect(undone.focus == 3)
+}
+
+@Test func stackSideFromTheOtherSideRaisesItsFront() {
+    // Focus on the west window: the east side still stacks, focus stays put,
+    // and the stack's front member is raised so it is the one showing.
+    let base = State(tree: tree(1, 2, 3, 4).focusing(1), screen: stackScreen, config: .none)
+    let (s1, m1) = Reducer.reduce(base, .stack(.side(.east)))
+    #expect(s1.tree.focus == 1)
+    let frames = layout(s1.tree, in: stackScreen, config: .none)
+    #expect(frames[2] == frames[4])
+    #expect(frames[1]!.width == 500)
+    #expect(m1.contains(.raise(2)))
+    #expect(m1.last == .raise(1))
+}
+
+@Test func stackSideWithOneWindowThereIsANoOp() {
+    let t = tree(1, 2, 3).focusing(3)
+    #expect(t.stackingSide(.west) == t)  // the west half is just 1
+    #expect(tree(1).stackingSide(.east) == tree(1))
+}
+
+@Test func stackSideFollowsTheAxis() {
+    // [1 | [2 / 3]]: there is no top/bottom split at the root, so north
+    // walks towards focus and finds the 2/3 split.
+    let t = tree(1, 2, 3).focusing(3).stackingSide(.south)
+    #expect(t == tree(1, 2, 3).focusing(3))  // south of 2/3 is just 3
+    let n = tree(1, 2, 3, 4).focusing(4).stackingSide(.south)
+    let frames = layout(n, in: stackScreen, config: .none)
+    #expect(frames[3] == frames[4])  // the bottom-right 3|4 pair
+    #expect(frames[2]!.y == 0)
+}
+
+@Test func stackSideParses() throws {
+    #expect(try Command.parse("stack side east") == .stack(.side(.east)))
+    #expect(try Command.parse("stack side right") == .stack(.side(.east)))
+    #expect(try Command.parse("stack side up") == .stack(.side(.north)))
+    #expect(throws: CommandParseError.self) { try Command.parse("stack side") }
+}

@@ -133,3 +133,33 @@ private func adopt(_ s: inout SpaceState, _ uuids: [String], names: [String]? = 
     #expect(resolvePin(DisplayPin("external"), among: ids) == "B")
     #expect(resolvePin(DisplayPin("built-in"), among: ids) == nil)
 }
+
+@Test func displaysAreTitledByNameNumberedWhenTwoShareOne() {
+    let displays = [
+        DisplayIdentity(uuid: "A", name: "Built-in Retina Display", isMain: true, isBuiltIn: true),
+        DisplayIdentity(uuid: "B", name: "DELL U2720Q", isMain: false),
+        DisplayIdentity(uuid: "C", name: "DELL U2720Q", isMain: false),
+    ]
+    #expect(DisplayIdentity.titles(for: ["A", "B", "C"], among: displays)
+        == ["Built-in Retina Display", "DELL U2720Q 1", "DELL U2720Q 2"])
+    // Not connected, or nameless: its place in the list.
+    #expect(DisplayIdentity.titles(for: ["A", "Z"], among: displays) == ["Built-in Retina Display", "Display 2"])
+}
+
+/// A second display's menu bar comes off its tiling area; the main one's,
+/// already off, does not come off twice; another display's bar is not this
+/// one's.
+@Test func menuBarsComeOffTheTopOfTheirOwnDisplay() {
+    let samsung = Frame(x: -1063, y: -2160, width: 3840, height: 2160)
+    let laptop = Frame(x: 0, y: 0, width: 1710, height: 1112)
+    let bars = [
+        Frame(x: -1063, y: -2160, width: 3840, height: 30),
+        Frame(x: 0, y: 0, width: 1710, height: 38),
+    ]
+    #expect(belowMenuBars(samsung, display: samsung, menuBars: bars)
+        == Frame(x: -1063, y: -2130, width: 3840, height: 2130))
+    let laptopVisible = Frame(x: 0, y: 38, width: 1710, height: 1074)
+    #expect(belowMenuBars(laptopVisible, display: laptop, menuBars: bars) == laptopVisible)
+    // Menu bar hidden: nothing to take off.
+    #expect(belowMenuBars(samsung, display: samsung, menuBars: []) == samsung)
+}

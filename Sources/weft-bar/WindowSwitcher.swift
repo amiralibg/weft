@@ -128,7 +128,7 @@ final class WindowSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
         field.frame = NSRect(x: 50, y: 334, width: 530, height: 34)
         field.font = .systemFont(ofSize: 18, weight: .regular)
-        field.placeholderString = "Search windows across spaces…"
+        field.placeholderString = "Search windows across \(WorkspaceVocabulary.noun)s…"
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none

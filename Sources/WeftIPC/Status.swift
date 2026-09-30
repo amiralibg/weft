@@ -53,25 +53,38 @@ extension SpaceStatus {
     /// the kind it *would* get: its override, else its `[[space]] layout`,
     /// else the default — an empty tree's kind is `bsp`, which told Settings
     /// `bsp` for a workspace the file declares `float`.
+    /// `pinnedDisplay` is `[[space]] display = …` resolved to a display uuid.
+    /// A hidden workspace is reported on the display it pins to, because that
+    /// is where showing it puts it; it lives on whichever desktop it was
+    /// created on until then. Reporting that one listed a workspace pinned to
+    /// the second display under the first, and the menu counted a display
+    /// that does not exist.
     public static func workspaces(
         in sp: SpaceState,
         declaredLayout: (String) -> LayoutKind?,
-        defaultLayout: LayoutKind
+        defaultLayout: LayoutKind,
+        pinnedDisplay: (String) -> String? = { _ in nil }
     ) -> [SpaceStatus] {
         sp.wsOrder.compactMap { wsid -> SpaceStatus? in
-            guard let ws = sp.workspaces[wsid], let display = sp.displayBySpace[ws.desktop] else {
+            guard let ws = sp.workspaces[wsid], var display = sp.displayBySpace[ws.desktop] else {
                 return nil
             }
             let label = ws.label.isEmpty ? "\(wsid.raw)" : ws.label
+            var desktop = ws.desktop
+            let showing = sp.showingDisplay(of: wsid) != nil
+            if !showing, let pin = pinnedDisplay(label), let pinnedDesktop = sp.managed[pin] {
+                display = pin
+                desktop = pinnedDesktop
+            }
             let layout = ws.layout.windows.isEmpty
                 ? (ws.overrideKind ?? declaredLayout(label) ?? defaultLayout)
                 : ws.layout.kind
             return SpaceStatus(
-                id: ws.desktop,
+                id: desktop,
                 label: label,
                 layout: layout.rawValue,
                 windows: ws.members.sorted(),
-                current: sp.showingDisplay(of: wsid) != nil,
+                current: showing,
                 display: display
             )
         }
@@ -100,10 +113,30 @@ public struct BarWindowStatus: Codable, Sendable, Equatable {
 public struct BarStateStatus: Codable, Sendable, Equatable {
     public var spaces: [SpaceStatus]
     public var windows: [BarWindowStatus]
+    /// The display keyboard focus is on. Optional: a daemon from before it
+    /// existed leaves it out.
+    public var focusedDisplay: String?
+    /// Whether the focused window is out of the layout — what `float toggle`
+    /// would undo — so the menu can say which way it goes. Nil with nothing
+    /// focused, or from an older daemon.
+    public var focusedFloating: Bool?
 
-    public init(spaces: [SpaceStatus], windows: [BarWindowStatus]) {
+    public init(
+        spaces: [SpaceStatus], windows: [BarWindowStatus],
+        focusedDisplay: String? = nil, focusedFloating: Bool? = nil
+    ) {
         self.spaces = spaces
         self.windows = windows
+        self.focusedDisplay = focusedDisplay
+        self.focusedFloating = focusedFloating
+    }
+
+    /// The workspace the menu bar names: the one showing on the focused
+    /// display. With a workspace showing on every display, the first one
+    /// showing was always the first display's, and switching workspaces on
+    /// the second display never changed the menu bar.
+    public static func current(in spaces: [SpaceStatus], focusedDisplay: String?) -> SpaceStatus? {
+        spaces.first { $0.current && $0.display == focusedDisplay } ?? spaces.first(where: \.current)
     }
 }
 

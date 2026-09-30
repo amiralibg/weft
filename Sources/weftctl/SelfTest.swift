@@ -79,7 +79,7 @@ enum LiveSelfTest {
             ledger: ParkLedger(url: dir.appendingPathComponent("parked.json")),
             fallback: AXParkMover(applier: AXApplier())
         )
-        let path = PrivateAPI.canMoveWindows ? "WindowServer" : "Accessibility (public path)"
+        var path = PrivateAPI.canMoveOtherAppsWindows ? "WindowServer" : "Accessibility (public path)"
         var ok = true
 
         // Park.
@@ -95,16 +95,36 @@ enum LiveSelfTest {
             return false
         }
         let parkMs = Date().timeIntervalSince(t0) * 1000
+        // The park itself can find the WindowServer move does not land on
+        // another app's window (macOS 27) and finish through Accessibility.
+        if path == "WindowServer", !PrivateAPI.canMoveOtherAppsWindows {
+            path = "Accessibility — the WindowServer move was accepted and did not land"
+        }
         pump(0.2)
-        let parked = WorldReader.frame(of: wid)
+        // Judged by the public window list, never by weft's own read. On
+        // macOS 27 a WindowServer move of another process's window is
+        // accepted, and the connection that made it reads the new position
+        // back, while the window stays exactly where it was. A self-test
+        // that checks its move with the same connection that made it passes
+        // on a Mac where nothing is ever hidden.
+        let parked = PublicPaths.frame(of: wid)
         let onScreen = WorldReader.onScreenWindowIDs().contains(wid)
         let visible = parked.map { display.intersects($0) } ?? false
-        print("[\(visible && onScreen ? "\u{2713}" : "\u{2717}")] Hide at the \(corner.rawValue) corner via \(path): "
+        // A sliver, not the window: the move has to have happened at all.
+        // Accessibility keeps a strip reachable, so "a sliver" is a share of
+        // the window rather than one point.
+        let moved = parked.map { f -> Bool in
+            let w = min(f.x + f.width, display.x + display.width) - max(f.x, display.x)
+            let h = min(f.y + f.height, display.y + display.height) - max(f.y, display.y)
+            return max(w, 0) * max(h, 0) < 0.05 * f.width * f.height
+        } ?? false
+        print("[\(moved && visible && onScreen ? "\u{2713}" : "\u{2717}")] Hide at the \(corner.rawValue) corner via \(path): "
             + String(format: "%.2f ms", parkMs)
+            + (moved ? "" : ", the window DID NOT MOVE (accepted, but still at \(parked.map { "\(Int($0.x)),\(Int($0.y))" } ?? "?"))")
             + (visible ? ", one point still on screen" : ", NOT on screen")
             + (onScreen ? ", still in the on-screen list" : ", DROPPED from the on-screen list"))
-        ok = ok && visible && onScreen
-        if PrivateAPI.canMoveWindows, parkMs > parkBudgetMs {
+        ok = ok && moved && visible && onScreen
+        if PrivateAPI.canMoveOtherAppsWindows, parkMs > parkBudgetMs {
             print("    slower than the \(Int(parkBudgetMs)) ms budget — worth a look on this macOS")
         }
 
@@ -113,7 +133,7 @@ enum LiveSelfTest {
         let back = parker.unpark([wid])
         let unparkMs = Date().timeIntervalSince(t1) * 1000
         pump(0.2)
-        let after = WorldReader.frame(of: wid)
+        let after = PublicPaths.frame(of: wid)
         let home = after.map { abs($0.x - before.x) <= 1 && abs($0.y - before.y) <= 1 } ?? false
         print("[\(home && back.restored == [wid] ? "\u{2713}" : "\u{2717}")] Show: "
             + String(format: "%.2f ms", unparkMs)

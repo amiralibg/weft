@@ -26,6 +26,10 @@ public final class AXApplier: @unchecked Sendable {
     private var appElements: [Int32: AXUIElement] = [:]
     private var windowElements: [WindowID: AXUIElement] = [:]
     private var lastApplied: [WindowID: Frame] = [:]
+    /// The frame last asked of each window and accepted (position landed),
+    /// whatever size it settled at — what `isSettled` needs to tell an app
+    /// that snapped from a change nobody has written yet.
+    private var lastTarget: [WindowID: Frame] = [:]
     private var expectedFrame: [WindowID: Frame] = [:]
     private var expectedAt: [WindowID: Date] = [:]
     private var epoch: [WindowID: UInt64] = [:]
@@ -293,6 +297,7 @@ public final class AXApplier: @unchecked Sendable {
         lock.withLock {
             windowElements = windowElements.filter { live.contains($0.key) }
             lastApplied = lastApplied.filter { live.contains($0.key) }
+            lastTarget = lastTarget.filter { live.contains($0.key) }
             expectedFrame = expectedFrame.filter { live.contains($0.key) }
             expectedAt = expectedAt.filter { live.contains($0.key) }
             epoch = epoch.filter { live.contains($0.key) }
@@ -418,13 +423,12 @@ public final class AXApplier: @unchecked Sendable {
         let tDiff = Trace.start("apply.diff")
         var settled: [WindowID: Frame] = [:]
         var todo: [(wid: WindowID, frame: Frame, pid: Int32)] = []
+        let asked = lock.withLock { lastTarget }
         for (wid, frame) in frames {
             guard let pid = pids[wid] else { continue }
             if !force,
                let actual = WorldReader.frame(of: wid),
-               abs(actual.x - frame.x) < 1.0, abs(actual.y - frame.y) < 1.0,
-               abs(actual.width - frame.width) <= sizeSlop,
-               abs(actual.height - frame.height) <= sizeSlop
+               isSettled(actual, at: frame, lastTarget: asked[wid], sizeSlop: sizeSlop)
             {
                 settled[wid] = actual
                 continue
@@ -533,7 +537,10 @@ public final class AXApplier: @unchecked Sendable {
     public func applyDragFrames(frames: [WindowID: Frame], pids: [WindowID: Int32]) {
         guard !frames.isEmpty else { return }
         var resizes: [(wid: WindowID, frame: Frame, pid: Int32)] = []
-        let transaction = SLSTransactionCreate(cid)
+        // Without a WindowServer move that lands, positions go the slow way
+        // with the sizes, through Accessibility.
+        let slsMoves = PrivateAPI.canMoveOtherAppsWindows
+        let transaction = slsMoves ? SLSTransactionCreate(cid) : nil
         var moved = false
         for (wid, frame) in frames {
             var pre = CGRect.zero
@@ -548,7 +555,7 @@ public final class AXApplier: @unchecked Sendable {
                 )
                 moved = true
             }
-            if needsResize, let pid = pids[wid] {
+            if needsResize || (needsMove && !slsMoves), let pid = pids[wid] {
                 resizes.append((wid, frame, pid))
             }
         }
@@ -565,6 +572,7 @@ public final class AXApplier: @unchecked Sendable {
                 expectedFrame[wid] = frame
                 expectedAt[wid] = Date()
                 lastApplied[wid] = frame
+                lastTarget[wid] = frame
             }
         }
         // Resizes are the expensive half and get their own backpressure: the
@@ -599,14 +607,24 @@ public final class AXApplier: @unchecked Sendable {
                     for item in items {
                         guard let el = self.resolveElement(for: item.wid, pid: pid) else { continue }
                         var size = CGSize(width: item.frame.width, height: item.frame.height)
-                        if let v = AXValueCreate(.cgSize, &size) {
+                        // A move-only item (no WindowServer move) is already
+                        // the right size; a size write would relayout it.
+                        var pre = CGRect.zero
+                        let sameSize = Self.readBounds(item.wid, &pre) == 0
+                            && abs(pre.width - size.width) <= 0.5 && abs(pre.height - size.height) <= 0.5
+                        if !sameSize, let v = AXValueCreate(.cgSize, &size) {
                             AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
                         }
                         // An app that grows from its top-left corner ends up
                         // in the right place already; one that does not needs
-                        // the origin restating, and that is WindowServer-local.
+                        // the origin restating, and that is WindowServer-local
+                        // when the WindowServer move lands.
                         var origin = CGPoint(x: item.frame.x, y: item.frame.y)
-                        SLSMoveWindow(self.cid, item.wid, &origin)
+                        if PrivateAPI.canMoveOtherAppsWindows {
+                            SLSMoveWindow(self.cid, item.wid, &origin)
+                        } else if let v = AXValueCreate(.cgPoint, &origin) {
+                            AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+                        }
                     }
                 }
             }
@@ -621,7 +639,9 @@ public final class AXApplier: @unchecked Sendable {
     /// moves on whatever frame its app's queue got to, and a four-window
     /// space visibly rearranges in stages.
     private func commitPositions(_ items: [(wid: WindowID, frame: Frame, pid: Int32)]) {
-        guard items.count > 1, let transaction = SLSTransactionCreate(cid) else { return }
+        guard items.count > 1, PrivateAPI.canMoveOtherAppsWindows,
+              let transaction = SLSTransactionCreate(cid)
+        else { return }
         for item in items {
             SLSTransactionMoveWindowWithGroup(
                 transaction, item.wid, CGPoint(x: item.frame.x, y: item.frame.y)
@@ -638,6 +658,15 @@ public final class AXApplier: @unchecked Sendable {
     /// forward, and parking that on the per-pid AX queue put it at the head of
     /// the line in front of every subsequent frame write for that app —
     /// measured as a 1.2 s `zoom-fullscreen`.
+    /// Bring an app forward without naming a window: macOS gives key status
+    /// to the app's own choice, or none. On the activation queue, for the
+    /// reason `focusWindow` gives.
+    public func activate(pid: Int32) {
+        activateQueue.async {
+            NSRunningApplication(processIdentifier: pid)?.activate()
+        }
+    }
+
     public func focusWindow(_ wid: WindowID, pid: Int32) {
         queue(for: pid).async {
             // Resolve, do not merely look up. The cache is populated as a side
@@ -759,8 +788,12 @@ public final class AXApplier: @unchecked Sendable {
     /// and it reports what it managed to fix.
     @discardableResult
     public func restore(_ wid: WindowID, pid: Int32, to frame: Frame) -> Bool {
-        var p = CGPoint(x: frame.x, y: frame.y)
-        guard SLSMoveWindow(cid, wid, &p) == 0 else { return false }
+        // Without a WindowServer move that lands, the nudge below does the
+        // whole job.
+        if PrivateAPI.canMoveOtherAppsWindows {
+            var p = CGPoint(x: frame.x, y: frame.y)
+            guard SLSMoveWindow(cid, wid, &p) == 0 else { return false }
+        }
         // Resolve, do not merely look up — the same trap `focusWindow`
         // documents. The cache is filled as a side effect of writing a frame,
         // and a window that has been off screen is by definition one nothing
@@ -923,9 +956,10 @@ public final class AXApplier: @unchecked Sendable {
     /// nil on success, otherwise why it failed.
     @discardableResult
     private func setFrameOnQueue(_ frame: Frame, wid: WindowID, pid: Int32) -> FailureReason? {
-        var target = CGPoint(x: frame.x, y: frame.y)
-        // 1. Instant compositor positioning via SkyLight
-        let slsStatus = SLSMoveWindow(cid, wid, &target)
+        let target = CGPoint(x: frame.x, y: frame.y)
+        // 1. Instant compositor positioning via SkyLight — while this launch
+        // still trusts it with another app's window (PrivateAPI).
+        let slsStatus = PrivateAPI.moveOtherAppsWindow(cid, wid, to: target)
         let slsOK = (slsStatus == 0)
 
         // 2. Resolve AX element for size + positioning notifications
@@ -944,6 +978,7 @@ public final class AXApplier: @unchecked Sendable {
                 if posOK {
                     let settled = Frame(x: target.x, y: target.y, width: rect.width, height: rect.height)
                     lastApplied[wid] = settled
+                    lastTarget[wid] = frame
                     expectedFrame[wid] = settled
                     expectedAt[wid] = Date()
                 }
@@ -955,7 +990,13 @@ public final class AXApplier: @unchecked Sendable {
         // the public path the app's own answer through the element just
         // written, because the public window list reports a move late and a
         // correct write read too early looks refused.
+        //
+        // The same when the WindowServer move is off for this launch: every
+        // move is then an Accessibility one, and the WindowServer's bounds
+        // lag it just the same — a tile that landed read as refused, twice,
+        // and was floated as a quirk.
         let publicBounds = slsStatus == Int32(CGError.notImplemented.rawValue)
+            || slsStatus == PrivateAPI.moveUntrusted
         func readBack(_ out: inout CGRect) -> Int32 {
             if publicBounds, let f = PublicPaths.axFrame(el) {
                 out = CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
@@ -1039,6 +1080,21 @@ public final class AXApplier: @unchecked Sendable {
                     } else { haveRect = false }
                 }
             }
+            // One more size write when the first fell well short. An app
+            // keeps a window on the display it was on for the size write that
+            // immediately follows a move to another display: TextEdit sent to
+            // a wider display above stopped exactly at the old display's right
+            // edge, and the same write a moment later lands. Nothing wrote it
+            // again — the layout was settled as far as weft knew — so the
+            // tile stayed short until something else changed. An app with a
+            // real size limit gives the same answer twice; that costs one
+            // write, only when the size misses.
+            if haveRect, posOK, !sizeAlreadyRight,
+               abs(rect.width - frame.width) > sizeSlop || abs(rect.height - frame.height) > sizeSlop
+            {
+                writeSize()
+                if readBack(&rect) != 0 { haveRect = false }
+            }
         }
         tVerify.end(detail: who)
         // Where the window is decides it, not which route got it there. The
@@ -1048,7 +1104,7 @@ public final class AXApplier: @unchecked Sendable {
         let ok = haveRect && posOK
         let reason: FailureReason? = ok ? nil
             : !haveRect ? .boundsUnreadable
-            : !slsOK ? .windowServerRefused(slsStatus)
+            : !slsOK && !publicBounds ? .windowServerRefused(slsStatus)
             : .positionRejected(want: target, got: rect.origin)
         // Record echo suppression only on real success; on failure leave any
         // prior expectation alone so observer Moved/Resized events are treated
@@ -1059,6 +1115,7 @@ public final class AXApplier: @unchecked Sendable {
             if ok {
                 let settled = Frame(x: target.x, y: target.y, width: rect.width, height: rect.height)
                 lastApplied[wid] = settled
+                lastTarget[wid] = frame
                 expectedFrame[wid] = settled
                 expectedAt[wid] = Date()
             }

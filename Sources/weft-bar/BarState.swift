@@ -20,6 +20,8 @@ import WeftIPC
 final class BarState: ObservableObject {
     @Published private(set) var spaces: [SpaceStatus] = []
     @Published private(set) var windows: [BarWindowStatus] = []
+    @Published private(set) var focusedDisplay: String?
+    @Published private(set) var focusedFloating: Bool?
     /// Nil until the first answer arrives; false once the daemon has been
     /// asked and did not reply.
     @Published private(set) var daemonUp: Bool?
@@ -35,6 +37,8 @@ final class BarState: ObservableObject {
     /// Called after every successful refresh, so the status item can redraw
     /// without observing.
     var onChange: (() -> Void)?
+    /// A keybind or gesture that weft could not carry out, and why.
+    var onCommandFailed: ((_ command: String, _ message: String) -> Void)?
 
     private var refreshing = false
     private var refreshAgain = false
@@ -42,7 +46,7 @@ final class BarState: ObservableObject {
     private var pollTimer: Timer?
     private var stream: StreamToken?
 
-    var currentSpace: SpaceStatus? { spaces.first(where: \.current) }
+    var currentSpace: SpaceStatus? { BarStateStatus.current(in: spaces, focusedDisplay: focusedDisplay) }
 
     func start() {
         refresh(checkPermissions: true)
@@ -73,6 +77,8 @@ final class BarState: ObservableObject {
             await MainActor.run {
                 self.spaces = next.spaces
                 self.windows = next.windows
+                self.focusedDisplay = next.focusedDisplay
+                self.focusedFloating = next.focusedFloating
                 self.daemonUp = next.reachable
                 if let needsRestart = next.needsRestart {
                     self.needsRestart = needsRestart
@@ -103,13 +109,19 @@ final class BarState: ObservableObject {
         let notify: @Sendable () -> Void = { [weak self] in
             Task { @MainActor in self?.refresh() }
         }
+        let failed: @Sendable (String, String) -> Void = { [weak self] command, message in
+            Task { @MainActor in self?.onCommandFailed?(command, message) }
+        }
         Task.detached(priority: .utility) {
             var retryDelayMs = 50
             while !token.isCancelled {
-                let ok = BarIPC.subscribeToState {
+                let ok = BarIPC.subscribeToState(onEvent: {
                     guard !token.isCancelled else { return }
                     notify()
-                }
+                }, onFailure: { command, message in
+                    guard !token.isCancelled else { return }
+                    failed(command, message)
+                })
                 // Reconnect promptly on restart: start fast (50ms) so a restarting
                 // daemon is caught the moment it rebinds its socket, then back off
                 // gracefully if it stays down.
@@ -137,6 +149,8 @@ final class BarState: ObservableObject {
     private struct Snapshot: Sendable {
         var spaces: [SpaceStatus] = []
         var windows: [BarWindowStatus] = []
+        var focusedDisplay: String?
+        var focusedFloating: Bool?
         var reachable = false
         var needsRestart: Bool?
         var permissionsReady: Bool?
@@ -160,6 +174,8 @@ final class BarState: ObservableObject {
         var snapshot = Snapshot(
             spaces: state.spaces,
             windows: state.windows,
+            focusedDisplay: state.focusedDisplay,
+            focusedFloating: state.focusedFloating,
             reachable: true
         )
         if checkPermissions,

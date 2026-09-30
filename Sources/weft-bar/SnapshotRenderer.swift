@@ -44,7 +44,7 @@ enum SnapshotRenderer {
             render(
                 ShortcutEditor(row: nil, isModeLayer: false, context: context, others: [],
                                onSave: { _, _ in }, onDelete: nil, onCancel: {}),
-                size: CGSize(width: 620, height: 660), appearance: appearance,
+                size: CGSize(width: 620, height: ShortcutEditor.height), appearance: appearance,
                 to: dir.appendingPathComponent("shortcut-new-\(tag).png")
             )
             render(
@@ -54,20 +54,63 @@ enum SnapshotRenderer {
                     others: [KeyRow(chord: "alt-shift-m", steps: ["stack all"])],
                     onSave: { _, _ in }, onDelete: {}, onCancel: {}
                 ),
-                size: CGSize(width: 620, height: 660), appearance: appearance,
+                size: CGSize(width: 620, height: ShortcutEditor.height), appearance: appearance,
                 to: dir.appendingPathComponent("shortcut-edit-\(tag).png")
             )
-            for page in [SetupModel.Page.welcome, .workspacesIntro, .permissions, .done] {
-                let model = SetupModel()
-                model.page = page
-                render(
-                    SetupView(model: model) {},
-                    size: CGSize(width: 700, height: 660),
-                    appearance: appearance,
-                    to: dir.appendingPathComponent("setup-\(page)-\(tag).png")
-                )
+            // Setup is dark either way; once is enough.
+            if appearance == .darkAqua {
+                for page in [SetupModel.Page.install, .welcome, .workspacesIntro, .keys, .permissions, .done] {
+                    let model = SetupModel()
+                    model.page = page
+                    render(
+                        SetupView(model: model) {},
+                        size: SetupView.size,
+                        appearance: appearance,
+                        // Long enough for every headline and card to arrive.
+                        settleFor: 2.4,
+                        to: dir.appendingPathComponent("setup-\(page).png")
+                    )
+                }
             }
         }
+        exit(0)
+    }
+
+    /// `weft-bar --preview-setup`: Setup on screen, on its own, walking
+    /// through every page a few seconds apart and then quitting. For watching
+    /// what a still cannot show — the stage's motion between pages — without
+    /// starting a second WeftBar: no menu-bar item, no hotkeys, no engine.
+    /// Prints the window number, so `screencapture -l` can film it.
+    static func previewSetup() -> Never {
+        let model = SetupModel()
+        let window = NSWindow(
+            contentRect: CGRect(origin: .zero, size: SetupView.size),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = NSHostingView(rootView: SetupView(model: model) {})
+        window.center()
+        window.orderFrontRegardless()
+        print("window \(window.windowNumber)")
+        fflush(stdout)
+        // Under the real event loop, not `settle`: window occlusion — what
+        // the stage's animations start and stop on — only arrives through it.
+        for (index, page) in SetupModel.Page.steps.dropFirst().enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5 + 3 * Double(index)) {
+                print("page \(page)")
+                fflush(stdout)
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { model.page = page }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5 + 3 * Double(SetupModel.Page.steps.count - 1)) {
+            exit(0)
+        }
+        NSApplication.shared.run()
         exit(0)
     }
 
@@ -76,7 +119,7 @@ enum SnapshotRenderer {
     }
 
     private static func render<V: View>(
-        _ view: V, size: CGSize, appearance: NSAppearance.Name, to url: URL
+        _ view: V, size: CGSize, appearance: NSAppearance.Name, settleFor seconds: TimeInterval = 0.9, to url: URL
     ) {
         let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
         host.frame = CGRect(origin: .zero, size: size)
@@ -91,7 +134,7 @@ enum SnapshotRenderer {
         window.contentView = host
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()
-        settle(0.9)
+        settle(seconds)
         // Composited by the WindowServer, so SwiftUI's own layers, materials
         // and glass are all in it — `cacheDisplay` captures only the
         // AppKit-drawn half of a SwiftUI view.

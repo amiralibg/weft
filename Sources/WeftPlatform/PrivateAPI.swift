@@ -109,6 +109,78 @@ public enum PrivateAPI {
     /// WindowServer is read back where it was put.
     public static var canMoveWindows: Bool { report.passed(.windowMove) }
 
+    // MARK: - Moving another app's window
+
+    /// Whether a WindowServer move of *another app's* window really moves it.
+    ///
+    /// The launch self-test cannot answer this. It moves a window of weft's
+    /// own, and on macOS 27 that still works while a move of any other app's
+    /// window is accepted (rc 0), reads back at its new position on the
+    /// connection that made it, and never happens: the window stays where it
+    /// was and the public window list says so. Every workspace switch "hid"
+    /// its windows and left them all on screen.
+    ///
+    /// So the first real move of a launch is checked against the public
+    /// window list, which is the one reader that is not the mover. nil until
+    /// then; false turns the WindowServer move off for the rest of the launch
+    /// and everything goes through Accessibility, which does land.
+    private static let otherWindowsLock = NSLock()
+    private nonisolated(unsafe) static var otherWindowsVerdict: Bool?
+
+    /// `canMoveWindows`, and not yet caught failing on another app's window.
+    public static var canMoveOtherAppsWindows: Bool {
+        canMoveWindows && otherWindowsLock.withLock { otherWindowsVerdict } != false
+    }
+
+    /// What `moveOtherAppsWindow` returns when the WindowServer move is off
+    /// for this launch — never a status SkyLight itself returns.
+    public static let moveUntrusted: Int32 = -0x5746
+
+    /// `SLSMoveWindow` for a window this process does not own, checked
+    /// against the public window list until one launch-wide answer is in.
+    /// 0 only when the window is believed to be where it was put.
+    public static func moveOtherAppsWindow(_ cid: SLConnectionID, _ wid: WindowID, to point: CGPoint) -> Int32 {
+        guard canMoveWindows else { return Int32(CGError.notImplemented.rawValue) }
+        let known = otherWindowsLock.withLock { otherWindowsVerdict }
+        if known == false { return moveUntrusted }
+        // Only a move that goes somewhere proves anything.
+        let before = known == nil ? PublicPaths.frame(of: wid) : nil
+        var p = point
+        let rc = SLSMoveWindow(cid, wid, &p)
+        guard rc == 0, known == nil, let before,
+              abs(before.x - point.x) > 2 || abs(before.y - point.y) > 2
+        else { return rc }
+        // A real move shows in the list at once; the wait is for a slow beta,
+        // and only the one checking move of a launch ever spends it.
+        let deadline = Date().addingTimeInterval(0.05)
+        repeat {
+            if let now = PublicPaths.frame(of: wid), abs(now.x - point.x) <= 1, abs(now.y - point.y) <= 1 {
+                otherWindowsLock.withLock { if otherWindowsVerdict == nil { otherWindowsVerdict = true } }
+                return 0
+            }
+            usleep(2_000)
+        } while Date() < deadline
+        // The move that did not happen still happened for this connection:
+        // it reads the window back where it was put, and keeps doing so after
+        // an Accessibility move lands somewhere else. Everything after this
+        // reads through that view — the park ledger records a hidden
+        // window's landing from it — so put the view back on the window.
+        var back = CGPoint(x: before.x, y: before.y)
+        _ = SLSMoveWindow(cid, wid, &back)
+        let first: Bool = otherWindowsLock.withLock {
+            defer { otherWindowsVerdict = false }
+            return otherWindowsVerdict == nil
+        }
+        if first {
+            fputs(
+                "weftd: the WindowServer accepted a move of window \(wid) and did not make it "
+                    + "(this macOS) — hiding and tiling go through Accessibility for this launch\n",
+                stderr
+            )
+        }
+        return moveUntrusted
+    }
+
     /// Run every check now. `report` is the cached one; this is for callers
     /// that want a fresh answer, such as `weftctl doctor`.
     public static func selfTest() -> PrivateAPIReport {
