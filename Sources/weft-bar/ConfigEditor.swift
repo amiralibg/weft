@@ -2270,6 +2270,8 @@ final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
             window.setFrame(frame, display: false)
         }
         health?.refresh()
+        NSApp.setActivationPolicy(.regular)
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async { [weak window] in window?.makeFirstResponder(nil) }
@@ -2286,6 +2288,9 @@ final class ConfigEditorWindowController: NSWindowController, NSWindowDelegate {
         window?.contentViewController = nil
         store = nil
         health = nil
+        if !(OnboardingWindowController.shared.window?.isVisible ?? false) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     /// Resolve weftctl without a hardcoded home directory.

@@ -107,10 +107,13 @@ echo "==> health check"
 sleep 1
 
 echo
-echo "==> starting WeftBar (Setup opens by itself only if a permission is missing)"
 if [ "${WEFT_NO_OPEN:-0}" = 1 ]; then
-    echo "    skipped (WEFT_NO_OPEN=1) — open $APPDIR/WeftBar.app when ready"
+    echo "==> skipping WeftBar launch (WEFT_NO_OPEN=1) — open $APPDIR/WeftBar.app when ready"
+elif [ ! -f "$HOME/.config/weft/.onboarded" ]; then
+    echo "==> opening Setup"
+    open "$APPDIR/WeftBar.app" --args --setup
 else
+    echo "==> starting WeftBar in the menu bar (Setup opens by itself only if a permission is missing)"
     open "$APPDIR/WeftBar.app"
 fi
 cat <<'EOF'

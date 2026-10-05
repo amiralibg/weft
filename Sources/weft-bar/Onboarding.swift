@@ -2322,7 +2322,19 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
                 return false
             }
             model.stopPolling()
+            if !(ConfigEditorWindowController.shared.window?.isVisible ?? false) {
+                NSApp.setActivationPolicy(.accessory)
+            }
             return true
+        }
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            model.stopPolling()
+            if !(ConfigEditorWindowController.shared.window?.isVisible ?? false) {
+                NSApp.setActivationPolicy(.accessory)
+            }
         }
     }
 
@@ -2367,7 +2379,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
+        if !FileManager.default.isExecutableFile(atPath: EngineInstaller.binDir.appendingPathComponent("weftctl").path)
+            && EngineInstaller.bundledWeftctl != nil {
+            model.page = .install
+        }
+        NSApp.setActivationPolicy(.regular)
         model.startPolling()
+        window?.orderFrontRegardless()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -2407,5 +2425,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         }
         model.stopPolling()
         window?.orderOut(nil)
+        if !(ConfigEditorWindowController.shared.window?.isVisible ?? false) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }

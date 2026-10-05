@@ -393,6 +393,9 @@ if [ "${WEFT_NO_OPEN:-0}" = 1 ]; then
 elif [ "$WHATS_NEW" = 1 ]; then
     say "opening Settings › Workspaces — workspaces work differently since 0.9.15"
     open "$APPDIR/WeftBar.app" --args --settings --tab workspaces
+elif [ -z "$UPGRADE_FROM" ] || [ ! -f "$HOME/.config/weft/.onboarded" ]; then
+    say "opening Setup"
+    open "$APPDIR/WeftBar.app" --args --setup
 else
     say "starting WeftBar in the menu bar (Setup opens by itself only if a permission is missing)"
     open "$APPDIR/WeftBar.app"
