@@ -140,7 +140,13 @@ enum LiveSelfTest {
             + (home ? ", back exactly where it was" : ", NOT back where it was"))
         ok = ok && home
 
-        print(ok ? "---\nThis macOS hides and shows windows the way weft relies on."
+        // The native-desktop routes, the visible switch test included: one
+        // brief flicker on a display with two or more desktops.
+        print("Testing the native-desktop routes; a display may flicker once.")
+        let routes = NativeSelfTest.routes(allowVisible: true, force: true)
+        ok = NativeRoutesReport.print(routes) && ok
+
+        print(ok ? "---\nThis macOS does what weft relies on."
                  : "---\nSomething weft relies on has changed. Please report the lines above.")
         return ok
     }

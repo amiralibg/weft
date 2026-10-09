@@ -64,6 +64,8 @@ bool weft_private_symbol_present(int index);
 /// Tests only: act as if this macOS did not export `name` (or undo that).
 /// False when weft has no symbol by that name.
 bool weft_private_symbol_simulate_missing(const char *name, bool missing);
+/// `weft_private_symbol_present` by name. False for a name weft does not know.
+bool weft_private_symbol_present_named(const char *name);
 
 // MARK: - M1: read-only world model
 
@@ -197,3 +199,4 @@ WEFT_PRIVATE_FN(, int32_t, CGSReleaseRegion, WEFT_MISSING,
 
 #include "RegionShim.h"
 #include "AXBridge.h"
+#include "BridgeShim.h"

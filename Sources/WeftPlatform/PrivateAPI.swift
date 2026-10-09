@@ -86,6 +86,8 @@ public enum PrivateAPI {
         "_AXUIElementGetWindow": "fast window matching — matched by position and size instead",
         "SLSSpaceGetType": "skipping native fullscreen desktops",
         "SLSCopyActiveMenuBarDisplayIdentifier": "knowing which display has focus — the main display is assumed",
+        "SLSPerformAsynchronousBridgedWindowManagementOperation": "moving windows between desktops and the instant desktop switch",
+        "_SLSPerformSynchronousBridgedWindowManagementOperation": "moving windows between desktops and the instant desktop switch",
     ]
 
     /// Symbols weft cannot work without. None, since every one has a public

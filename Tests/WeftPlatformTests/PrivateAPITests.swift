@@ -56,6 +56,22 @@ import Testing
         #expect(spaces.allSatisfy { $0.isCurrent && !$0.isFullscreen })
     }
 
+    /// The bridged perform functions are found by walking SkyLight's symbol
+    /// table, not by dlsym, and sit in the same table: taking one away (what
+    /// `WEFT_PUBLIC_ONLY` does) turns the whole bridge off, and a move then
+    /// submits nothing and reports every window as not arrived.
+    @Test func withoutTheBridgedPerformNothingMoves() {
+        #expect(NativeBridge.missingPiece == nil)
+        let name = "SLSPerformAsynchronousBridgedWindowManagementOperation"
+        #expect(weft_private_symbol_simulate_missing(name, true))
+        defer { weft_private_symbol_simulate_missing(name, false) }
+        #expect(NativeBridge.missingPiece == name)
+        #expect(NativeSelfTest.symbols().state == .failed)
+        #expect(NativeSelfTest.move().state == .off)
+        let moved = NativeBridge.move([1, 2], to: 1)
+        #expect(moved.verdict.missing == [1, 2])
+    }
+
     @Test func aSymbolThatIsPresentIsNotMissing() {
         #expect(!PublicPaths.isMissing("SLSCopyManagedDisplaySpaces"))
         #expect(!PublicPaths.isMissing("no such symbol"))

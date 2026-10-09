@@ -324,6 +324,11 @@ public enum Doctor {
             if essentialLost { allOk = false }
         }
 
+        // 2b. The routes weft drives native desktops with. Invisible tests
+        // only: the switch result is the one cached for this macOS build,
+        // and `doctor --selftest` re-runs it on screen.
+        NativeRoutesReport.print(NativeSelfTest.routes(allowVisible: false))
+
         // 3. What weft does not do, said once so nobody goes looking for it.
         // Moving windows between macOS desktops and switching desktops needed
         // SIP off or simulated input that broke on macOS updates; workspaces
@@ -428,5 +433,45 @@ public enum Doctor {
         } else {
             print("Some checks require attention.")
         }
+    }
+}
+
+/// `weftctl doctor`'s lines for the native-desktop routes: each one, its
+/// result on this macOS build, and what is lost without it.
+enum NativeRoutesReport {
+    static func mark(_ state: RouteStatus.State) -> String {
+        switch state {
+        case .passed: "\u{2713}"
+        case .failed: "\u{2717}"
+        case .untested, .off: "\u{25CB}"
+        }
+    }
+
+    @discardableResult
+    static func print(_ routes: NativeRoutes) -> Bool {
+        let failed = NativeRoute.allCases.contains { routes[$0].state == .failed }
+        Swift.print("[\(failed ? "!" : "\u{2713}")] Native desktops, macOS build \(routes.macOSBuild):")
+        for route in NativeRoute.allCases {
+            let r = routes[route]
+            Swift.print("    [\(mark(r.state))] \(route.rawValue): \(r.state.rawValue) — \(r.detail)")
+            if r.state == .failed || r.state == .off {
+                Swift.print("        without it: \(route.lostWithout)")
+            }
+        }
+        switch routes.switchMethod {
+        case .bridged: Swift.print("    Desktops switch instantly.")
+        case .dockSwipe: Swift.print("    Desktops switch by Dock swipe, one step at a time.")
+        case .none:
+            if routes[.switchDesktop].state == .untested {
+                Swift.print("    The switch has not been tested on this build: weftctl doctor --selftest")
+                Swift.print("    tests it (one brief flicker).")
+            } else {
+                Swift.print("    weft cannot switch desktops on this macOS; use ⌃←/⌃→.")
+            }
+        }
+        if PublicPaths.publicOnlyRequested {
+            Swift.print("    (WEFT_PUBLIC_ONLY is set, so every route is off on purpose.)")
+        }
+        return !failed
     }
 }
