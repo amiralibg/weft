@@ -8,6 +8,7 @@
 // WindowServer reads back what was asked for. Return codes from this family
 // have lied every time they were checked (S8, S10, S11).
 
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import SkyLightShim
@@ -77,18 +78,37 @@ public enum NativeBridge {
         expectShown: [WindowID] = [], expectHidden: [WindowID] = []
     ) -> Switched {
         let start = Date()
-        let cid = WorldReader.cid
-        func current() -> SpaceID { SLSManagedDisplayGetCurrentSpace(cid, display as CFString) }
         guard weft_bridge_switch(display as CFString, from, to) else {
-            return Switched(verdict: .notCurrent(showing: current()), milliseconds: 0)
+            let showing = SLSManagedDisplayGetCurrentSpace(WorldReader.cid, display as CFString)
+            return Switched(verdict: .notCurrent(showing: showing), milliseconds: 0)
         }
-        // The read-back moves first; windows paint just after it. A good
-        // switch passes on an early pass, so only a failing one waits it out.
-        let deadline = start.addingTimeInterval(0.3)
+        return awaitSwitch(display, to: to, expectShown: expectShown, expectHidden: expectHidden, since: start)
+    }
+
+    /// The fallback: Dock swipes, one desktop per step, each step read back
+    /// (`DockSwipe`), then judged like the bridged switch.
+    public static func dockSwitch(
+        _ display: String, to: SpaceID, expectShown: [WindowID] = [], expectHidden: [WindowID] = []
+    ) -> Switched {
+        let start = Date()
+        guard DockSwipe.focusSpace(to) else {
+            let showing = SLSManagedDisplayGetCurrentSpace(WorldReader.cid, display as CFString)
+            return Switched(verdict: .notCurrent(showing: showing), milliseconds: Date().timeIntervalSince(start) * 1000)
+        }
+        return awaitSwitch(display, to: to, expectShown: expectShown, expectHidden: expectHidden, since: start)
+    }
+
+    /// The read-back moves first; windows paint just after it. A good switch
+    /// passes on an early pass, so only a failing one waits out the deadline.
+    static func awaitSwitch(
+        _ display: String, to: SpaceID, expectShown: [WindowID], expectHidden: [WindowID], since start: Date
+    ) -> Switched {
+        let cid = WorldReader.cid
+        let deadline = Date().addingTimeInterval(0.3)
         var verdict: SwitchVerdict
         repeat {
             verdict = SwitchVerdict.judge(
-                target: to, currentAfter: current(),
+                target: to, currentAfter: SLSManagedDisplayGetCurrentSpace(cid, display as CFString),
                 expectShown: expectShown, expectHidden: expectHidden,
                 onScreen: WorldReader.onScreenWindowIDs()
             )
@@ -151,8 +171,37 @@ public enum NativeSelfTest {
     /// them; otherwise there is nothing to switch and the answer is untested.
     public static func switchDesktop() -> RouteStatus {
         guard symbols().usable else { return RouteStatus(.off, "symbol walk did not pass") }
-        let cid = WorldReader.cid
-        let (displays, spaces) = WorldReader.readDisplaysAndSpaces(cid: cid)
+        return roundTrip { display, from, to, shown, hidden in
+            NativeBridge.switchDisplay(display, from: from, to: to, expectShown: shown, expectHidden: hidden)
+        }
+    }
+
+    /// The same round trip by Dock swipe. Needs Accessibility (posting events)
+    /// and macOS 26.6 or later; puts the pointer back, since a swipe goes to
+    /// the display under it.
+    public static func dockSwipe() -> RouteStatus {
+        if PublicPaths.publicOnlyRequested { return RouteStatus(.off, "WEFT_PUBLIC_ONLY") }
+        guard DockSwipe.isSupported else {
+            return RouteStatus(.off, "lands on a blank desktop before macOS 26.6")
+        }
+        guard AXIsProcessTrusted() else {
+            return RouteStatus(.untested, "this process has no Accessibility permission")
+        }
+        let pointer = CGEvent(source: nil)?.location
+        defer { if let pointer { CGWarpMouseCursorPosition(pointer) } }
+        return roundTrip { display, _, to, shown, hidden in
+            NativeBridge.dockSwitch(display, to: to, expectShown: shown, expectHidden: hidden)
+        }
+    }
+
+    /// One display's showing desktop to its neighbour and back with `step`,
+    /// judged by windows that were on screen, so ordered-out ones (S12) never
+    /// count: they were not showing to begin with.
+    private static func roundTrip(
+        _ step: (_ display: String, _ from: SpaceID, _ to: SpaceID, _ shown: [WindowID], _ hidden: [WindowID])
+            -> NativeBridge.Switched
+    ) -> RouteStatus {
+        let (displays, spaces) = WorldReader.readDisplaysAndSpaces(cid: WorldReader.cid)
         let ordinary = Set(spaces.filter { $0.type == 0 }.map(\.id))
         guard let (display, from, to) = displays.lazy.compactMap({ d -> (String, SpaceID, SpaceID)? in
             let mine = d.spaces.filter { ordinary.contains($0) }
@@ -162,13 +211,10 @@ public enum NativeSelfTest {
         }).first else {
             return RouteStatus(.untested, "no display shows one of two or more desktops")
         }
-
-        // Judged by windows that are on screen now, so ordered-out windows
-        // (S12) never count: they were not showing to begin with.
         let shownHere = exclusiveOnScreen(on: from)
-        let out = NativeBridge.switchDisplay(display, from: from, to: to, expectHidden: shownHere)
+        let out = step(display, from, to, [], shownHere)
         let shownThere = out.verdict.landed ? exclusiveOnScreen(on: to) : []
-        let back = NativeBridge.switchDisplay(display, from: to, to: from, expectShown: shownHere, expectHidden: shownThere)
+        let back = step(display, to, from, shownHere, shownThere)
         let fmt = { (ms: Double) in String(format: "%.1f ms", ms) }
         if !out.verdict.landed {
             return RouteStatus(.failed, "to desktop \(to): \(out.verdict.detail)"
@@ -240,14 +286,25 @@ extension NativeSelfTest {
         routes[.move] = move()
         if !routes[.symbols].usable {
             routes[.switchDesktop] = RouteStatus(.off, "symbol walk did not pass")
-        } else if let cached, cached[.switchDesktop].state != .untested {
+        } else if let cached, [.passed, .failed].contains(cached[.switchDesktop].state) {
             routes[.switchDesktop] = cached[.switchDesktop]
         } else if allowVisible || force {
             routes[.switchDesktop] = switchDesktop()
         } else {
             routes[.switchDesktop] = RouteStatus(.untested, "not run on this macOS build yet")
         }
-        if let cached, !force { routes[.dockSwipe] = cached[.dockSwipe] }
+        // The fallback is tested when it is needed — the instant switch
+        // failed on this build — and on demand.
+        let cachedSwipe = cached.map { $0[.dockSwipe] }.flatMap { [.passed, .failed].contains($0.state) ? $0 : nil }
+        if force || (allowVisible && routes[.switchDesktop].state == .failed && cachedSwipe == nil) {
+            routes[.dockSwipe] = dockSwipe()
+        } else if let cachedSwipe {
+            routes[.dockSwipe] = cachedSwipe
+        } else if routes[.switchDesktop].usable {
+            routes[.dockSwipe] = RouteStatus(.untested, "not needed: the instant switch passed")
+        } else {
+            routes[.dockSwipe] = RouteStatus(.untested, "not run on this macOS build yet")
+        }
         if !PublicPaths.publicOnlyRequested { cache.save(routes) }
         return routes
     }
