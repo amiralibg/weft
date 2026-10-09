@@ -175,7 +175,7 @@ public enum PrivateAPI {
         if first {
             fputs(
                 "weftd: the WindowServer accepted a move of window \(wid) and did not make it "
-                    + "(this macOS) — hiding and tiling go through Accessibility for this launch\n",
+                    + "(this macOS) — window positions go through Accessibility for this launch\n",
                 stderr
             )
         }

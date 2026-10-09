@@ -1803,15 +1803,45 @@ final class Daemon: @unchecked Sendable {
         syncQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    private func scheduleDragSettleApply() {
+    private func scheduleDragSettleApply(_ wid: WindowID) {
         pendingDragApply?.cancel()
+        draggedLock.withLock { _ = dragged.insert(wid) }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.applyCurrentSpace()
+            let moved = self.draggedLock.withLock { () -> Set<WindowID> in
+                defer { self.dragged.removeAll() }
+                return self.dragged
+            }
+            self.applyDesktops(showing: moved)
             self.bus.emit(self.stateChangedEvent())
         }
         pendingDragApply = work
         syncQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// Windows moved or resized since the last drag-settle apply.
+    private let draggedLock = NSLock()
+    private var dragged = Set<WindowID>()
+
+    /// The showing desktop each window is on, if it is on one.
+    private func showingDesktop(holding wid: WindowID, in sp: SpaceState) -> SpaceID? {
+        guard let ws = sp.workspace(holding: wid), sp.showingDisplay(of: ws) != nil else { return nil }
+        return sp.desktop(of: ws)
+    }
+
+    /// Lay out the current desktop and every other showing desktop holding
+    /// one of `wids`. The current desktop alone missed the other display: an
+    /// app that resized itself there after its first frame (Linear, seen
+    /// live) kept the wrong size until something else retiled.
+    private func applyDesktops(showing wids: Set<WindowID>, also extra: SpaceID? = nil) {
+        let sp = readSpaces()
+        let current = sp.currentSpace
+        var sids = Set(wids.compactMap { showingDesktop(holding: $0, in: sp) })
+        if let current { sids.insert(current) }
+        if let extra { sids.insert(extra) }
+        for sid in sids.sorted() {
+            applySpaceLayout(sid, raiseFocus: sid == current)
+        }
     }
 
     // MARK: - Creation ladder
@@ -2018,8 +2048,9 @@ final class Daemon: @unchecked Sendable {
             // "close doesn't expand" lag. The sweep then reconciles: destroy
             // notifications race the WindowServer list, so the dead wid can
             // still appear in CGWindowList for a moment.
+            let was = showingDesktop(holding: wid, in: readSpaces())
             forgetWindow(wid)
-            applyCurrentSpace()
+            applyDesktops(showing: [], also: was)
             bus.emit(stateChangedEvent())
             scheduleSync()
         case .windowMoved(let wid), .windowResized(let wid):
@@ -2031,7 +2062,7 @@ final class Daemon: @unchecked Sendable {
             if let actual, applier.isEcho(wid: wid, frame: actual) {
                 return
             }
-            scheduleDragSettleApply()
+            scheduleDragSettleApply(wid)
         case .windowFocused(let wid):
             focusChanged(to: wid)
         case .appActivated(let pid):
@@ -4022,8 +4053,17 @@ final class Daemon: @unchecked Sendable {
             fputs("weftd: ignoring failures — Accessibility not granted for this binary\n", stderr)
             return
         }
+        // A frame that did not land on a hidden desktop is no verdict on the
+        // app: some leave a window they are not showing where it is. Every
+        // showing desktop is laid out, so the write is made again when it
+        // shows. Counted, two of them floated for good a window that was only
+        // waiting for its desktop to show.
+        let sp = readSpaces()
+        let hidden = Set(result.failedIDs.filter { wid in
+            sp.workspace(holding: wid).map { sp.showingDisplay(of: $0) == nil } ?? false
+        })
         core.sync {
-            for wid in result.failedIDs {
+            for wid in result.failedIDs where !hidden.contains(wid) {
                 // A window with no AX element is not refusing anything — it is
                 // not reachable *yet*. A newborn window spends its first few
                 // sweeps like that, and the creation ladder sweeps it several
@@ -4380,7 +4420,7 @@ signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 termSource.setEventHandler {
-    fputs("weftd: caught SIGTERM, unparking all windows before exit\n", stderr)
+    fputs("weftd: caught SIGTERM, exiting\n", stderr)
     daemon.stop()
     exit(0)
 }
@@ -4388,7 +4428,7 @@ termSource.resume()
 
 let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 intSource.setEventHandler {
-    fputs("weftd: caught SIGINT, unparking all windows before exit\n", stderr)
+    fputs("weftd: caught SIGINT, exiting\n", stderr)
     daemon.stop()
     exit(0)
 }
