@@ -130,7 +130,7 @@ WEFT_PRIVATE_FN(WEFT_RETAINED, CFStringRef, SLSCopyManagedDisplayForSpace, NULL,
 WEFT_PRIVATE_FN(, int32_t, SLSMoveWindow, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid, const CGPoint *point), (cid, wid, point))
 
-// Tags on weft's OWN windows (the border overlays). On another app's window
+// Tags on weft's OWN windows. On another app's window
 // the WindowServer accepts the sticky bit from an ordinary connection and
 // drops it (S8), which is why weft never tries.
 WEFT_PRIVATE_FN(, int32_t, SLSSetWindowTags, WEFT_MISSING,
@@ -145,7 +145,7 @@ WEFT_PRIVATE_FN(, int32_t, SLSSetWindowTags, WEFT_MISSING,
 // call fails with rc=1000 for other apps' windows — reordering is a
 // privileged operation (clickjacking gate), unlike SLSMoveWindow which works
 // (see S4). Ordering weft's *own* windows relative to another app's is
-// allowed (S6), which is what the border renderer uses it for.
+// allowed (S6).
 WEFT_PRIVATE_FN(, int32_t, SLSOrderWindow, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid, int32_t order, SLWindowID relativeWid),
     (cid, wid, order, relativeWid))
@@ -174,40 +174,26 @@ WEFT_PRIVATE_FN(, int32_t, SLSTransactionOrderWindow, WEFT_MISSING,
     (CFTypeRef transaction, SLWindowID wid, int32_t order, SLWindowID relativeWid),
     (transaction, wid, order, relativeWid))
 
-// MARK: - Borders (weft's own windows)
+// MARK: - The self-test's probe window (weft's own)
 //
-// Everything below acts on windows this process creates, so none of it needs
-// a scripting addition or any privilege weft does not already have (S5).
-// `SLSNewWindow`'s `type` is 2 for a plain buffered window; the region is the
-// window's shape in window-local coordinates, and (x, y) places its origin in
-// the global, top-left-origin space `SLSGetWindowBounds` reports in.
+// Acts only on a window this process creates, so none of it needs a scripting
+// addition or any privilege weft does not already have (S5). `SLSNewWindow`'s
+// `type` is 2 for a plain buffered window; the region is the window's shape in
+// window-local coordinates, and (x, y) places its origin in the global,
+// top-left-origin space `SLSGetWindowBounds` reports in.
 
 WEFT_PRIVATE_FN(, int32_t, SLSNewWindow, WEFT_MISSING,
     (SLConnectionID cid, int32_t type, float x, float y, CFTypeRef region, SLWindowID *outWID),
     (cid, type, x, y, region, outWID))
 WEFT_PRIVATE_FN(, int32_t, SLSReleaseWindow, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid), (cid, wid))
-WEFT_PRIVATE_FN(, int32_t, SLSSetWindowShape, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, float x, float y, CFTypeRef region),
-    (cid, wid, x, y, region))
-WEFT_PRIVATE_FN(, int32_t, SLSSetWindowResolution, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, double resolution), (cid, wid, resolution))
-WEFT_PRIVATE_FN(, int32_t, SLSSetWindowOpacity, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, bool opaque), (cid, wid, opaque))
-WEFT_PRIVATE_FN(, int32_t, SLSSetWindowLevel, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, int32_t level), (cid, wid, level))
-WEFT_PRIVATE_FN(, int32_t, SLSGetWindowLevel, WEFT_MISSING,
-    (SLConnectionID cid, SLWindowID wid, int32_t *outLevel), (cid, wid, outLevel))
-/// Drawing surface for one of our own windows. Returns a retained CGContext.
-WEFT_PRIVATE_FN(WEFT_RETAINED, CGContextRef, SLWindowContextCreate, NULL,
-    (SLConnectionID cid, SLWindowID wid, CFDictionaryRef options), (cid, wid, options))
 
 // Region helpers live in CoreGraphics, not SkyLight, and are in no public
-// header. Only BorderShim.h calls them; see there for why.
+// header. Only RegionShim.h calls them; see there for why.
 WEFT_PRIVATE_FN(, int32_t, CGSNewRegionWithRectList, WEFT_MISSING,
     (const CGRect *rects, int count, CFTypeRef *outRegion), (rects, count, outRegion))
 WEFT_PRIVATE_FN(, int32_t, CGSReleaseRegion, WEFT_MISSING,
     (CFTypeRef region), (region))
 
-#include "BorderShim.h"
+#include "RegionShim.h"
 #include "AXBridge.h"

@@ -514,8 +514,14 @@ Budget (unchanged, now met with ~150x headroom on the common verbs):
 
 ## 10. Integrations — JankyBorders + sketchybar
 
-**Decision: weft draws borders, and nothing else.** No bar, no stack indicators, and never a
-window laid over another window's area.
+**Superseded in 0.9.22: weft draws nothing.** The strips-and-corners renderer below was removed.
+In daily use it spiked the GPU visibly more than JankyBorders did, which the two-window benchmark
+quoted below never caught. Borders are JankyBorders' alone. weftd starts and supervises `borders`
+and passes `[integrations.borders]` to it. `backend = "native"` is read as JankyBorders, with a
+warning. The history below explains why the renderer existed.
+
+**Former decision: weft draws borders, and nothing else.** No bar, no stack indicators, and never
+a window laid over another window's area.
 
 > Between 0.6 and 0.7.3 weft drew borders with one full-window transparent overlay per window.
 > Measured on an M4, five interleaved cycles per condition, paired per cycle against weft-off,
@@ -537,7 +543,7 @@ window laid over another window's area.
 > both at zero when nothing was. The runs are noisy; the order is consistent across both.
 
 sketchybar already does bars better. weft's job is to be the *authoritative, cheap, complete*
-source of state for it, and for JankyBorders when `backend = "janky"`.
+source of state for it, and for JankyBorders.
 
 That only works if the state weft publishes is rich enough that neither tool ever has to ask a
 follow-up question. Today your sketchybar plugins would have to shell out to `yabai -m query`

@@ -294,15 +294,13 @@ import Testing
     #expect(args.contains("background_color=0x30000000"))
 }
 
-/// JankyBorders has no numeric radius, so there it survives as the shape it
-/// implied, with a warning naming the key that replaced it — whichever order
-/// `radius` and `backend` appear in.
-@Test func aNumericRadiusBecomesAStyleForJankyBordersAndSaysSo() throws {
+/// JankyBorders has no numeric radius, so it survives as the shape it implied,
+/// with a warning naming the key that replaced it.
+@Test func aNumericRadiusBecomesAStyleAndSaysSo() throws {
     let square = try loadConfig("""
         [integrations.borders]
         enabled = true
         radius = 0
-        backend = "janky"
         """)
     #expect(square.integrations.borders.resolvedStyle == "square")
     #expect(square.warnings.contains { $0.message.contains("radius") })
@@ -310,31 +308,20 @@ import Testing
     let round = try loadConfig("""
         [integrations.borders]
         enabled = true
-        backend = "janky"
         radius = 12.0
         """)
     #expect(round.integrations.borders.resolvedStyle == "round")
+    #expect(round.warnings.contains { $0.message.contains("radius") })
 }
 
-/// Weft's own renderer draws a radius as written, so it is not a warning there.
-@Test func weftsRendererTakesRadiusAsWritten() throws {
-    let cfg = try loadConfig("""
-        [integrations.borders]
-        enabled = true
-        radius = 12.0
-        """)
-    #expect(cfg.integrations.borders.backend == .native)
-    #expect(cfg.integrations.borders.radius == 12.0)
-    #expect(!cfg.warnings.contains { $0.message.contains("radius") })
-}
-
-@Test func bordersBackendDefaultsToWeftAndRejectsUnknownNames() throws {
-    #expect(try loadConfig("[integrations.borders]\nenabled = true").integrations.borders.backend == .native)
-    #expect(try loadConfig("[integrations.borders]\nbackend = \"janky\"").integrations.borders.backend == .janky)
-    // Accepted without a word: 0.7.4–0.7.9 warned that it had been removed.
-    let native = try loadConfig("[integrations.borders]\nbackend = \"native\"")
-    #expect(native.integrations.borders.backend == .native)
-    #expect(native.warnings.isEmpty)
+/// weft no longer draws borders. `backend = "janky"` is what every file now
+/// means and passes quietly; `"native"` keeps its borders, through JankyBorders,
+/// and says so once rather than refusing the file.
+@Test func theRetiredBackendKeyIsReadNotRefused() throws {
+    #expect(try loadConfig("[integrations.borders]\nbackend = \"janky\"").warnings.isEmpty)
+    let native = try loadConfig("[integrations.borders]\nenabled = true\nbackend = \"native\"")
+    #expect(native.integrations.borders.enabled)
+    #expect(native.warnings.contains { $0.message.contains("retired") })
     #expect(throws: ConfigError.self) { try loadConfig("[integrations.borders]\nbackend = \"quartz\"") }
 }
 

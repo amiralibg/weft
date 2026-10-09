@@ -688,7 +688,6 @@ final class Daemon: @unchecked Sendable {
         // app IPC — and the applier holds its own latest-wins queue for the
         // AX size writes, which are the only part an app can be slow at.
         applier.applyDragFrames(frames: frames, pids: allPids())
-        if bordersBridge.drawsBorders { bordersBridge.renderer.move(frames) }
     }
 
     /// Run the full frame-set protocol over the drag's final geometry.
@@ -709,19 +708,14 @@ final class Daemon: @unchecked Sendable {
         if let last { applyFrames(last, force: true) }
     }
 
-    /// Republish everything that describes the layout as it is *now*: the
-    /// borders the mouse can grab, and the borders the user can see.
+    /// Republish the borders the mouse can grab, as the layout is *now*.
     ///
     /// Called from the apply path, so the zones can never describe a layout
     /// that is no longer on screen — a stale zone means a click swallowed
     /// where there is nothing to drag, which is worse than no zones at all.
-    /// The window borders come from the same pass because they answer the
-    /// same question and computing every visible space's frames twice, on
-    /// every apply, is the kind of thing that turns into lag.
     private func refreshDividerZones() {
         let cfg = currentConfig().general
-        let wantBorders = bordersBridge.drawsBorders
-        guard cfg.mouseBorderResize || wantBorders else {
+        guard cfg.mouseBorderResize else {
             dividerLock.withLock {
                 dividerZones = []
                 stackPeekZones = []
@@ -733,10 +727,6 @@ final class Daemon: @unchecked Sendable {
         let config = cfg.asTilingConfig()
         var all: [Divider] = []
         var peeks: [StackPeek] = []
-        // From the same numbers the apply just used. A border process learns
-        // a window moved after the fact and reads the geometry back, which is
-        // why its borders trail the window.
-        var borderFrames: [WindowID: Frame] = [:]
         // One core hop for the whole refresh, not one per space: this runs at
         // the end of every apply, and the core queue is what keybinds wait on.
         let sp = readSpaces()
@@ -744,10 +734,9 @@ final class Daemon: @unchecked Sendable {
         // weft's cache of it. The two disagree for as long as it takes weft to
         // notice a switch it did not perform — a trackpad swipe, Mission
         // Control, an app activating elsewhere — and `space focus` already
-        // refuses to trust the cache for exactly that reason. Grab zones and
-        // borders describe what is *on screen*, and the border pieces are
-        // sticky so they render on whatever desktop is showing: believing the
-        // cache here paints the previous desktop's layout over the new one.
+        // refuses to trust the cache for exactly that reason. Grab zones
+        // describe what is *on screen*: believing the cache here puts the
+        // previous desktop's grab zones over the new one.
         // One call, ~40 µs, no window list.
         let showing = WorldReader.currentSpaces()
         for (uuid, sid) in showing {
@@ -762,77 +751,20 @@ final class Daemon: @unchecked Sendable {
                 grabbable = tree.fullscreen == nil
                 frames = WeftCore.layout(tree, in: screen, config: config)
                 peeks += stackPeeks(in: tree, frames: frames)
-                if wantBorders {
-                    // Stack members behind the front one have a slot and a
-                    // peek strip, but no border of their own.
-                    let hidden = hiddenStackMembers(in: tree)
-                    for (wid, frame) in frames where !hidden.contains(wid) { borderFrames[wid] = frame }
-                }
-            case .float(let fl):
-                grabbable = false
-                // A float space has no computed geometry — the windows are
-                // wherever the user put them, so read it.
-                frames = liveFrames(of: fl.windows)
-                if wantBorders { borderFrames.merge(frames) { current, _ in current } }
+            case .float:
+                // Nothing to grab between windows the user placed by hand.
+                continue
             }
-            if grabbable && cfg.mouseBorderResize {
+            if grabbable {
                 all += dividers(in: frames, innerGap: cfg.innerGap)
             }
         }
-        let clickablePeeks = cfg.mouseBorderResize ? peeks : []
         dividerLock.withLock {
             dividerZones = all
-            stackPeekZones = clickablePeeks
+            stackPeekZones = peeks
         }
-        input.updateDividerZones(cfg.mouseBorderResize ? all.map(\.rect) : [])
-        input.updateStackZones(clickablePeeks.map(\.rect))
-        if wantBorders {
-            // Drop the windows that are in a layout but not on screen.
-            //
-            // Closing a window does not always destroy it — Ghostty and most
-            // Electron apps order it out and keep it — and minimising does not
-            // either. Neither produces a destroy notification, so the layout
-            // goes on holding the window and, before this, went on drawing a
-            // border around the place it used to be. `evictOrderedOut` finds
-            // them, but only on the next focus change, and closing a window
-            // with the mouse need not move focus at all.
-            let onScreen = WorldReader.onScreenWindowIDs()
-            let parked = parker.parkedWIDs
-            borderFrames = borderFrames.filter { onScreen.contains($0.key) && !parked.contains($0.key) }
-            // Only windows in a layout, which is what keeps popovers,
-            // Spotlight and every other transient panel border-free with no
-            // heuristic at all. The active border goes where macOS says focus
-            // is: a float no layout owns gets none, rather than the last tile
-            // keeping a highlight it no longer has.
-            //
-            // Passed through as the system reports it, *not* pre-resolved to
-            // nil for a window with no border. `noteFocusedWindow` pushes the
-            // raw value straight to the renderer on every focus change, so
-            // filtering it only here meant the two writers disagreed and
-            // whichever ran last won — with `show-inactive = false` that flips
-            // between "no highlight" and "no borders at all". The renderer
-            // holds the one rule: a focused window with no border makes no
-            // border active.
-            let focus = systemFocusLock.withLock { systemFocusLocked }
-                ?? sp.currentSpace.flatMap { sp.layout(on: $0)?.focus }
-            // Membership and targets — what the renderer is asked for. Its own
-            // trace line prints what it actually drew, read from the
-            // WindowServer. Comparing the two is how you tell a window weft
-            // should not be bordering from a window that has not moved yet.
-            if Trace.logging {
-                let list = borderFrames.sorted { $0.key < $1.key }.map {
-                    String(
-                        format: "%u@%.0f,%.0f %.0fx%.0f", $0.key,
-                        $0.value.x, $0.value.y, $0.value.width, $0.value.height)
-                }
-                fputs(
-                    "weftd: borders focus=\(focus.map(String.init) ?? "none") "
-                        + "frames=[\(list.joined(separator: "  "))]\n",
-                    stderr
-                )
-            }
-            bordersBridge.renderer.update(frames: borderFrames, focused: focus)
-        }
+        input.updateDividerZones(all.map(\.rect))
+        input.updateStackZones(peeks.map(\.rect))
     }
 
     /// Keybind entry point. Returns immediately (tap-thread safe); the command
@@ -985,8 +917,6 @@ final class Daemon: @unchecked Sendable {
     /// information the daemon already has.
     private func noteFocusedWindow(_ wid: WindowID) {
         systemFocusLock.withLock { systemFocusLocked = wid }
-        // A recolour, or the one border moving over: no layout pass needed.
-        if bordersBridge.drawsBorders { bordersBridge.renderer.setFocus(wid) }
         // Where the window physically is, for the ones membership cannot
         // answer for. A float, a rule's `manage = false`, a quirked window and
         // a panel are in no layout at all, so the loop below never matched
@@ -1065,9 +995,6 @@ final class Daemon: @unchecked Sendable {
         let now = SpaceControl.currentSpaceByDisplay()
         actedSpacesLock.withLock { actedSpacesLocked = now }
         bus.emit(DaemonEvent(kind: .spaceChanged))
-        // Borders are sticky, so the old desktop's would hang over the new
-        // one until the sweep below replaces them.
-        if bordersBridge.drawsBorders { bordersBridge.renderer.clear() }
         syncFromSnapshot()
     }
 
@@ -2111,12 +2038,6 @@ final class Daemon: @unchecked Sendable {
             // drag settles first and THEN retiles once (trailing edge), so we
             // never fight the hand mid-drag.
             let actual = WorldReader.frame(of: wid)
-            // Before the echo check, and regardless of it: an echo is weft's
-            // own write *landing*, which is the moment the border most needs
-            // to move. The renderer is told that the geometry changed and
-            // reads it itself — passing this frame on would be handing it a
-            // number that is already one notification out of date.
-            if bordersBridge.drawsBorders { bordersBridge.renderer.windowMoved(wid) }
             if let actual, applier.isEcho(wid: wid, frame: actual) {
                 return
             }
@@ -2180,8 +2101,6 @@ final class Daemon: @unchecked Sendable {
         refreshScreens()
         let displays = SpaceControl.displayLayout().map(\.frame)
         parker.unparkOutside(displays: displays)
-        // Scale factors and geometry both changed under every border.
-        bordersBridge.renderer.displaysChanged()
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
         hideHiddenWorkspaces()

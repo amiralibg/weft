@@ -32,12 +32,6 @@
     X(SLSTransactionOrderWindow)                 \
     X(SLSNewWindow)                              \
     X(SLSReleaseWindow)                          \
-    X(SLSSetWindowShape)                         \
-    X(SLSSetWindowResolution)                    \
-    X(SLSSetWindowOpacity)                       \
-    X(SLSSetWindowLevel)                         \
-    X(SLSGetWindowLevel)                         \
-    X(SLWindowContextCreate)                     \
     X(CGSNewRegionWithRectList)                  \
     X(CGSReleaseRegion)                          \
     X(_AXUIElementGetWindow)

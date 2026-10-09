@@ -121,9 +121,8 @@ final class ConfigStore: ObservableObject {
     @Published var checkForUpdates = true
 
     // Integrations
+    /// Borders are JankyBorders': weft starts it and passes these settings on.
     @Published var bordersEnabled = false
-    /// `native` (weft draws them) or `janky` (JankyBorders does).
-    @Published var bordersBackend = "native"
     @Published var bordersWidth = 2.0
     /// JankyBorders' `style`: `round` follows each window's own corners,
     /// `square` squares them off. It replaced a "Corner radius" slider that
@@ -233,7 +232,6 @@ final class ConfigStore: ObservableObject {
     private func readIntegrations() {
         let b = document.firstIndex(ofHeader: "[integrations.borders]").map { document.sections[$0] }
         bordersEnabled = b?.bool("enabled") ?? false
-        bordersBackend = b?.string("backend") == "janky" ? "janky" : "native"
         bordersWidth = b?.double("width")
             ?? Self.argValue(b?.rawValue("args"), "width").flatMap(Double.init)
             ?? 2
@@ -261,8 +259,8 @@ final class ConfigStore: ObservableObject {
         sketchybarCoalesceMs = s?.int("coalesce-ms") ?? 16
     }
 
-    /// One `key=value` out of a JankyBorders argument list, so the native
-    /// renderer's fields start out showing what the user already had.
+    /// One `key=value` out of a JankyBorders argument list, so the form's
+    /// fields start out showing what the user already had.
     private static func argValue(_ raw: String?, _ key: String) -> String? {
         for a in readArray(raw) where a.hasPrefix("\(key)=") {
             return String(a.dropFirst(key.count + 1))
@@ -444,17 +442,14 @@ final class ConfigStore: ObservableObject {
             var s = document.sections[i]
             s.set("enabled", bool: bordersEnabled)
             s.set("supervise", bool: bordersSupervise, default: true)
-            // Written only when it is not the default, so a file that never
-            // chose keeps following it.
-            if bordersBackend == "janky" {
-                s.set("backend", string: "janky")
-            } else {
-                s.remove("backend")
-            }
+            // Retired in 0.9.22 when weft stopped drawing its own borders:
+            // JankyBorders is the only backend, so the key only ever produces
+            // a warning. Saving from Settings drops it.
+            s.remove("backend")
             s.set("width", double: bordersWidth)
             s.set("style", string: bordersStyle)
-            // `radius` is left as the file has it: weft's renderer draws it,
-            // and weftd never hands it to JankyBorders.
+            // `radius` is left as the file has it: weftd reads it as a shape
+            // and never hands it to JankyBorders.
             if activeColorEdited {
                 s.setRaw(
                     "active-color",

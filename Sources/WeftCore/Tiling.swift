@@ -1132,9 +1132,9 @@ public struct StackPosition: Sendable, Equatable {
 
 /// The front member of every stack of two or more, and where it sits.
 ///
-/// A stack is invisible otherwise: its slot looks like one window. This is
-/// what the border renderer marks, so "there are three windows here and this
-/// is the first" can be read without cycling through them.
+/// A stack is invisible otherwise: its slot looks like one window. This says
+/// "there are three windows here and this is the first" without cycling
+/// through them.
 public func stackPositions(in tree: Tree) -> [WindowID: StackPosition] {
     guard let root = tree.root else { return [:] }
     var out: [WindowID: StackPosition] = [:]
@@ -1155,9 +1155,7 @@ public func stackPositions(in tree: Tree) -> [WindowID: StackPosition] {
 /// them: a border traces a window's bounds, and a window with eight points
 /// showing has no bounds worth tracing. All the user sees is the top edge, a
 /// hard line above a window that nothing explains — reported, reasonably, as a
-/// stray white line over the desktop. The front member's border carries pips
-/// saying how many are stacked and which one this is; that is the stack's
-/// marking, and it is enough.
+/// stray white line over the desktop.
 public func hiddenStackMembers(in tree: Tree) -> Set<WindowID> {
     guard let root = tree.root else { return [] }
     var out: Set<WindowID> = []

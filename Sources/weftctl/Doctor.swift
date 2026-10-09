@@ -384,8 +384,7 @@ public enum Doctor {
 
                 if !reportHelper(
                     name: "JankyBorders", binary: "borders", found: bordersFound,
-                    enabled: validated.integrations.borders.enabled
-                        && validated.integrations.borders.backend == .janky,
+                    enabled: validated.integrations.borders.enabled,
                     install: "brew install FelixKratz/formulae/borders",
                     setting: "[integrations.borders]"
                 ) { allOk = false }

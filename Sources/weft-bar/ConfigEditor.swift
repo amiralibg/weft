@@ -627,8 +627,9 @@ private struct AppearancePane: View {
                 .padding(.bottom, 14)
                 .textCase(nil)
             } footer: {
-                if store.bordersEnabled && store.bordersBackend == "janky" {
-                    Text("Borders are drawn by JankyBorders. These settings are passed to it.")
+                if store.bordersEnabled {
+                    Text("JankyBorders draws the borders; weft starts it and passes these settings to it. "
+                        + "Install it with brew install FelixKratz/formulae/borders.")
                 }
             }
         }
@@ -1510,20 +1511,14 @@ private struct AdvancedPane: View {
                     + "a rule fires when an app opens, which may be while you are typing somewhere else.")
             }
 
-            Section("Border drawing") {
-                Picker("Drawn by", selection: store.bind(\.bordersBackend)) {
-                    Text("Weft").tag("native")
-                    Text("JankyBorders").tag("janky")
-                }
-                if store.bordersBackend == "janky" {
-                    LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
-                    Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
-                    LabeledContent("Arguments") {
-                        TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-                            .disabled(store.bordersArgsLocked)
-                    }
+            Section("JankyBorders") {
+                LabeledContent("JankyBorders") { InstallState(path: health.bordersPath) }
+                Toggle("Keep JankyBorders running", isOn: store.bind(\.bordersSupervise))
+                LabeledContent("Arguments") {
+                    TextField("width=2.0 style=round", text: store.bind(\.bordersArgs))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .disabled(store.bordersArgsLocked)
                 }
             }
 

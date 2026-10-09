@@ -38,8 +38,7 @@ Integrity Protection left exactly as it is.
   for when you do want the literal trade.
 - **Stacks** — collapse several windows into one slot and cycle through them.
   The windows behind show as a row of title bars you can click to bring one
-  forward, and a row of dots on the front window's border says how many there
-  are and which one you are looking at. `stack all` puts the whole space in one
+  forward. `stack all` puts the whole space in one
   stack; `stack move <dir>` drops the focused window into its neighbour's.
 - **Modes** — modal layers, like vim's. The shipped config puts resizing behind
   one so `h/j/k/l` can be bare keys while it is active.
@@ -427,7 +426,7 @@ switched on whose binary is not installed.
 
 | | What it does | Install |
 |---|---|---|
-| Borders | Highlight around the focused window, recoloured per layout and per mode | Nothing — weft draws them |
+| [JankyBorders](https://github.com/FelixKratz/JankyBorders) | Highlight around the focused window, recoloured per layout and per mode | `brew install FelixKratz/formulae/borders` |
 | [SketchyBar](https://github.com/FelixKratz/SketchyBar) | Fires `--trigger weft_event` with `WEFT_*` variables on layout, space and focus changes | `brew install FelixKratz/formulae/sketchybar` |
 
 Both are off by default.
@@ -444,37 +443,19 @@ inactive-color = "0x40414868"
 show-inactive = true     # false borders only the focused window
 ```
 
-Every key applies live, from Settings or the file. `radius = 12.0` fixes the
-corner radius instead of following each window.
+Weft does not draw borders. [JankyBorders](https://github.com/FelixKratz/JankyBorders)
+does: weftd starts `borders`, restarts it if it dies (`supervise = false` turns
+that off), and passes it the keys above. Every key applies live, from Settings
+or the file, without restarting either program. `args` is passed through
+unchanged for anything weft does not model — `gradient(...)` colours,
+`blacklist`, `background_color` — and wins over the keys above.
 
-Weft draws borders in `weftd`, from the frames it is applying, so a border does
-not trail its window while it moves. Only windows in a layout get one, so
-popovers, Spotlight and other panels never do.
-
-A border is four thin strips and four small corner pieces around the window —
-about 1% of its area — rather than one transparent window laid over it. That
-difference is most of the cost: the compositor pays for a window's area on every
-frame the app underneath draws. Strips in an opaque colour are copied, not
-blended. Moving windows moves every border in one WindowServer transaction with
-no redraw; a border is redrawn only when its colour or size changes.
-
-Measured on a MacBook Air (M4), macOS 27.0, two windows, interleaved cycles
-compared against no borders:
-
-| | GPU, apps drawing | Memory |
-|---|---|---|
-| One transparent window per border (weft's renderer until 0.7.4) | +24 pp | +154 MB |
-| JankyBorders | +14 to +22 pp | its own process |
-| Weft | +4 to +8 pp | +2 MB in weftd |
-
-With nothing on screen changing, all of them measure at zero. Background load
-moved between cycles, so treat the numbers as an order, not a precise result.
-
-`backend = "janky"` hands drawing to
-[JankyBorders](https://github.com/FelixKratz/JankyBorders) instead, for what
-weft does not draw: `gradient(...)` colours, `blacklist`, `background_color`.
-Weft then starts and supervises `borders`, passes the keys above to it, and
-passes `args` through unchanged.
+Until 0.9.22 weft drew its own borders inside `weftd`. That renderer is gone:
+on real use it spiked the GPU noticeably more than JankyBorders, whatever the
+two-window benchmark in `docs/DESIGN.md` §10 said. A file still carrying
+`backend = "native"` keeps its borders, drawn by JankyBorders, with a warning
+to drop the line. `radius` is read as `style` (0 is square, anything else
+round), because JankyBorders has no numeric radius.
 
 ## Building from source
 

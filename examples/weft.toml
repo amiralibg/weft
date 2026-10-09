@@ -365,15 +365,11 @@ display = "secondary"
 # reports the combination, and so does Settings › Integrations.
 
 [integrations.borders]
-# Draws a highlight around the focused window. Weft draws it itself; nothing
-# to install.
+# Draws a highlight around the focused window, through JankyBorders — weft does
+# not draw borders itself: brew install FelixKratz/formulae/borders
 enabled = false
 
-# "native" (default): weft draws them. "janky": JankyBorders does, for its
-# extras (gradients, blacklist) — brew install FelixKratz/formulae/borders
-# backend = "native"
-
-# With backend = "janky": weftd starts borders and restarts it if it dies.
+# weftd starts borders and restarts it if it dies. false: leave it to you.
 supervise = true
 
 # What the border looks like. Every one of these reaches borders live — change

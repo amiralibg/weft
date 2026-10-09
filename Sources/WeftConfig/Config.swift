@@ -151,31 +151,22 @@ public struct SketchybarIntegrationConfig: Sendable, Equatable {
     }
 }
 
-/// Who draws the borders.
-public enum BordersBackend: String, Sendable, Equatable {
-    /// Weft, in weftd: no second process, and drawn from the frames weft is
-    /// applying, so a border never trails its window.
-    case native
-    /// JankyBorders, for anyone who wants its extras (`gradient(...)`,
-    /// `blacklist`, `background_color`). A program weft does not install.
-    case janky
-}
-
+/// Window borders, drawn by JankyBorders. weft starts and supervises
+/// `borders`, and passes it these settings; it draws nothing itself.
 public struct BordersIntegrationConfig: Sendable, Equatable {
     public var enabled: Bool
-    public var backend: BordersBackend
     public var args: [String]
     public var supervise: Bool
     public var activeColor: [String: String]
     public var modeColor: [String: String]
     /// Nil means "take it from `args`". Set, these seed the JankyBorders
-    /// arguments, so a config written for the old native renderer keeps
+    /// arguments, so a config written for weft's old renderer keeps
     /// producing the same border without being rewritten.
     public var width: Double?
     /// Corner shape: `round`, `square` or `uniform`, straight from
     /// JankyBorders' `style=`.
     public var style: String?
-    /// The old native renderer's corner radius, in points. JankyBorders has
+    /// weft's old renderer's corner radius, in points. JankyBorders has
     /// no equivalent — it only knows round vs square — so this is kept for
     /// back-compat and read as a *shape* by `resolvedStyle`, never emitted.
     /// It used to be passed through as `radius=`, which is not an argument
@@ -186,7 +177,6 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
 
     public init(
         enabled: Bool = false,
-        backend: BordersBackend = .native,
         args: [String] = [],
         supervise: Bool = true,
         activeColor: [String: String] = [:],
@@ -198,7 +188,6 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
         showInactive: Bool = true
     ) {
         self.enabled = enabled
-        self.backend = backend
         self.args = args
         self.supervise = supervise
         self.activeColor = activeColor
@@ -241,7 +230,7 @@ public struct BordersIntegrationConfig: Sendable, Equatable {
 
     /// Corner shape, as JankyBorders spells it.
     ///
-    /// The old native renderer took a numeric `radius`; JankyBorders only
+    /// weft's old renderer took a numeric `radius`; JankyBorders only
     /// knows round, square and uniform, so a radius survives as the shape it
     /// implied — zero meant square corners, anything else meant rounded.
     /// `round` follows each window's own corners, which is what the Settings
@@ -745,10 +734,21 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 integrations.borders.supervise = b
             case "backend":
-                guard case .string(let sv) = v, let backend = BordersBackend(rawValue: sv) else {
-                    throw err(path, "expected native|janky")
+                // Retired: weft drew its own borders until 0.9.22, and
+                // `backend` chose between that and JankyBorders. JankyBorders
+                // is the only one now. "janky" already says so; "native" is
+                // read as the same thing and said once, not refused, so a
+                // file written for the old renderer keeps its borders.
+                guard case .string(let sv) = v, ["native", "janky"].contains(sv) else {
+                    throw err(path, "expected janky")
                 }
-                integrations.borders.backend = backend
+                if sv == "native" {
+                    warnings.append(ConfigWarning(
+                        line: doc.lines[path] ?? 0,
+                        message: "[integrations.borders] backend = \"native\" is retired: weft no longer "
+                            + "draws borders, JankyBorders does. Remove the line."
+                    ))
+                }
             case "width":
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.width = d
@@ -759,10 +759,9 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 }
                 integrations.borders.style = sv
             case "radius":
-                // Weft's renderer draws it as written. JankyBorders has no
-                // numeric radius — passing one made it reject the whole
-                // invocation — so there it is read as `style` instead, and
-                // the warning below says so.
+                // JankyBorders has no numeric radius — passing one made it
+                // reject the whole invocation — so it is read as `style`
+                // instead, and the warning below says so.
                 guard let d = v.asDouble else { throw err(path, "expected number") }
                 integrations.borders.radius = d
             case "inactive-color":
@@ -799,10 +798,7 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 throw err(path, "unknown key")
             }
         }
-        // After the loop: whether `radius` means anything depends on
-        // `backend`, which may come after it in the file.
-        let borders = integrations.borders
-        if borders.backend == .janky, let radius = borders.radius {
+        if let radius = integrations.borders.radius {
             let path = "integrations.borders.radius"
             warnings.append(ConfigWarning(
                 line: doc.lines[path] ?? 0,

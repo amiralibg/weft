@@ -81,9 +81,8 @@ public enum PrivateAPI {
         "SLSGetWindowBounds": "fast window frames — read from the public window list instead",
         "SLSMoveWindow": "instant hiding — workspaces switch through Accessibility, about 30 ms a window",
         "SLSTransactionCreate": "moving several windows on one frame (drags may tear)",
-        "SLSNewWindow": "weft's own borders",
-        "SLWindowContextCreate": "weft's own borders",
-        "CGSNewRegionWithRectList": "weft's own borders",
+        "SLSNewWindow": "this self-test's probe window — window moves and transactions go unverified",
+        "CGSNewRegionWithRectList": "this self-test's probe window — window moves and transactions go unverified",
         "_AXUIElementGetWindow": "fast window matching — matched by position and size instead",
         "SLSSpaceGetType": "skipping native fullscreen desktops",
         "SLSCopyActiveMenuBarDisplayIdentifier": "knowing which display has focus — the main display is assumed",
@@ -257,7 +256,7 @@ private struct ProbeWindow {
     init?(cid: SLConnectionID) {
         var rect = CGRect(x: 0, y: 0, width: 1, height: 1)
         var wid: SLWindowID = 0
-        guard weft_border_window_create(cid, Self.origin, &rect, 1, &wid) == 0, wid != 0 else {
+        guard weft_region_window_create(cid, Self.origin, &rect, 1, &wid) == 0, wid != 0 else {
             return nil
         }
         self.cid = cid
