@@ -1,8 +1,11 @@
 # Redesign — weft owns workspaces, macOS owns nothing weft needs
 
-**Status:** Proposal, 2026-09-23, against 0.9.12. Supersedes the "nest, do
-not replace" decision in `WORKSPACES.md`. Phase 1 shipped in 0.9.13, phase 2 in
-0.9.14, and phases 3 onward land together in 0.9.15.
+**Status:** Superseded in 0.9.22 by [`NATIVE.md`](NATIVE.md): workspaces are
+macOS desktops again, driven through SkyLight's bridged operations, and the
+virtual engine below — one managed desktop per display, workspaces hidden by
+parking — is gone. Kept for the record and for the measurements it cites.
+Originally a proposal of 2026-09-23 against 0.9.12; phases 1–3 shipped in
+0.9.13–0.9.15.
 
 ## Requirements
 

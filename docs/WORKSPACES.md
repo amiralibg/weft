@@ -1,12 +1,10 @@
 # Workspaces — weft's own, inside macOS's
 
-**Status:** Superseded in 0.9.15 by [`REDESIGN.md`](REDESIGN.md). The "nest,
-do not replace" model below — workspaces on an anchor desktop beside native
-desktops weft still drove — kept every fragile part of the native layer and is
-gone; weft now keeps its workspaces on one managed desktop per display and
-never drives macOS desktops. What still holds from this document is the park
-and unpark mechanism and its crash-safe ledger (Phase 2), which the redesign
-builds on unchanged.
+**Status:** Superseded — in 0.9.15 by [`REDESIGN.md`](REDESIGN.md), and that in
+0.9.22 by [`NATIVE.md`](NATIVE.md), which makes every workspace a macOS
+desktop. The two reasons this document gives for leaving native desktops no
+longer hold on macOS 27 (`spikes/RESULTS.md` §S10–§S12). The park ledger of
+Phase 2 survives only as the one-time unpark at 0.9.22's first launch.
 
 ## The problem, stated once
 

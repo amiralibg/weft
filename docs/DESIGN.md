@@ -296,19 +296,23 @@ harder to debug from outside than a window weft had quietly decided not to manag
   Simulator). Windows that report `AXSize` min/max constraints incompatible with their slot
   are auto-floated rather than fought.
 
-### 5.3 Spaces — native, no emulation
+### 5.3 Spaces — a workspace is a macOS desktop *(0.9.22, `NATIVE.md`)*
 
-- Space ids (`sid`) are **not stable across reboot**. Persist config by *label*; assign labels
-  by ordinal at startup (same model as your current yabairc, but done once in-process, no
-  two-pass shell loop and no "already registered" dance).
-- Focus space: SA path (drive Dock's own transition — instant, no animation).
-  Degraded path: `CGEventPost` of ctrl+N (costs the ~250 ms system animation).
-- Move window to space without following: `SLSMoveWindowsToManagedSpace(cid, [wid], sid)`.
-  This is the one core feature with **no acceptable non-SA fallback**. *(S3)* Verified working:
-  window moved space 6 → 7 while the focused space stayed 3 throughout.
-- Sticky (for scratchpads): `SLSSetWindowTags` sticky bit. *(S3)* Verified.
-- `space create` / `space destroy`: *(S3)* **both work** on 26.5.2. Still behind the capability
-  probe — the point of the probe is to survive the next OS update, not to encode today's result.
+- One workspace per ordinary desktop, numbered as Mission Control reads: the main display's
+  first, then each other display west to east; fullscreen spaces have no number. Identity in
+  memory is the SpaceID; on disk it is (display uuid, position), because SpaceIDs do not
+  survive a logout. Labels attach by number.
+- Which desktop shows: `SLSManagedDisplayGetCurrentSpace`, re-read for every display on
+  every trigger (space notification, display change, weft's own switch, Mission Control
+  closing). A notification is only a reason to re-read.
+- Switch: SkyLight's bridged Show + Hide + SetCurrent, ~20 ms, one step at any distance;
+  verified by the read-back and the on-screen list. Fallback: a synthetic Dock swipe.
+- Move a window: the bridged `MoveWindowsToManagedSpace`, ~5 ms, any window, any display;
+  verified by reading every window's desktop back.
+- Both perform functions are C++ statics found by walking SkyLight's symbol table. Each
+  route is self-tested on the macOS build and none is trusted by return code (`Bridge.swift`).
+- Creating and destroying desktops, and sticky windows, are not available (S11): the user
+  adds desktops in Mission Control, and Dock › Options › All Desktops replaces `sticky`.
 
 ### 5.4 Multi-display *(implemented — see §14)*
 
@@ -320,8 +324,8 @@ harder to debug from outside than a window weft had quietly decided not to manag
 - **One usable rect per display**, keyed by space: `SpaceState.displayBySpace` maps sid →
   display uuid and every layout computation goes through `usableScreen(for: sid)`.
 - Commands: `focus display <west|east|north|south|next|prev|first|last|N>`,
-  `move display <...> [--follow]`, `move space display <...>`.
-  `move space display` is **impossible** on macOS 26, not merely broken — see §14.5.
+  `move display <...> [--follow]`. `move space display` is gone: macOS decides a desktop's
+  display (§14.5, `NATIVE.md`).
 - Because layout is per-space and spaces belong to displays, per-display layout is free.
 
 ## 6. Input
@@ -1756,6 +1760,9 @@ window to be, and where the ring is drawn. Conflating those two is the bug.
 
 ## 23. `space move-window` follows by default — 2026-09-17
 
+*Reversed in 0.9.22 (§29): the bridged move is invisible, so staying put costs
+nothing and is the default again; `--follow` follows.*
+
 The move is a held window plus the bound desktop shortcut (§S8), so the screen
 visibly changes desktop on the way. Not following does not avoid that — it adds
 a second switch to get back. The command was paying an extra visible transition
@@ -2175,3 +2182,41 @@ Two fixes, because either alone leaves it reachable:
 Both ship inside the app, so they take effect for updates started *from* a
 build that carries them. That lag is inherent to an updater that lives in the
 thing being updated.
+
+## 29. Native desktops — 2026-10-09 (0.9.22)
+
+The virtual engine is gone: a workspace is one macOS desktop (`NATIVE.md`, with
+the spikes in `spikes/RESULTS.md` §S10–§S12). What made it possible was a route
+S8 never tried. SkyLight's bridged window-management operations move another
+app's window between desktops and switch a display's desktop from an ordinary
+process with SIP on — the route yabai 7.1.25 found. Their perform functions are
+non-exported C++ statics, found by walking SkyLight's symbol table, and their
+return values mean nothing, so every call is checked by read-back.
+
+What changed, by layer:
+
+- **Shim:** the two perform statics sit in the private-symbol table, so
+  `WEFT_PUBLIC_ONLY` turns them off with everything else. `Bridge.c` builds the
+  operations through the Objective-C runtime and says only "submitted".
+- **Platform:** `NativeBridge` moves and switches; `NativeSelfTest` tests the
+  symbol walk and a move of a never-shown window of weft's own at every launch,
+  and the visible switch once per macOS build, cached in `native-routes.json`.
+  The Dock swipe is back as the switch fallback. A failed per-call verify turns
+  the bridged switch off for the session.
+- **Core:** `SpaceState` holds one workspace per desktop; `planFocus` and
+  `planMoveWindow` turn commands into effects that the daemon carries out and
+  verifies. Membership is macOS's (`membershipByDesktop`). Hidden desktops are
+  laid out through held AX elements as soon as their layout changes, so a
+  switch only paints; a desktop weft never held elements for is tiled on first
+  visit (`LazyTiling.swift`).
+- **Gone:** parking, park corners, the two-owner reconcile, `membership.json`
+  writes, pins, `sticky`, `move space display`, weft's own trackpad swipe, the
+  paused-on-another-desktop state. The 0.9.21 park ledger is unparked once at
+  startup, and its `membership.json` is spread onto desktops by number.
+
+Two things measured on the way changed the design before code was written:
+after a cross-display move the frame is whatever macOS remembers, which can be
+off screen, so weft always sets it (S12); and a desktop holds windows that are
+never on screen (a menu-bar app's popover), so a switch's window check counts
+only windows weft manages, and runs just after the read-back rather than on the
+keystroke's path.

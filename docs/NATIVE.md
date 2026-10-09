@@ -1,7 +1,7 @@
 # Native Spaces — weft drives macOS's own desktops
 
-**Status:** Approved 2026-10-09, against 0.9.21. Every spike under "Spikes
-before building" has run (S12); building is under way. Supersedes
+**Status:** Approved and built 2026-10-09, against 0.9.21 (`DESIGN.md` §29).
+Every spike under "Spikes before building" passed (S12). Supersedes
 `REDESIGN.md`'s "one managed desktop per display" and with it the virtual
 workspace engine. Ships whole, as one release: **0.9.22**.
 

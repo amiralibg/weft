@@ -24,9 +24,10 @@ small native app. A shortcut is handled inside weft the instant you press it —
 nothing is launched per keypress — so focusing, moving, resizing and switching
 windows happens with no wait, and weft stays out of the way the rest of the time.
 
-It keeps its own **workspaces** on one macOS desktop per display, so switching
-and moving windows are instant and work for every window — with System
-Integrity Protection left exactly as it is.
+Each of your **macOS desktops is a workspace**: weft tiles every one, switches
+between them instantly from the keyboard, and sends any window to any desktop —
+with Mission Control, the trackpad swipe and full-screen apps working as macOS
+ships them, and System Integrity Protection left exactly as it is.
 
 - **Two layouts per space** — `bsp` (binary split) and `float` (no tiling at
   all). Switch a space between them at runtime; window membership and focus
@@ -165,35 +166,35 @@ by hand is always the one-liner at the top of this file.
 
 ## Workspaces
 
-A **workspace** is weft's: a named set of windows with its own layout, what
-`⌥1`…`⌥9` and your `[[space]]` blocks refer to. Weft keeps them on **one macOS
-desktop per display**. Switching moves the windows you are not using just off
-the edge of the screen and puts the others back: instant, nothing animates,
-and it works on every window — including a terminal with its title bar hidden.
-Sending a window to another workspace is the same, and so is a rule's
-`space = "…"`.
+A **workspace is one of your macOS desktops**, with a layout of its own — what
+`⌥1`…`⌥9` and your `[[space]]` blocks refer to. Desktops are numbered the way
+Mission Control shows them: the main display's first, left to right, then each
+other display west to east. Full-screen apps' spaces have no number.
 
-- **Eight to start with.** The default config declares workspaces 1–8: 1–5
-  on the main display (the one with the menu bar) and 6–8 on a second one. On
-  a single display all eight live there. A number past the list, like
-  `space focus 9`, is created the first time you use it.
-- **Several displays.** Each display shows one workspace. `[[space]] display =`
-  keeps a workspace on one: `"main"`, `"secondary"`, `"built-in"` (the Mac's
-  own screen), `"external"`, a number counted west to east, or part of the
-  display's name. Settings › Workspaces sets it by dragging a workspace onto a
-  display, and the change applies at once. An unpinned workspace shows on the
-  display you are on; `move space display east` sends the current workspace to
-  the other display and brings that one's back.
-- **Other macOS desktops and full-screen apps keep working.** Weft pauses on a
-  display while one of them is showing and resumes when you come back. It never
-  switches desktops for you. `weftctl doctor` shows which desktop weft manages
-  on each display and whether it is paused.
-- **Restarts keep your workspaces.** An update or a restart puts every window
-  back in the workspace it was in.
-- **The cost:** Mission Control on weft's desktop shows a thin sliver for each
-  hidden window, the same trade AeroSpace makes.
+- **Switching is instant.** `space focus 3` shows desktop 3 in one step, at any
+  distance, with no animation. A desktop already showing on another display
+  just takes focus; nothing else changes. `next`, `prev` and `recent` work too.
+- **Sending a window is instant.** `space move-window 3` sends the focused
+  window to desktop 3 — any window, including a terminal with its title bar
+  hidden, and to a desktop on another display — and you stay where you are.
+  `--follow` goes with it. A rule's `space = "…"` places a new window the same
+  way as it opens (`follow-space-rules = false` keeps you where you are).
+- **macOS's own desktop tools keep working.** Mission Control, the swipe,
+  `⌃←`/`⌃→` and native full screen behave exactly as macOS intends; weft
+  notices whichever way you switch, holds still while Mission Control is open,
+  and tiles what you drag between desktops there.
+- **Add desktops in Mission Control.** weft cannot create or delete desktops; it
+  follows however many you have. A label or number with no desktop says so.
+  Turn off *Automatically rearrange Spaces based on most recent use* (Desktop &
+  Dock › Mission Control) so the numbers stay put; `weftctl doctor` warns when
+  it is on.
+- **All desktops.** For an app's windows on every desktop, right-click its Dock
+  icon › Options › All Desktops. weft floats those windows and never moves them.
+- **Every desktop is tiled**, the hidden ones too: a window moved to a desktop
+  is in its tile before you get there.
+- **Layouts survive** restarts, log outs and unplugging a display.
 
-The design, and what it measured, is in [`docs/REDESIGN.md`](docs/REDESIGN.md).
+The design, and what it measured, is in [`docs/NATIVE.md`](docs/NATIVE.md).
 
 ## Permissions
 
@@ -245,22 +246,19 @@ loads no code into any other process.
 | Feature | With SIP on |
 |---|---|
 | Tiling, focus, shortcuts, rules, stacks, borders, the switcher | Yes |
-| Switching workspaces (`space focus`) | Yes — instant |
-| Sending a window to a workspace (`space move-window`), and a rule's `space = "…"` | Yes — instant, any window |
-| Keeping a window visible on every workspace (`sticky`) | Yes |
-| Switching or moving windows between **macOS desktops** | Not done — see below |
+| Switching desktops (`space focus`) | Yes — instant |
+| Sending a window to a desktop (`space move-window`), and a rule's `space = "…"` | Yes — instant, any window |
+| Creating or deleting desktops | No — do that in Mission Control |
 
-macOS refuses every route an ordinary process has for moving another app's
-window between its own desktops — sixteen SkyLight calls were tried, and three
-return success while doing nothing. What remains is simulated input (holding a
-title bar while pressing a desktop shortcut) and private Dock gestures, and both
-broke on macOS updates. So weft does not drive macOS desktops at all: its
-workspaces do that job, on one desktop per display, and nothing there depends on
-what a macOS update changes about Dock.
-
-The private calls weft does use are looked up by name when it starts rather
-than linked, each one checked by a self-test. A macOS update that removes one
-costs the feature that uses it, never the launch — `weftctl doctor` lists them.
+Switching and moving go through SkyLight's bridged window operations, the
+route yabai 7.1 found that needs no scripting addition. They are private, so
+weft trusts none of them by its return code: each is self-tested on your macOS
+build — a move of a window of weft's own at every launch, and a visible switch
+there and back once per build — and every call is checked by reading the
+result back from the WindowServer. A macOS update that breaks one costs that
+feature, loudly, never tiling or the launch: switching falls back to a Dock
+swipe, and `weftctl doctor` lists each route and what is lost without it.
+`weftctl doctor --selftest` re-runs them all.
 
 ## Default keybindings
 
@@ -368,17 +366,16 @@ is `west`, `east`, `north` or `south`. A display is one of those, `next`,
 | `window toggle split` | Flip the split under the window |
 | `window toggle zoom-fullscreen` | Fill the workspace with the window; again to restore |
 | `float` / `float on` / `float off` | Float the window, or put it back in the tiling |
-| `sticky` / `sticky on` / `sticky off` | Keep the window on every workspace |
 | `balance` | Even out every split on the workspace |
 | `stack toggle` / `next` / `prev` / `unstack` / `all` | Stacks: several windows in one slot |
 | `stack move <direction>` / `stack split <direction>` | Join the stack that way / pull that window in |
-| `space focus <name or number>` | Go to a workspace (`recent` goes back) |
-| `space move-window <name or number>` | Send the window there and go with it (`--no-follow` stays) |
-| `space layout bsp` / `float` / `toggle` | Change this workspace's layout |
-| `space label <name>` | Rename this workspace |
+| `space focus <name or number>` | Go to a desktop (`next`, `prev`, `recent`) |
+| `space move-window <name or number>` | Send the window there and stay (`--follow` goes with it) |
+| `space layout bsp` / `float` / `toggle` | Change this desktop's layout |
+| `space label <name>` | Name this desktop |
 | `focus display <display>` | Focus another display |
 | `move display <display>` | Send the window to another display (`--follow` goes with it) |
-| `move space display <display>` | Swap this workspace with the one on another display |
+| `spread [--dry-run]` | Put 0.9.21's workspaces' windows, and every window a rule names, on their desktops |
 | `app toggle <bundle id>` | Open the app, go to its window, or hide it when it is in front |
 | `mode <name>` | Enter a `[mode.<name>]` layer; `mode default` leaves it |
 | `exec <shell command>` | Run anything through `/bin/sh` |
@@ -392,7 +389,7 @@ its commands in order:
 ```toml
 "alt-m" = "app toggle com.apple.mail"      # Settings › Choose an app… finds any bundle id
 "alt-shift-m" = ["space move-window 3", "app toggle com.apple.mail"]   # several steps, in order
-"alt-shift-9" = "space move-window 9 --no-follow"
+"alt-shift-9" = "space move-window 9 --follow"
 "alt-d" = "exec open ~/Downloads"
 ```
 

@@ -106,29 +106,30 @@ overlap after tile, or focus jumps spaces on its own during sync.
 ## E. Functional matrix
 
 Keybindings below are the `examples/weft.toml` defaults (`alt-*`). That file is
-deliberately generic — workspaces 1–8 pinned by role (1–5 main display, 6–8
-second display), no per-app placement, both integrations off — so it behaves
-the same on any Mac. If you are testing against a migrated
-yabai/skhd config instead, the chords will be that config's, not these:
+deliberately generic — desktops 1–8 labelled by number, no per-app placement,
+both integrations off — so it behaves the same on any Mac. Make at least three
+desktops on one display (and two on a second, if you have one) in Mission
+Control first. If you are testing against a migrated yabai/skhd config instead,
+the chords will be that config's, not these:
 
 | Area | Action | Expect |
 |---|---|---|
 | Focus | `alt-h/j/k/l` | focus moves directionally, cursor warps if `mouse-follows-focus` |
 | Move | `alt-shift-h/j/k/l` | the window steps that way and **keeps its size**; a half-screen window must not come back a quarter. Single re-tile |
-| Spaces | `alt-1..8` | one switch, layouts apply on arrival, no double-jump |
-| Move to space | `alt-shift-1..8` | window leaves current tree, appears on target |
+| Desktops | `alt-1..8` | one instant switch to that desktop, no slide, at any distance; the last window used there has focus; an empty desktop takes focus itself |
+| Missing desktop | `alt-8` with fewer than 8 desktops | a toast: "desktop 8 does not exist; add desktops in Mission Control" |
+| Other display | `alt-N` for a desktop showing on the other display | focus moves there; nothing switches |
+| Send to desktop | `alt-shift-1..8` | the window goes and you stay; going there shows it already in its tile. A Ghostty with its title bar hidden moves too |
+| Send across displays | `alt-shift-N` for a desktop on the other display | lands on that display, on screen, tiled |
+| macOS's own | trackpad swipe, `⌃←/⌃→`, Mission Control | all work; weft re-tiles where you land; nothing moves while Mission Control is open; a window dragged between desktops there is tiled where dropped |
+| Full screen | green button on a tiled window, then leave full screen | the app gets its own space with no number; on leaving, the window is back in its desktop's layout |
+| All desktops | Dock › Options › All Desktops on an app | its windows float and are never moved |
 | Zoom | `alt-f` | window covers usable screen, toggle restores |
 | Float | `alt-shift-space` | window centers at 70%, drag freely; toggle re-tiles |
 | Stack | `alt-w`, `alt-bracketright/left`, `alt-u` | wrap / next / prev / unstack, one shared frame |
-| Scroll | `alt-shift-n` to switch layout, then `alt-n/p/r` | column nav + width cycle, off-screen columns park |
 | Resize | `alt-shift-r`, then `h/j/k/l`, `esc` | grows/shrinks focused split, `balance` on `=` |
-| Sticky | `weftctl sticky --help` / `weftctl sticky` | needs SA; honest error without it |
 | Display | `alt-ctrl-h/l`, `alt-ctrl-shift-h/l` | multi-display only; single display prints "already there" |
 | Drag | drag tiled window by body | snaps back **once** after release, never fights mid-drag |
-
-The example config declares no `[[space]]` blocks, so spaces are addressed by
-their Mission Control number. `alt-4` and `alt-5` do nothing on a machine with
-three desktops — that is correct, not a bug; `weftctl doctor` reports it.
 
 Space-stability checks (regression for "spaces change without warning"):
 
@@ -224,26 +225,33 @@ before it ships (REDESIGN.md, "Performance"). Each command exits non-zero on
 a miss.
 
 ```bash
-weftctl doctor --selftest                     # hide and show a test window, WindowServer path
-WEFT_PUBLIC_ONLY=1 weftctl doctor --selftest  # the same with no private calls at all
+weftctl doctor --selftest                     # every native-desktop route; one display flickers twice
+WEFT_PUBLIC_ONLY=1 weftctl doctor --selftest  # every route off: weft says so and keeps tiling
 WEFT_PUBLIC_ONLY=1 weftctl doctor             # what each missing private call would cost
 weftctl bench idle 60                         # leave the machine alone for a minute
-weftctl bench "space focus recent" -n 50      # needs two workspaces with windows in them
+weftctl bench "space focus recent" -n 50      # needs two desktops with windows on them
 ```
 
-| | budget | measured 2026-09-24, macOS 27.0 |
+On every macOS beta, after the self-test, re-run spikes 1–4 of `NATIVE.md`
+("Spikes before building") from `spikes/`: a real app through the bridged move
+(`./nativeops windows`, `./nativeops moveto <wid> <sid>` and back), a finger
+swipe under `./nativeops watch`, Mission Control right after
+`./nativeops switch 1 showhide stay`, and the triple on the second display and
+past a fullscreen space (`./nativeops tri <display> <n>`). Judge each by
+read-back and by looking at the screen.
+
+| | budget | measured 2026-10-09, macOS 27.0.1 |
 |---|---|---|
-| hide one window, WindowServer | < 10 ms (self-test warns above) | 2.5 ms including the ledger fsync |
-| hide one window, Accessibility | — (slower by design) | 52 ms, clamped 27 pt short vertically |
-| show one window | — | 0.8 ms / 3.5 ms |
+| switch, any distance, to the read-back | < 40 ms | 14–32 ms (S12) |
+| on-screen verify of a switch, off the keystroke path | < 150 ms | 70–100 ms with windows on the target |
+| move one window to a desktop, including verify | < 20 ms same display, < 40 ms other | ~5 ms (S12) |
+| move 30 windows (spread) | — | ~24 ms (S12) |
 | `weftd` idle CPU | ≤ 0.5 % over 60 s (`bench idle`) | not yet measured on a release build |
 | `weftd` memory | ≤ 40 MB resident (`bench idle`) | not yet measured on a release build |
-| workspace switch, 20 windows / 6 apps | < 60 ms (`bench "space focus recent"`) | not yet measured |
 
-The self-test's window belongs to a second `weftctl` process: Accessibility
-requests are answered on the target's main thread, and weft hides other apps'
-windows, never its own. It is up for about a second and nothing else is
-touched.
+The visible switch test switches a display with two desktops to its neighbour
+and back, by the bridged switch and by Dock swipe. No window of yours is moved;
+the move test uses a 1×1 window of weftctl's own that is never shown.
 
 ## I. What to send back when reporting
 
