@@ -555,6 +555,48 @@ Zen, an Electron app); `ProcessAssignToAllSpaces` with a bundled helper.
 
 ---
 
+## S12 — real applications, a finger swipe: **moves hold; the cross-display frame is not weft's to trust**
+
+Measured 2026-10-09 by the maintainer, macOS 27.0.1, same two displays, weftd
+not running. Harness: `nativeops.swift` (`windows`, `moveto`, `watch`,
+`switch … showhide stay`).
+
+| Window | Move | Result | Frame |
+| --- | --- | --- | --- |
+| Ghostty, `macos-titlebar-style = hidden` | 78 → 81 → 78 | **5.1 / 4.6 ms** | unchanged, (0,38) 1710×1074 |
+| Zen, on the showing desktop | 76 → 78 → 76 | **5.0 / 8.5 ms** | unchanged |
+| T3 Code (Electron), 4K → built-in | 344 → 76 | **3.9 ms** | (1039,−1796) → **(1709,1080)**: the built-in's bottom-right corner, one point on screen |
+| T3 Code, built-in → 4K | 76 → 344 | **5.2 ms** | (0,38) → (1152,−2130), inside the 4K display |
+
+**The window with no title bar moves like any other**, which was the case S8
+could not do at all.
+
+**The cross-display row matters more than its timing.** macOS put T3 Code at
+exactly the corner weft 0.9.21 parks windows in (S9's `(1709,1080)`). The
+likely reason is that macOS restores a window's last position on the display
+it arrives on, and that position was a park spot. S11's helper window, which
+had no history, landed inside the display. In either case, after a
+cross-display move the frame is whatever macOS remembers, so weft has to set
+it every time, for floating windows as well as tiled ones.
+
+**Finger swipes:** four swipes on the built-in display over ~6 s. The
+current-space read changed once per swipe, and `SLSManagedDisplayIsAnimating`
+**never reported true**. It cannot tell weft when a swipe has finished. When
+the read changes relative to the end of the animation is not measured.
+
+**Mission Control after a triple switch:** the switch landed in 17.7 ms. The
+target's 4 windows were on screen and none from the old desktop. Mission
+Control opened on desktop 1 and agreed with the switch. macOS 27 marks no
+"current" desktop in the strip, so there was no highlight to check.
+
+**Rendering and input after a move:** Ghostty and Zen both drew normally and
+took typing on the desktop they were moved to (confirmed by eye).
+
+Not yet run: spike 4 (triple on the second display, fullscreen Space in the
+list), spike 5 (30 windows, 10 processes).
+
+---
+
 ## Design changes this forces
 
 1. **Discovery moves off AX entirely** (S0). WindowServer for enumeration, AX captured at

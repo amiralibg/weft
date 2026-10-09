@@ -45,7 +45,7 @@ falls back to the next-best way to switch.
 | | before (S8, `WORKSPACES.md`) | now (S10, S11, macOS 27.0.1, SIP on) |
 | --- | --- | --- |
 | Move another app's window to a desktop | refused by 16 SkyLight routes; only the title-bar carry, which fails without a title bar | `SLSBridgedMoveWindowsToManagedSpaceOperation`, ~10 ms, 5 windows in 7 ms, cross-display too, user's desktop untouched |
-| Frame after a cross-display move | — | follows: the window lands inside the target display |
+| Frame after a cross-display move | — | lands on the target display at a position macOS remembers, which can be off screen (S12); weft sets it |
 | Lay out a desktop that is not showing | impossible: AX lists no windows there (S0) | an AX element captured earlier still takes frame writes, and the window stays hidden |
 | Switch desktop | synthetic Dock swipe, one step at a time | `ShowSpaces` + `HideSpaces` + `ManagedDisplaySetCurrentSpace` through the bridge: one step to any desktop, 16–21 ms, no animation, Dock stays in sync |
 | Create / destroy desktops | yabai needs a scripting addition | still impossible: the bridged create returns an id for nothing |
@@ -181,8 +181,10 @@ Settings and bar
 - **Mission Control:** observe the Dock's AX `AXExposeShowAllWindows` /
   `AXExposeExit` (as Glide does). While open, weft does not tile; on exit it
   re-reads every display and every window's desktop.
-- `SLSManagedDisplayIsAnimating` is not relied on: it never reported true in
-  S11. Its behaviour under a finger swipe is a pre-build spike.
+- `SLSManagedDisplayIsAnimating` is not used: it never reported true, for a
+  synthetic swipe, a bridged switch or a finger swipe (S11, S12). A desktop
+  shown for the first time is tiled when the read changes, and tiled again
+  once its app's AX window list is non-empty if the first pass found nothing.
 - **Fallback** when the read is missing: the existing synthetic desktop per
   display (public on-screen inference). Tiling continues; switching and
   moving are off.
@@ -194,8 +196,11 @@ Settings and bar
 - Verified by re-reading `SLSCopySpacesForWindows` until every window reports
   exactly the target, with a short deadline; a window that did not arrive is
   reported, not assumed.
-- Across displays the frame follows on its own (S11); weft then writes the
-  tile frame for the destination.
+- Across displays the window lands on the target display, but **its frame is
+  macOS's memory, not a placement** (S12: an Electron window landed on the one
+  point of 0.9.21's old park corner). weft writes a frame after every
+  cross-display move: the tile for a tiled window, and for a floating window
+  its previous size centred on the target display's usable area.
 - **Layout before show:** when windows arrive on a desktop that is not showing
   and weft holds AX elements for its windows, weft re-tiles it immediately.
   Arriving later is paint-only.
@@ -418,15 +423,12 @@ Verification before the release: `swift build`, `swift test`,
 
 These block the build. Commands are from `spikes/`.
 
-1. **Real applications through the bridged move.** Ghostty without a title bar
-   (`./nativeops moveto <wid> <sid>` and back), Zen on the showing desktop,
-   an Electron app across displays. Each must render and take keyboard input
-   on arrival.
-2. **Finger swipe against `IsAnimating`** (`./nativeops watch`): does the
-   current-space read change before the animation ends, and does anything
-   need to wait for it?
-3. **Mission Control right after a triple switch** (`./nativeops switch 1
-   showhide stay`): does it highlight the right desktop?
+1. **Real applications through the bridged move.** **Passed** (S12): Ghostty,
+   Zen, T3 Code in 4–9 ms, rendering and taking input on arrival.
+2. **Finger swipe against `IsAnimating`.** **Done** (S12): never true, so it is
+   not used; see "Which desktop is showing".
+3. **Mission Control right after a triple switch.** **Passed** (S12): it opens
+   on the desktop switched to.
 4. **The triple on the second display**, and with a fullscreen Space in the
    display's list.
 5. **Scale:** 30 windows across 10 apps moved in batches; does ~10 ms hold?
