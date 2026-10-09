@@ -10,101 +10,75 @@ import Foundation
 // and `windows` as [Int] — a separate spelling of the same wire that decoded
 // happily whatever the daemon had started meaning by those numbers.
 
+/// A desktop's row in the menu: a standard item, so it gets the system's
+/// highlight, keyboard navigation and VoiceOver. It used to be a hand-drawn
+/// view, which drew its own highlight, a "BSP" badge on every row, and was
+/// one more thing to keep in step with how macOS draws menus.
 @MainActor
-final class SpaceRowView: NSView {
-    private let space: SpaceStatus
-    private let displayIndex: Int
-    private let icons: [NSImage]
-    private let onClick: () -> Void
+enum DesktopMenuRow {
+    /// `ordinal` is what `space focus N` counts.
+    static func make(_ space: SpaceStatus, ordinal: Int, icons: [NSImage], target: AnyObject, action: Selector) -> NSMenuItem {
+        let name = space.label.isEmpty ? "Desktop \(ordinal)" : space.label
+        let item = NSMenuItem(title: name, action: action, keyEquivalent: "")
+        item.target = target
+        item.tag = ordinal
+        item.image = badge(ordinal, showing: space.current)
 
-    init(space: SpaceStatus, displayIndex: Int, icons: [NSImage], onClick: @escaping () -> Void) {
-        self.space = space
-        self.displayIndex = displayIndex
-        self.icons = icons
-        self.onClick = onClick
-        super.init(frame: NSRect(x: 0, y: 0, width: 320 + Self.gutter, height: 32))
-        // Drawn by hand, so without these VoiceOver read every row as blank.
-        let name = space.label.isEmpty ? "\(space.id)" : space.label
+        let title = NSMutableAttributedString(
+            string: name,
+            attributes: [.font: space.current ? NSFont.menuFont(ofSize: 0).bold : NSFont.menuFont(ofSize: 0)]
+        )
+        if space.layout == "float" {
+            title.append(NSAttributedString(
+                string: "  floating",
+                attributes: [.font: NSFont.menuFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
+            ))
+        }
+        // The apps on it, right-aligned: one tab to a right tab stop.
+        if !icons.isEmpty {
+            let style = NSMutableParagraphStyle()
+            style.tabStops = [NSTextTab(textAlignment: .right, location: 250)]
+            title.append(NSAttributedString(string: "\t"))
+            for icon in icons.prefix(5) {
+                let attachment = NSTextAttachment()
+                attachment.image = icon
+                attachment.bounds = NSRect(x: 0, y: -4, width: 18, height: 18)
+                title.append(NSAttributedString(attachment: attachment))
+                title.append(NSAttributedString(string: " "))
+            }
+            title.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: title.length))
+        }
+        item.attributedTitle = title
+
         let count = space.windows.count
-        setAccessibilityElement(true)
-        setAccessibilityRole(.menuItem)
-        setAccessibilityLabel(
-            "Workspace \(name), \(space.layout)"
-                + (space.current ? ", showing" : "")
+        item.setAccessibilityLabel(
+            "Desktop \(ordinal), \(name)" + (space.current ? ", showing" : "")
                 + ", \(count == 0 ? "empty" : count == 1 ? "1 window" : "\(count) windows")"
         )
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    /// The menu's checkmark column, which a custom view does not get: the
-    /// layout items below are checked, and without this the rows started a
-    /// column left of the display names above them.
-    private static let gutter: CGFloat = 18
-
-    override func accessibilityPerformPress() -> Bool {
-        enclosingMenuItem?.menu?.cancelTracking()
-        onClick()
-        return true
+        return item
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp], owner: self))
-    }
-    override func mouseEntered(with e: NSEvent) { needsDisplay = true }
-    override func mouseExited(with e: NSEvent) { needsDisplay = true }
-    override func mouseUp(with e: NSEvent) {
-        enclosingMenuItem?.menu?.cancelTracking()
-        onClick()
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let hot = enclosingMenuItem?.isHighlighted ?? false
-        if hot {
-            NSColor.selectedContentBackgroundColor.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 2), xRadius: 6, yRadius: 6).fill()
+    /// The desktop's number on a rounded tile: the accent colour when it is
+    /// the one showing on its display. Drawn per appearance.
+    private static func badge(_ n: Int, showing: Bool) -> NSImage {
+        let text = "\(n)" as NSString
+        let font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        let width = max(18, ceil(text.size(withAttributes: [.font: font]).width) + 8)
+        let image = NSImage(size: NSSize(width: width, height: 16), flipped: false) { rect in
+            (showing ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4.5, yRadius: 4.5).fill()
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attrs)
+            return true
         }
-        let fg: NSColor = hot ? .white : .labelColor
-
-        // Pill with space index
-        let pill = NSRect(x: 12 + Self.gutter, y: 7, width: 20, height: 18)
-        (space.current ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
-        NSBezierPath(roundedRect: pill, xRadius: 5, yRadius: 5).fill()
-        drawCentered("\(displayIndex)", in: pill, color: .white, size: 11)
-
-        // Space label
-        let name = space.label.isEmpty ? "\(space.id)" : space.label
-        drawText(name, at: NSPoint(x: 40 + Self.gutter, y: 8), color: fg, size: 13, bold: space.current)
-
-        // Layout badge
-        let badge = space.layout.uppercased()
-        let bAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9, weight: .bold),
-            .foregroundColor: hot ? NSColor.white.withAlphaComponent(0.8) : NSColor.tertiaryLabelColor
-        ]
-        (badge as NSString).draw(at: NSPoint(x: 100 + Self.gutter, y: 10), withAttributes: bAttrs)
-
-        // App icons
-        var x = bounds.width - 12 - 20
-        for img in icons.prefix(6).reversed() {
-            img.draw(in: NSRect(x: x, y: 6, width: 20, height: 20))
-            x -= 24
-        }
+        image.isTemplate = false
+        return image
     }
+}
 
-    private func drawText(_ s: String, at p: NSPoint, color: NSColor, size: CGFloat, bold: Bool) {
-        let f = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
-        (s as NSString).draw(at: p, withAttributes: [.font: f, .foregroundColor: color])
-    }
-    private func drawCentered(_ s: String, in r: NSRect, color: NSColor, size: CGFloat) {
-        let a: [NSAttributedString.Key: Any] = [
-            .font: NSFont.boldSystemFont(ofSize: size),
-            .foregroundColor: color
-        ]
-        let sz = (s as NSString).size(withAttributes: a)
-        (s as NSString).draw(at: NSPoint(x: r.midX - sz.width/2, y: r.midY - sz.height/2), withAttributes: a)
-    }
+private extension NSFont {
+    var bold: NSFont { NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask) }
 }
 
 @MainActor
@@ -388,23 +362,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 lastDisplay = space.display
             }
 
+            var seen = Set<Int32>()
             let icons: [NSImage] = space.windows.compactMap { wid in
-                guard let pid = byID[wid]?.pid,
+                guard let pid = byID[wid]?.pid, seen.insert(pid).inserted,
                       let icon = NSRunningApplication(processIdentifier: pid_t(pid))?.icon
                 else { return nil }
-                let copy = icon.copy() as! NSImage
-                copy.size = NSSize(width: 20, height: 20)
-                return copy
+                return icon
             }
 
-            let item = NSMenuItem()
             // The workspace's own ordinal — what `space focus <n>` counts —
             // not its row, which grouping by display can move.
             let ordinal = (spaces.firstIndex { $0.label == space.label && $0.display == space.display } ?? 0) + 1
-            item.view = SpaceRowView(space: space, displayIndex: ordinal, icons: icons) { [weak self] in
-                BarIPC.post("space focus \(ordinal)")
-                self?.state.refresh()
-            }
+            let item = DesktopMenuRow.make(
+                space, ordinal: ordinal, icons: icons, target: self, action: #selector(focusDesktop(_:))
+            )
             menu.addItem(item)
         }
 
@@ -414,29 +385,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addControls(_ menu: NSMenu) {
         menu.addItem(.separator())
 
-        // Layout Switchers
-        // Checked for the workspace the menu bar names, and with the same
-        // glyph, so the text lines up with the rows below that have icons.
-        let current = state.daemonUp == false ? nil : state.currentSpace?.layout
-        let bspItem = NSMenuItem(title: "BSP Layout", action: #selector(setLayoutBSP), keyEquivalent: "")
-        bspItem.target = self
-        bspItem.image = Self.layoutIcon("bsp")
-        bspItem.state = current == "bsp" ? .on : .off
-        menu.addItem(bspItem)
+        // This desktop, then this window: each one toggle that says which way
+        // it goes. Two radio items for the desktop's layout read as settings
+        // rather than actions, and "BSP" is a word nobody else uses.
+        let floats = state.daemonUp != false && state.currentSpace?.layout == "float"
+        let layoutItem = NSMenuItem(
+            title: floats ? "Tile This Desktop" : "Float This Desktop",
+            action: floats ? #selector(setLayoutBSP) : #selector(setLayoutFloat), keyEquivalent: ""
+        )
+        layoutItem.target = self
+        layoutItem.image = Self.layoutIcon(floats ? "bsp" : "float")
+        menu.addItem(layoutItem)
 
-        let floatItem = NSMenuItem(title: "Float Layout", action: #selector(setLayoutFloat), keyEquivalent: "")
-        floatItem.target = self
-        floatItem.image = Self.layoutIcon("float")
-        floatItem.state = current == "float" ? .on : .off
-        menu.addItem(floatItem)
-
-        menu.addItem(.separator())
-
-        // Floating one window, rather than the whole space. Bindable as
+        // Floating one window, rather than the whole desktop. Bindable as
         // `float toggle`, but it needs to be reachable without a keybind —
         // a config migrated from a skhdrc that never bound it had no way in.
-        // Says which way it goes: "Float" on a floating window promised
-        // something the toggle would then undo.
         let tiles = state.focusedFloating == true
         let floatWindowItem = NSMenuItem(
             title: tiles ? "Tile Focused Window" : "Float Focused Window",
@@ -450,40 +413,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // Window Switcher
         let switchItem = NSMenuItem(title: "Window Switcher…", action: #selector(openSwitcher), keyEquivalent: " ")
         switchItem.keyEquivalentModifierMask = [.control, .option]
         switchItem.target = self
         switchItem.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         menu.addItem(switchItem)
 
-        // Cheatsheet
-        let cheatItem = NSMenuItem(title: "Keybindings Cheatsheet…", action: #selector(openCheatsheet), keyEquivalent: "k")
+        let cheatItem = NSMenuItem(title: "Keyboard Shortcuts…", action: #selector(openCheatsheet), keyEquivalent: "k")
         cheatItem.keyEquivalentModifierMask = [.command]
         cheatItem.target = self
         cheatItem.image = NSImage(systemSymbolName: "command", accessibilityDescription: nil)
         menu.addItem(cheatItem)
 
-        // How Weft Works — always present, unlike Setup below. It is the one
-        // row that teaches rather than reports, and what it teaches (what a
-        // workspace is, and that weft's are not macOS's desktops) is exactly
-        // what someone goes looking for weeks after Setup ran once.
-        let guideItem = NSMenuItem(
-            title: "How Weft Works…", action: #selector(openWorkspacesGuide), keyEquivalent: ""
-        )
-        guideItem.target = self
-        guideItem.image = NSImage(
-            systemSymbolName: "rectangle.3.group", accessibilityDescription: nil
-        )
-        menu.addItem(guideItem)
+        menu.addItem(.separator())
 
         // Setup & Permissions — only while a permission is still missing.
         // A granted permission is settled; the menu is for what needs doing
-        // now, and a row that says "everything is fine" every time you open it
-        // is a row nobody reads. Setup stays reachable from Settings, and this
-        // comes back by itself if a grant is ever revoked. `permissionsReady`
-        // is false when the daemon cannot be asked, which is exactly when
-        // someone needs the row most.
+        // now. `permissionsReady` is false when the daemon cannot be asked,
+        // which is exactly when someone needs the row most.
         if !state.permissionsReady {
             let setupItem = NSMenuItem(
                 title: "Finish setting up permissions…",
@@ -496,28 +443,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(setupItem)
         }
 
-        // Config Editor
         let configItem = NSMenuItem(title: "Settings…", action: #selector(openConfigEditor), keyEquivalent: ",")
         configItem.keyEquivalentModifierMask = [.command]
         configItem.target = self
         configItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         menu.addItem(configItem)
 
-        let diagItem = NSMenuItem(
-            title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: ""
-        )
-        diagItem.target = self
-        diagItem.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
-        menu.addItem(diagItem)
-
-        menu.addItem(.separator())
-
-        // Retry / Restart Weft
-        let retryItem = NSMenuItem(title: "Resync Displays & Restart Weft", action: #selector(resyncAndRestart), keyEquivalent: "r")
+        // Help and repair, out of the way until wanted. How Weft Works stays
+        // reachable here weeks after Setup ran once.
+        let help = NSMenu()
+        let guideItem = NSMenuItem(title: "How Weft Works…", action: #selector(openWorkspacesGuide), keyEquivalent: "")
+        guideItem.target = self
+        guideItem.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: nil)
+        help.addItem(guideItem)
+        help.addItem(.separator())
+        let retryItem = NSMenuItem(title: "Restart Weft", action: #selector(resyncAndRestart), keyEquivalent: "r")
         retryItem.keyEquivalentModifierMask = [.command]
         retryItem.target = self
         retryItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        menu.addItem(retryItem)
+        retryItem.toolTip = "Read the displays again and restart the engine"
+        help.addItem(retryItem)
+        let diagItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
+        diagItem.target = self
+        diagItem.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
+        help.addItem(diagItem)
+        let helpItem = NSMenuItem(title: "Help & Troubleshooting", action: nil, keyEquivalent: "")
+        helpItem.image = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil)
+        helpItem.submenu = help
+        menu.addItem(helpItem)
+
+        menu.addItem(.separator())
 
         // Update — only ever present when there is actually one, so the menu
         // does not carry a permanent "you are up to date" line nobody reads.
@@ -543,11 +498,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Quit
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Weft", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quitItem)
     }
 
+    @objc private func focusDesktop(_ sender: NSMenuItem) { send("space focus \(sender.tag)") }
     @objc private func setLayoutBSP() { send("space layout bsp") }
     @objc private func setLayoutFloat() { send("space layout float") }
     @objc private func toggleFloatWindow() { send("float toggle") }
