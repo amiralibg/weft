@@ -21,9 +21,6 @@ struct SpaceRow: Identifiable, Equatable {
     /// first save pinned every workspace to it, and changing the default
     /// afterwards then changed none of them.
     var layout: String?
-    /// `display = …` as written: "main", "secondary", a number, or part of a
-    /// display's name. Empty means it shows on whichever display you are on.
-    var display: String = ""
     /// The `[[space]]` section this row came from, so any comment inside the
     /// block survives an edit to the label next to it.
     var origin: TomlSection?
@@ -285,7 +282,6 @@ final class ConfigStore: ObservableObject {
             return SpaceRow(
                 label: s.string("label") ?? "",
                 layout: s.string("layout"),
-                display: s.rawValue("display").map(TomlValue.unquote) ?? "",
                 origin: s
             )
         }
@@ -492,13 +488,9 @@ final class ConfigStore: ObservableObject {
             } else {
                 section.remove("layout")
             }
-            if row.display.isEmpty {
-                section.remove("display")
-            } else if let n = Int(row.display) {
-                section.set("display", int: n)
-            } else {
-                section.set("display", string: row.display)
-            }
+            // macOS decides a desktop's display; the key is retired
+            // (`weftctl config tidy`), so a save takes it out too.
+            section.remove("display")
         }
     }
 
@@ -619,11 +611,6 @@ final class ConfigStore: ObservableObject {
         markDirty()
     }
 
-    func addSpace() {
-        spaces.append(SpaceRow(label: "space\(spaces.count + 1)"))
-        markDirty()
-    }
-
     func addRule() {
         rules.append(RuleRow())
         markDirty()
@@ -738,20 +725,17 @@ extension ConfigStore {
 // MARK: - Workspaces, as the canvas edits them
 
 extension ConfigStore {
-    /// Put a workspace before another one (or last) — the order `space focus
-    /// 1`, `2`, … count in.
-    func moveSpace(_ id: SpaceRow.ID, before target: SpaceRow.ID?) {
-        guard id != target, let from = spaces.firstIndex(where: { $0.id == id }) else { return }
-        let row = spaces.remove(at: from)
-        let to = target.flatMap { t in spaces.firstIndex(where: { $0.id == t }) } ?? spaces.endIndex
-        spaces.insert(row, at: to)
+    /// The `[[space]]` row that labels desktop `number`, made — with any rows
+    /// before it, each labelled by its number — the first time something is
+    /// set on that desktop. Labels attach by number, so a desktop's row is
+    /// the one at its position.
+    func spaceRow(number: Int) -> SpaceRow.ID {
+        guard spaces.count < number else { return spaces[number - 1].id }
+        while spaces.count < number {
+            spaces.append(SpaceRow(label: "\(spaces.count + 1)"))
+        }
         markDirty()
-    }
-
-    func pinSpace(_ id: SpaceRow.ID, to display: String) {
-        guard let i = spaces.firstIndex(where: { $0.id == id }), spaces[i].display != display else { return }
-        spaces[i].display = display
-        markDirty()
+        return spaces[number - 1].id
     }
 
     /// The layout a workspace gets: its own, else `default-layout`.

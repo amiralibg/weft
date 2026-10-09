@@ -210,6 +210,34 @@ public enum SpaceControl {
         }
     }
 
+    /// One display's spaces as Mission Control draws them: in order, each a
+    /// desktop or a fullscreen / Split View space, and the one showing.
+    public struct DisplaySpaces: Sendable, Equatable {
+        public struct Entry: Sendable, Equatable {
+            public var id: SpaceID
+            public var fullscreen: Bool
+        }
+        public var uuid: String
+        public var spaces: [Entry]
+        public var current: SpaceID
+    }
+
+    /// Every display's spaces, in SkyLight's display order. For Settings and
+    /// Setup, which draw the desktops whether or not weftd is running. Empty
+    /// when the call is unavailable.
+    public static func topology() -> [DisplaySpaces] {
+        let cid = SLSMainConnectionID()
+        guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return [] }
+        return raw.compactMap { d in
+            guard let uuid = d["Display Identifier"] as? String else { return nil }
+            let entries = (d["Spaces"] as? [[String: Any]] ?? []).compactMap { space -> DisplaySpaces.Entry? in
+                guard let id = ((space["id64"] as? NSNumber) ?? (space["id"] as? NSNumber))?.uint64Value else { return nil }
+                return .init(id: id, fullscreen: SLSSpaceGetType(cid, id) != 0)
+            }
+            return DisplaySpaces(uuid: uuid, spaces: entries, current: SLSManagedDisplayGetCurrentSpace(cid, uuid as CFString))
+        }
+    }
+
     public static func desktopCount() -> Int {
         let cid = SLSMainConnectionID()
         guard let raw = SLSCopyManagedDisplaySpaces(cid) as? [[String: Any]] else { return 0 }

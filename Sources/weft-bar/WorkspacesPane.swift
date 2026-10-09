@@ -4,13 +4,16 @@ import WeftCore
 import WeftIPC
 import WeftPlatform
 
-// The Workspaces pane: weft's workspaces drawn on this Mac's real displays.
+// The Workspaces pane: your macOS desktops — each one a workspace — drawn on
+// this Mac's real displays (docs/NATIVE.md, "Settings, Setup, bar").
 //
-// It is built around a picture because the model is about places — which
-// display shows what, where the hidden windows go, which apps land where —
-// and a list of rows could only describe that. Everything here edits the same
-// `[[space]]` and `[[rule]]` blocks the file holds, through `ConfigStore`, so
-// comments and anything the pane does not understand survive untouched.
+// The desktops themselves are macOS's: which exist, their order and their
+// display come from the WindowServer, and are changed in Mission Control.
+// What the pane edits is weft's part of each — its label, its layout, the
+// apps that open there — through the same `[[space]]` and `[[rule]]` blocks
+// the file holds, via `ConfigStore`, so comments and anything the pane does
+// not understand survive untouched. `[[space]]` blocks label desktops by
+// number: the first names desktop 1.
 //
 // Motion is springs on state changes only; nothing animates while the pane
 // sits still, so it costs nothing to leave open.
@@ -27,65 +30,22 @@ struct CanvasDisplay: Identifiable, Equatable {
     var isBuiltIn: Bool = false
     /// Global, top-left origin, in points.
     var frame: CGRect
-    /// What `display = …` should say to mean this display. What the display
-    /// *is* rather than where it sits: "built-in" for the Mac's own screen,
-    /// "external" for the only other one, then "main", its name when no other
-    /// display shares it, else its number. "main" follows the menu bar, so it
-    /// is never written for a laptop screen: moving the menu bar to a monitor
-    /// would move every workspace pinned there with it.
-    var pinValue: String
 }
 
 enum DisplayCatalog {
     static func current() -> [CanvasDisplay] {
         let identities = SpaceControl.displayIdentities()
-        var nameCount: [String: Int] = [:]
-        for i in identities { nameCount[i.name, default: 0] += 1 }
-        let hasBuiltIn = identities.contains { $0.isBuiltIn }
-        let externals = identities.filter { !$0.isBuiltIn }.count
         return SpaceControl.displayLayout().enumerated().map { i, d in
             let identity = identities.first { $0.uuid == d.uuid }
-            let name = identity?.name.isEmpty == false ? identity!.name : "Display \(i + 1)"
-            let builtIn = identity?.isBuiltIn ?? false
-            let pin: String
-            if builtIn {
-                pin = "built-in"
-            } else if hasBuiltIn, externals == 1 {
-                pin = "external"
-            } else if identity?.isMain == true {
-                pin = "main"
-            } else {
-                pin = nameCount[name] == 1 ? name : "\(i + 1)"
-            }
             return CanvasDisplay(
                 id: d.uuid,
                 index: i + 1,
-                name: name,
+                name: identity?.name.isEmpty == false ? identity!.name : "Display \(i + 1)",
                 isMain: identity?.isMain ?? false,
-                isBuiltIn: builtIn,
-                frame: CGRect(x: d.frame.x, y: d.frame.y, width: d.frame.width, height: d.frame.height),
-                pinValue: pin
+                isBuiltIn: identity?.isBuiltIn ?? false,
+                frame: CGRect(x: d.frame.x, y: d.frame.y, width: d.frame.width, height: d.frame.height)
             )
         }
-    }
-
-    /// Which connected display a `display = …` value means, resolved the way
-    /// weftd resolves it.
-    static func resolve(_ value: String, in displays: [CanvasDisplay]) -> CanvasDisplay? {
-        guard !value.isEmpty else { return nil }
-        let ids = displays.map { DisplayIdentity(uuid: $0.id, name: $0.name, isMain: $0.isMain, isBuiltIn: $0.isBuiltIn) }
-        let uuid = resolvePin(DisplayPin(value), among: ids)
-        return displays.first { $0.id == uuid }
-    }
-
-    /// What to write for pinning `row` to `display`: the file's own value when
-    /// it already names that display, else the catalog's. Picking the display
-    /// a workspace was already on turned `display = "main"` into
-    /// `display = "built-in"` — the same screen today, a different rule the
-    /// day a monitor takes the menu bar, and not what the user wrote.
-    static func pinValue(_ display: CanvasDisplay, for row: SpaceRow, in displays: [CanvasDisplay]) -> String {
-        let written = row.origin?.string("display") ?? ""
-        return resolve(written, in: displays)?.id == display.id ? written : display.pinValue
     }
 }
 
@@ -147,46 +107,47 @@ struct WorkspacesPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var health: EngineHealth
     @SwiftUI.State private var displays = DisplayCatalog.current()
-    @SwiftUI.State private var selection: SpaceRow.ID?
+    @SwiftUI.State private var desktops = Desktops.current()
+    /// The desktop number the inspector shows.
+    @SwiftUI.State private var selection: Int?
     @Namespace private var cards
 
     private var spring: Animation { .spring(response: 0.38, dampingFraction: 0.82) }
+
+    /// Displays in numbering order: main first, then west to east — the
+    /// order the cards and numbers read in.
+    private var numbered: [CanvasDisplay] {
+        displays.sorted { a, b in
+            if a.isMain != b.isMain { return a.isMain }
+            return a.frame.minX < b.frame.minX
+        }
+    }
+
+    private var desktopCount: Int { desktops.values.flatMap { $0 }.filter { !$0.fullscreen }.count }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 header
-                ExtraDesktopsCard()
-                DisplayCanvas(
-                    displays: displays,
-                    spaces: store.spaces,
-                    status: health.workspaces,
-                    running: health.running,
-                    onPin: { label, display in pin(label, to: display) }
-                )
-                .frame(height: 250)
+                WorkspaceWarnings()
+                DisplayCanvas(displays: displays, desktops: desktops, label: label(of:), running: health.running)
+                    .frame(height: 230)
 
-                cardsSection
+                ForEach(numbered) { display in
+                    displaySection(display)
+                }
+                waitingSection
 
-                if let id = selection, let index = store.spaces.firstIndex(where: { $0.id == id }) {
+                if let n = selection, n <= desktopCount {
                     WorkspaceInspector(
                         store: store,
-                        row: store.spaces[index],
-                        number: index + 1,
-                        displays: displays,
-                        engineRunning: health.running,
-                        onRemove: {
-                            withAnimation(spring) {
-                                selection = nil
-                                store.removeSpace(id)
-                            }
-                        }
+                        number: n,
+                        label: label(of: n),
+                        engineRunning: health.running
                     )
-                    .id(id)
+                    .id(n)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-
-                WorkspaceWarnings(displays: displays, status: health.workspaces)
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 22)
@@ -195,13 +156,21 @@ struct WorkspacesPane: View {
         }
         .animation(spring, value: store.spaces)
         .animation(spring, value: selection)
-        .onReceive(NotificationCenter.default.publisher(
-            for: NSApplication.didChangeScreenParametersNotification
-        )) { _ in
-            withAnimation(spring) { displays = DisplayCatalog.current() }
+        .animation(spring, value: desktops)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            withAnimation(spring) {
+                displays = DisplayCatalog.current()
+                desktops = Desktops.current()
+            }
         }
+        // Switching, adding or removing a desktop in Mission Control.
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)) { _ in
+            withAnimation(spring) { desktops = Desktops.current() }
+        }
+        .onChange(of: health.liveWorkspaces) { _, _ in desktops = Desktops.current() }
         .onAppear {
-            if selection == nil { selection = store.spaces.first?.id }
+            desktops = Desktops.current()
+            if selection == nil { selection = desktopCount > 0 ? 1 : nil }
         }
     }
 
@@ -209,117 +178,124 @@ struct WorkspacesPane: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Workspaces").font(.system(size: 26, weight: .bold, design: .rounded))
-                Text("Instant, on every window, with System Integrity Protection left alone. "
-                    + "Drag a workspace onto a display to keep it there.")
+                Text("Each workspace is one of your macOS desktops, numbered as Mission Control shows them. "
+                    + "Add, remove and reorder desktops in Mission Control — weft follows.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             Button {
-                withAnimation(spring) {
-                    store.addSpace()
-                    selection = store.spaces.last?.id
-                }
+                Desktops.openMissionControl()
             } label: {
-                Label("Add Workspace", systemImage: "plus")
+                Label("Open Mission Control", systemImage: "rectangle.3.group")
             }
             .weftProminentButton()
         }
     }
 
-    private var cardsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("In order").font(.headline)
-                Text("— ⌥1, ⌥2, … count in this order. Drag to reorder.")
-                    .font(.callout)
+    /// The label desktop `n` goes by: its `[[space]]` label, or its number.
+    private func label(of n: Int) -> String {
+        n - 1 < store.spaces.count && !store.spaces[n - 1].label.isEmpty ? store.spaces[n - 1].label : "\(n)"
+    }
+
+    private func layout(of n: Int) -> String {
+        n - 1 < store.spaces.count ? store.layout(of: store.spaces[n - 1]) : store.defaultLayout
+    }
+
+    private func displaySection(_ display: CanvasDisplay) -> some View {
+        let spaces = desktops[display.id] ?? []
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: display.isBuiltIn ? "laptopcomputer" : "display")
                     .foregroundStyle(.secondary)
+                Text(display.name).font(.headline)
+                if numbered.count > 1, display.isMain {
+                    Text("main").font(.caption).foregroundStyle(.secondary)
+                }
             }
-            if store.spaces.isEmpty {
-                EmptyState(
-                    symbol: "rectangle.3.group",
-                    title: "Numbered workspaces",
-                    text: "With none named, ⌥1…⌥9 go to workspaces 1–9, each created the first "
-                        + "time you use it. Add one to give it a name, a layout, a display and apps."
-                )
+            if spaces.isEmpty {
+                Text("No desktops reported for this display.").font(.callout).foregroundStyle(.secondary)
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 176), spacing: 12)], spacing: 12) {
-                    ForEach(Array(store.spaces.enumerated()), id: \.element.id) { index, row in
-                        card(row, number: index + 1)
+                    ForEach(spaces) { desktop in
+                        if let n = desktop.number {
+                            card(n, desktop: desktop)
+                        } else {
+                            FullscreenCard()
+                        }
                     }
                 }
             }
         }
     }
 
-    private func card(_ row: SpaceRow, number: Int) -> some View {
-        let live = health.liveWorkspaces.first { $0.label == row.label }
-        return WorkspaceCard(
-            number: number,
-            row: row,
-            layout: store.layout(of: row),
-            apps: store.rules(for: row.label).map(AssignedApp.of),
-            pinnedTo: DisplayCatalog.resolve(row.display, in: displays)?.name
-                ?? (row.display.isEmpty ? nil : "\(row.display) (not connected)"),
-            showing: live?.current ?? false,
-            windows: live?.windows.count ?? 0,
-            selected: selection == row.id
+    private func card(_ n: Int, desktop: CanvasDesktop) -> some View {
+        let live = health.liveWorkspaces.first { $0.id == desktop.id }
+        return DesktopCard(
+            number: n,
+            label: label(of: n),
+            layout: layout(of: n),
+            apps: LiveApps.icons(for: live?.windows ?? []),
+            showing: desktop.current,
+            selected: selection == n
         )
-        .matchedGeometryEffect(id: row.id, in: cards)
+        .matchedGeometryEffect(id: n, in: cards)
+        .onTapGesture(count: 2) {
+            // Live mode: the editor doubles as a check. Settings follows to the
+            // desktop it switched to, so the result is behind it.
+            guard health.running else { return }
+            BarIPC.post("space focus \(n)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                NSApp.activate()
+                NSApp.keyWindow?.orderFrontRegardless()
+            }
+        }
         .onTapGesture {
-            withAnimation(spring) { selection = selection == row.id ? nil : row.id }
+            withAnimation(spring) { selection = selection == n ? nil : n }
         }
         // A tap gesture is invisible to VoiceOver and Full Keyboard Access:
         // without these a card could be read but never opened.
         .accessibilityAddTraits(.isButton)
         .accessibilityAction {
-            withAnimation(spring) { selection = selection == row.id ? nil : row.id }
+            withAnimation(spring) { selection = selection == n ? nil : n }
         }
-        .draggable(row.label)
-        .dropDestination(for: String.self) { labels, _ in
-            guard let label = labels.first,
-                  let moving = store.spaces.first(where: { $0.label == label })
-            else { return false }
-            withAnimation(spring) { store.moveSpace(moving.id, before: row.id) }
-            return true
-        }
+        .help(health.running ? "Click to edit, double-click to switch to it" : "Click to edit")
     }
 
-    private func pin(_ label: String, to display: CanvasDisplay) {
-        guard let row = store.spaces.first(where: { $0.label == label }) else { return }
-        withAnimation(spring) {
-            store.pinSpace(row.id, to: DisplayCatalog.pinValue(display, for: row, in: displays))
-            selection = row.id
+    /// Labels in weft.toml past the last desktop: they wait for one.
+    @ViewBuilder private var waitingSection: some View {
+        let waiting = Array(store.spaces.enumerated()).filter { $0.offset >= desktopCount }
+        if !waiting.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Waiting for a desktop").font(.headline)
+                    Text("— weft cannot create desktops; add them in Mission Control.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 176), spacing: 12)], spacing: 12) {
+                    ForEach(waiting, id: \.element.id) { index, row in
+                        WaitingCard(number: index + 1, label: row.label.isEmpty ? "\(index + 1)" : row.label) {
+                            withAnimation(spring) { store.removeSpace(row.id) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 // MARK: - The display map
 
-/// The displays as they are arranged, to scale, each showing the workspace
-/// on it now and the ones pinned to it. A drop target: a workspace dropped
-/// on a display is pinned there.
+/// The displays as they are arranged, to scale, each with its desktops in
+/// Mission Control order: numbered, the one showing lit, fullscreen spaces
+/// greyed with no number.
 private struct DisplayCanvas: View {
     let displays: [CanvasDisplay]
-    let spaces: [SpaceRow]
-    let status: WorkspacesStatus?
+    let desktops: [String: [CanvasDesktop]]
+    let label: (Int) -> String
     let running: Bool
-    let onPin: (String, CanvasDisplay) -> Void
-
-    private func tile(_ d: CanvasDisplay, compact: Bool) -> DisplayTile {
-        let pinned: [String] = spaces
-            .filter { DisplayCatalog.resolve($0.display, in: displays)?.id == d.id }
-            .map(\.label)
-        return DisplayTile(
-            display: d,
-            live: status?.displays.first { $0.uuid == d.id },
-            pinned: pinned,
-            multiple: displays.count > 1,
-            compact: compact,
-            running: running,
-            onPin: { onPin($0, d) }
-        )
-    }
 
     /// How the displays' global frames map into the canvas: one scale, and
     /// the offset that centres the arrangement.
@@ -359,12 +335,14 @@ private struct DisplayCanvas: View {
             let placement = Placement(displays, in: geo.size)
             ZStack(alignment: .topLeading) {
                 ForEach(displays) { d in
-                    // A laptop screen next to a 4K one is drawn a few dozen
-                    // points tall, and its name, workspace and pins no
-                    // longer fit in their own places.
-                    tile(d, compact: placement.size(of: d).height < 110)
-                        .frame(width: placement.size(of: d).width, height: placement.size(of: d).height)
-                        .position(placement.center(of: d))
+                    DisplayTile(
+                        display: d,
+                        desktops: desktops[d.id] ?? [],
+                        label: label,
+                        compact: placement.size(of: d).height < 110
+                    )
+                    .frame(width: placement.size(of: d).width, height: placement.size(of: d).height)
+                    .position(placement.center(of: d))
                 }
             }
         }
@@ -378,83 +356,29 @@ private struct DisplayCanvas: View {
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Your displays, arranged as they are")
+        .accessibilityLabel("Your displays and their desktops, arranged as they are")
     }
 }
 
 private struct DisplayTile: View {
     let display: CanvasDisplay
-    let live: WorkspacesStatus.Display?
-    let pinned: [String]
-    let multiple: Bool
-    /// Too small for the name along the top: everything goes in one
-    /// centred column, smaller.
+    let desktops: [CanvasDesktop]
+    let label: (Int) -> String
+    /// Too small for the name along the top: chips only, smaller.
     let compact: Bool
-    let running: Bool
-    let onPin: (String) -> Void
-    @SwiftUI.State private var targeted = false
-    @SwiftUI.State private var hovering = false
 
-    private var corner: Corner? { live?.parkCorner.flatMap(Corner.init(rawValue:)) }
+    private var showing: CanvasDesktop? { desktops.first(where: \.current) }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         ZStack {
             Wallpaper()
-            // Two tiles, faintly: a desktop, not an empty rectangle.
-            HStack(spacing: 4) {
-                RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.12))
-                VStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.10))
-                    RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.08))
-                }
-            }
-            .padding(EdgeInsets(top: 13, leading: 6, bottom: 6, trailing: 6))
             VStack(spacing: 0) {
                 Rectangle().fill(Color.black.opacity(0.3)).frame(height: 7)
                 Spacer(minLength: 0)
             }
-            VStack(spacing: compact ? 3 : 6) {
-                Spacer(minLength: 0)
-                if compact {
-                    HStack(spacing: 3) {
-                        if live?.paused == true {
-                            Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
-                                .help("Another macOS desktop or a fullscreen app is showing here. weft picks up again when you come back.")
-                        }
-                        Text(display.name)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .font(.system(size: 9, weight: .semibold))
-                }
-                if let showing = live?.showing, running {
-                    Text(showing)
-                        .font(.system(size: compact ? 13 : 17, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .contentTransition(.opacity)
-                        .padding(.horizontal, compact ? 8 : 12)
-                        .padding(.vertical, compact ? 2 : 5)
-                        .background(Capsule().fill(.black.opacity(0.28)))
-                }
-                if !pinned.isEmpty {
-                    HStack(spacing: 3) {
-                        Image(systemName: "pin.fill").font(.system(size: compact ? 7 : 8))
-                        Text(pinned.joined(separator: compact ? "·" : " · ")).lineLimit(1)
-                    }
-                    .font(.system(size: compact ? 9 : 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .minimumScaleFactor(0.7)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, compact ? 10 : 6)
-            .padding(.vertical, 6)
-            if !compact {
-                VStack {
+            VStack(spacing: compact ? 4 : 8) {
+                if !compact {
                     HStack {
                         Text(display.name)
                             .font(.system(size: 10, weight: .semibold))
@@ -464,91 +388,74 @@ private struct DisplayTile: View {
                             .padding(.vertical, 3)
                             .background(Capsule().fill(.black.opacity(0.25)))
                         Spacer(minLength: 0)
-                        if live?.paused == true {
-                            Label("Paused", systemImage: "pause.circle.fill")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(.black.opacity(0.35)))
-                                .help("Another macOS desktop or a fullscreen app is showing here. weft picks up again when you come back.")
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.top, 11)
-                .padding(.horizontal, 7)
-            }
-            if let corner {
-                ParkMarker(corner: corner)
-            } else if multiple, live != nil {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .padding(6)
-                            .help("Every corner of this display touches another one. Its hidden windows are parked at another display's corner.")
                     }
                 }
+                Spacer(minLength: 0)
+                if let n = showing?.number {
+                    Text(label(n))
+                        .font(.system(size: compact ? 12 : 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .contentTransition(.opacity)
+                        .padding(.horizontal, compact ? 8 : 12)
+                        .padding(.vertical, compact ? 2 : 4)
+                        .background(Capsule().fill(.black.opacity(0.28)))
+                } else if showing?.fullscreen == true {
+                    Label("Full screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: compact ? 10 : 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                HStack(spacing: compact ? 3 : 4) {
+                    ForEach(desktops) { d in
+                        DesktopChip(desktop: d, compact: compact)
+                    }
+                }
+                Spacer(minLength: 0)
             }
+            .padding(.top, compact ? 10 : 11)
+            .padding(.bottom, 6)
+            .padding(.horizontal, 7)
         }
         .clipShape(shape)
-        .overlay(
-            shape.stroke(
-                targeted ? Color.weft : Color.white.opacity(hovering ? 0.35 : 0.16),
-                lineWidth: targeted ? 3 : 1
-            )
-        )
-        .shadow(color: .black.opacity(targeted ? 0.35 : 0.18), radius: targeted ? 14 : 6, y: 3)
-        .scaleEffect(targeted ? 1.03 : 1)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: targeted)
-        .animation(.easeOut(duration: 0.15), value: hovering)
-        .onHover { hovering = $0 }
-        .dropDestination(for: String.self) { labels, _ in
-            guard let label = labels.first else { return false }
-            onPin(label)
-            return true
-        } isTargeted: { targeted = $0 }
-        .accessibilityLabel("\(display.name)\(live?.showing.map { ", showing \($0)" } ?? "")")
+        .overlay(shape.stroke(Color.white.opacity(0.16), lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+        .accessibilityLabel("\(display.name)\(showing?.number.map { ", showing \(label($0))" } ?? "")")
     }
 }
 
-/// A small triangle in the corner where this display's hidden windows go.
-private struct ParkMarker: View {
-    let corner: Corner
+/// One space in a display tile: a desktop's number, or a greyed fullscreen
+/// space with none.
+private struct DesktopChip: View {
+    let desktop: CanvasDesktop
+    let compact: Bool
 
     var body: some View {
-        let top = corner == .topLeft || corner == .topRight
-        let left = corner == .topLeft || corner == .bottomLeft
-        VStack {
-            if !top { Spacer() }
-            HStack {
-                if !left { Spacer() }
-                Image(systemName: "rectangle.stack")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(5)
-                    .help("Hidden windows wait in this corner")
-                if left { Spacer() }
+        Group {
+            if let n = desktop.number {
+                Text("\(n)").font(.system(size: compact ? 9 : 11, weight: .bold, design: .rounded))
+            } else {
+                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: compact ? 7 : 8, weight: .bold))
             }
-            if top { Spacer() }
         }
+        .foregroundStyle(desktop.current ? Color.black.opacity(0.8) : .white.opacity(desktop.fullscreen ? 0.45 : 0.85))
+        .frame(minWidth: compact ? 15 : 20, minHeight: compact ? 13 : 17)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(desktop.current ? Color.white.opacity(0.9) : .black.opacity(desktop.fullscreen ? 0.15 : 0.3))
+        )
+        .help(desktop.fullscreen ? "A fullscreen app — not a workspace" : "Desktop \(desktop.number ?? 0)")
     }
 }
 
-// MARK: - A workspace, as a card
+// MARK: - A desktop, as a card
 
-private struct WorkspaceCard: View {
+private struct DesktopCard: View {
     let number: Int
-    let row: SpaceRow
-    /// `row.layout`, or the default when it has none of its own.
+    let label: String
     let layout: String
-    let apps: [AssignedApp]
-    let pinnedTo: String?
+    let apps: [LiveApps.App]
     let showing: Bool
-    let windows: Int
     let selected: Bool
     @SwiftUI.State private var hovering = false
 
@@ -562,7 +469,7 @@ private struct WorkspaceCard: View {
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(selected ? Color.weft : Color.weft.opacity(0.14)))
-                Text(row.label.isEmpty ? "Untitled" : row.label)
+                Text(label)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -571,50 +478,35 @@ private struct WorkspaceCard: View {
                     .help(layout == "float" ? "Floating" : "Tiling")
             }
             HStack(spacing: -7) {
-                ForEach(apps.prefix(5)) { app in
+                ForEach(apps.prefix(6)) { app in
                     Image(nsImage: app.icon)
                         .resizable()
                         .frame(width: 24, height: 24)
                         .shadow(color: .black.opacity(0.15), radius: 1.5, y: 1)
                         .help(app.name)
                 }
-                if apps.count > 5 {
-                    Text("+\(apps.count - 5)")
+                if apps.count > 6 {
+                    Text("+\(apps.count - 6)")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.leading, 12)
                 }
                 if apps.isEmpty {
-                    Text("No apps")
+                    Text("Empty")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 0)
-                if windows > 0 {
-                    Text("\(windows) open")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .contentTransition(.numericText())
-                }
             }
             .frame(height: 24)
-            if let pinnedTo {
-                Label(pinnedTo, systemImage: "pin.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
         .weftGlass(shape, tint: selected ? Color.weft.opacity(0.16) : nil, interactive: true)
         .overlay {
             if showing {
                 shape.stroke(Color.weft, lineWidth: 2)
                     .shadow(color: Color.weft.opacity(0.6), radius: 6)
-                    .phaseAnimator([0.55, 1.0]) { view, phase in
-                        view.opacity(phase)
-                    } animation: { _ in .easeInOut(duration: 1.4) }
             } else if selected {
                 shape.stroke(Color.weft.opacity(0.7), lineWidth: 1.5)
             }
@@ -625,8 +517,61 @@ private struct WorkspaceCard: View {
         .onHover { hovering = $0 }
         .contentShape(shape)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("Desktop \(number), \(label)\(showing ? ", showing" : "")")
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .help(showing ? "Showing now" : "")
+    }
+}
+
+/// A fullscreen or Split View space: drawn where Mission Control has it,
+/// greyed, with no number, because it is not a workspace.
+private struct FullscreenCard: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+            Text("Fullscreen app").font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(.tertiary)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+        .background(shape.fill(Color.primary.opacity(0.03)))
+        .overlay(shape.stroke(Color.primary.opacity(0.08), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        .help("A fullscreen app's space. It has no number and weft does not tile it.")
+    }
+}
+
+/// A label in weft.toml with no desktop at its number yet.
+private struct WaitingCard: View {
+    let number: Int
+    let label: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(number <= 9 ? "⌥\(number)" : "\(number)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                Text(label).font(.system(size: 15, weight: .semibold, design: .rounded)).lineLimit(1)
+                Spacer(minLength: 0)
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .help("Remove this label")
+            }
+            .foregroundStyle(.secondary)
+            Button("Open Mission Control") { Desktops.openMissionControl() }
+                .weftGlassButton()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+        .background(shape.fill(Color.primary.opacity(0.03)))
+        .overlay(shape.stroke(Color.primary.opacity(0.08), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
     }
 }
 
@@ -634,33 +579,37 @@ private struct WorkspaceCard: View {
 
 private struct WorkspaceInspector: View {
     @ObservedObject var store: ConfigStore
-    let row: SpaceRow
     let number: Int
-    let displays: [CanvasDisplay]
+    let label: String
     let engineRunning: Bool
-    let onRemove: () -> Void
     @SwiftUI.State private var name: String
 
-    init(
-        store: ConfigStore, row: SpaceRow, number: Int, displays: [CanvasDisplay],
-        engineRunning: Bool, onRemove: @escaping () -> Void
-    ) {
+    init(store: ConfigStore, number: Int, label: String, engineRunning: Bool) {
         self.store = store
-        self.row = row
         self.number = number
-        self.displays = displays
+        self.label = label
         self.engineRunning = engineRunning
-        self.onRemove = onRemove
-        _name = State(initialValue: row.label)
+        _name = State(initialValue: label)
+    }
+
+    /// The `[[space]]` row for this desktop, made (with the rows before it,
+    /// labelled by number) the first time something is set on it.
+    private func row() -> SpaceRow.ID { store.spaceRow(number: number) }
+
+    private var layout: String {
+        number - 1 < store.spaces.count ? store.layout(of: store.spaces[number - 1]) : store.defaultLayout
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
+                Text("Desktop \(number)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
                 TextField("Name", text: $name)
                     .textFieldStyle(.plain)
                     .font(.system(size: 22, weight: .bold, design: .rounded))
-                    .onSubmit { store.renameSpace(row.id, to: name) }
+                    .onSubmit { store.renameSpace(row(), to: name) }
                     // A plain field sizes itself for body text; without this a
                     // title-sized name is drawn half cut off.
                     .frame(maxWidth: 320, minHeight: 34)
@@ -669,26 +618,21 @@ private struct WorkspaceInspector: View {
                 Spacer()
                 if engineRunning {
                     Button {
-                        BarIPC.post("space focus \(row.label)")
+                        BarIPC.post("space focus \(number)")
                     } label: {
                         Label("Show Now", systemImage: "eye")
                     }
                     .weftGlassButton()
-                    .help("Switch to this workspace")
+                    .help("Switch to this desktop")
                 }
-                Button(role: .destructive, action: onRemove) {
-                    Image(systemName: "trash")
-                }
-                .weftGlassButton()
-                .help("Remove this workspace. Windows in it stay open and join the one showing.")
             }
 
             HStack(alignment: .top, spacing: 22) {
                 VStack(alignment: .leading, spacing: 10) {
                     FieldTitle("Layout")
                     Picker("Layout", selection: Binding(
-                        get: { store.layout(of: row) },
-                        set: { store.setLayout(row.id, to: $0) }
+                        get: { layout },
+                        set: { store.setLayout(row(), to: $0) }
                     )) {
                         Label("Tiling", systemImage: "rectangle.split.2x1").tag("bsp")
                         Label("Floating", systemImage: "square.on.square").tag("float")
@@ -696,7 +640,7 @@ private struct WorkspaceInspector: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     DesktopPreview(
-                        layout: store.layout(of: row),
+                        layout: layout,
                         inner: store.innerGap,
                         outer: store.outerTop,
                         bordersOn: store.bordersEnabled,
@@ -710,43 +654,15 @@ private struct WorkspaceInspector: View {
                 }
 
                 VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        FieldTitle("Display")
-                        // Selected by the display the value means, not by the
-                        // string: "main", "1" or a name written by hand shows
-                        // as the display it resolves to.
-                        let resolved = DisplayCatalog.resolve(row.display, in: displays)
-                        Picker("Display", selection: Binding(
-                            get: { resolved?.pinValue ?? row.display },
-                            set: { value in
-                                let picked = displays.first { $0.pinValue == value }
-                                store.pinSpace(row.id, to: picked.map {
-                                    DisplayCatalog.pinValue($0, for: row, in: displays)
-                                } ?? value)
-                            }
-                        )) {
-                            Text("Whichever display I'm on").tag("")
-                            ForEach(displays) { d in
-                                Text(d.isMain ? "\(d.name) (main)" : d.name).tag(d.pinValue)
-                            }
-                            if !row.display.isEmpty, resolved == nil {
-                                Text("\(row.display) (as written)").tag(row.display)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: 280)
-                    }
-
-                    AppsEditor(store: store, label: row.label)
-
-                    ShortcutsSummary(store: store, label: row.label, number: number)
+                    AppsEditor(store: store, label: label, ensure: { _ = row() })
+                    ShortcutsSummary(store: store, label: label, number: number)
                 }
                 Spacer(minLength: 0)
             }
         }
         .padding(20)
         .weftGlass(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onChange(of: row.label) { _, new in name = new }
+        .onChange(of: label) { _, new in name = new }
     }
 }
 
@@ -766,13 +682,15 @@ private struct FieldTitle: View {
 private struct AppsEditor: View {
     @ObservedObject var store: ConfigStore
     let label: String
+    /// Make sure the desktop has a `[[space]]` row before a rule names it.
+    var ensure: () -> Void = {}
 
     var body: some View {
         let apps = store.rules(for: label).map(AssignedApp.of)
         VStack(alignment: .leading, spacing: 8) {
             FieldTitle("Opens here")
             if apps.isEmpty {
-                Text("Apps you add open in this workspace, wherever you are.")
+                Text("Apps you add open on this desktop, wherever you are.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -797,6 +715,7 @@ private struct AppsEditor: View {
                     .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
                 ForEach(running, id: \.processIdentifier) { app in
                     Button(app.localizedName ?? app.bundleIdentifier ?? "App") {
+                        ensure()
                         store.assignApp(name: app.localizedName ?? "", bundleID: app.bundleIdentifier, to: label)
                     }
                 }
@@ -817,6 +736,7 @@ private struct AppsEditor: View {
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.prompt = "Add"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        ensure()
         let bundle = Bundle(url: url)
         store.assignApp(
             name: FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: ""),
@@ -853,20 +773,56 @@ private struct ShortcutsSummary: View {
 
 // MARK: - Warnings, where they apply
 
+/// What could make desktops behave other than this pane says, each with the
+/// way to fix it (NATIVE.md, "Settings, Setup, bar").
 private struct WorkspaceWarnings: View {
-    let displays: [CanvasDisplay]
-    let status: WorkspacesStatus?
     @SwiftUI.State private var tiling = SystemChecks.macOSTilingEnabled()
     @SwiftUI.State private var stageManager = SystemChecks.stageManagerEnabled()
+    @SwiftUI.State private var rearranges = SystemChecks.rearrangesSpacesByUse()
+    @SwiftUI.State private var separate = SystemChecks.displaysHaveSeparateSpaces()
+    @SwiftUI.State private var routes = NativeRoutesCache().load(build: NativeSelfTest.macOSBuild)
 
     var body: some View {
-        // Extra macOS desktops have their own card at the top of the pane.
-        let boxedIn = displays.count > 1
-            ? (status?.displays.filter { $0.parkCorner == nil } ?? []) : []
-        let anything = !boxedIn.isEmpty || !tiling.isEmpty || stageManager
+        let cannotMove = routes.map { $0[.move].state == .failed || $0[.symbols].state == .failed } ?? false
+        let cannotSwitch = routes.map { $0[.switchDesktop].state == .failed && $0[.dockSwipe].state == .failed } ?? false
+        let anything = rearranges || !separate || stageManager || !tiling.isEmpty || cannotMove || cannotSwitch
         if anything {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Worth knowing").font(.headline)
+                if rearranges {
+                    WarningRow(
+                        symbol: "arrow.left.arrow.right", tint: .orange,
+                        title: "macOS rearranges your desktops",
+                        text: "“Automatically rearrange Spaces based on most recent use” is on, so desktop numbers — "
+                            + "and ⌥1, ⌥2, … — change as you work. Turn it off in Desktop & Dock › Mission Control.",
+                        action: ("Open Desktop & Dock", SystemChecks.desktopAndDockURL)
+                    )
+                }
+                if cannotMove {
+                    WarningRow(
+                        symbol: "xmark.octagon", tint: .red,
+                        title: "This macOS does not let weft move windows between desktops",
+                        text: "Sending a window to a desktop and rules that place apps are off; tiling works. "
+                            + "`weftctl doctor` says why.",
+                        action: nil
+                    )
+                }
+                if cannotSwitch {
+                    WarningRow(
+                        symbol: "xmark.octagon", tint: .red,
+                        title: "This macOS does not let weft switch desktops",
+                        text: "Use ⌃← and ⌃→, or swipe. `weftctl doctor` says why.",
+                        action: nil
+                    )
+                }
+                if !separate {
+                    WarningRow(
+                        symbol: "display.2", tint: .orange,
+                        title: "“Displays have separate Spaces” is off",
+                        text: "Your displays share one set of desktops. weft works, but each desktop spans every "
+                            + "display. Turning it on needs a log out.",
+                        action: ("Open Desktop & Dock", SystemChecks.desktopAndDockURL)
+                    )
+                }
                 if stageManager {
                     WarningRow(
                         symbol: "rectangle.3.offgrid", tint: .orange,
@@ -884,24 +840,19 @@ private struct WorkspaceWarnings: View {
                         action: ("Open Desktop & Dock", SystemChecks.desktopAndDockURL)
                     )
                 }
-                ForEach(boxedIn, id: \.uuid) { d in
-                    WarningRow(
-                        symbol: "exclamationmark.triangle", tint: .orange,
-                        title: "\(d.name ?? "Display \(d.index)") has no free corner",
-                        text: "Every corner touches another display, so its hidden windows wait at another "
-                            + "display's corner. Arranging the displays so one corner is clear avoids that.",
-                        action: nil
-                    )
-                }
             }
             .transition(.opacity)
+        }
+        EmptyView()
             .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
                 // The same cadence the rest of the window already refreshes
                 // at, and only while this pane is open.
                 tiling = SystemChecks.macOSTilingEnabled()
                 stageManager = SystemChecks.stageManagerEnabled()
+                rearranges = SystemChecks.rearrangesSpacesByUse()
+                separate = SystemChecks.displaysHaveSeparateSpaces()
+                routes = NativeRoutesCache().load(build: NativeSelfTest.macOSBuild)
             }
-        }
     }
 }
 

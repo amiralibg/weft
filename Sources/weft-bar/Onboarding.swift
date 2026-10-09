@@ -1338,27 +1338,30 @@ private struct WorkspacesIntroPage: View {
     var body: some View {
         StepLayout(
             eyebrow: "Workspaces",
-            title: "One desktop, many workspaces.",
-            detail: "A workspace is a named set of windows with a layout of its own. Switching is instant, and works for every window, even a terminal with no title bar. Full-screen apps and your other macOS desktops keep working."
+            title: "Your desktops are your workspaces.",
+            detail: "Each macOS desktop is a workspace with a layout of its own. weft switches between them instantly and sends any window to any desktop, even a terminal with no title bar. Mission Control, swipes and full-screen apps work as they always have."
         ) {
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 WorkspaceDemo()
-                    .frame(width: 440, height: 232)
+                    .frame(width: 440, height: 210)
                 HStack(spacing: 10) {
                     Hint(keys: "⌥1  ⌥2  ⌥3", text: "Switch")
                     Hint(keys: "⌥⇧1", text: "Send a window")
                     Hint(symbol: "checkmark.shield", text: "SIP left alone")
                 }
+                DesktopCountCard()
+                    .frame(width: 560)
             }
         }
     }
 }
 
-/// Three workspaces on one desktop, switching every couple of seconds.
+/// Three desktops, switching every couple of seconds the way weft switches
+/// them: at once, with no slide.
 ///
-/// Runs only while this page is showing and Setup can be seen. Each switch is
-/// one spring: the outgoing windows shrink into the bottom-right corner, the
-/// incoming ones grow out of it, and the pill in the menu bar follows.
+/// Runs only while this page is showing and Setup can be seen. The incoming
+/// desktop's windows appear in place with a short fade, and the pill in the
+/// menu bar follows.
 private struct WorkspaceDemo: View {
     private struct DemoSet {
         let name: String
@@ -1387,22 +1390,15 @@ private struct WorkspaceDemo: View {
                         let here = i == showing
                         DemoWindow(symbol: sets[i].symbol, tint: sets[i].tint, main: slot == 0)
                             .frame(width: frame.width, height: frame.height)
-                            .scaleEffect(here ? 1 : 0.08, anchor: .bottomTrailing)
-                            .offset(
-                                x: here ? frame.minX : geo.size.width - frame.width - 2,
-                                y: here ? frame.minY : geo.size.height - frame.height - 2
-                            )
+                            .offset(x: frame.minX, y: frame.minY)
                             .opacity(here ? 1 : 0.0)
                             .zIndex(here ? 1 : 0)
-                            .animation(
-                                .spring(response: 0.6, dampingFraction: 0.82).delay(here ? 0.05 * Double(slot) : 0),
-                                value: showing
-                            )
+                            .animation(.easeOut(duration: 0.12), value: showing)
                     }
                 }
                 HStack(spacing: 6) {
                     ForEach(sets.indices, id: \.self) { i in
-                        Text("⌥\(i + 1) \(sets[i].name)")
+                        Text("Desktop \(i + 1) · \(sets[i].name)")
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .foregroundStyle(i == showing ? .white : .white.opacity(0.6))
                             .padding(.horizontal, 8)
@@ -1433,7 +1429,7 @@ private struct WorkspaceDemo: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Three workspaces on one desktop, switching between each other")
+        .accessibilityLabel("Three desktops, each a workspace, switching between each other")
     }
 
     /// One big window on the left, two stacked on the right: weft's bsp.
@@ -2105,7 +2101,6 @@ private struct DonePage: View {
 
             VStack(spacing: 12) {
                 ConflictingMacOSSettings()
-                ExtraDesktopsCard()
             }
             .frame(maxWidth: 600)
             .arrive(after: 0.9)

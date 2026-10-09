@@ -339,20 +339,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        // One cheap WindowServer call, and the problem most likely to look
-        // like weft being broken: windows on another desktop just stop tiling.
-        let extraDesktops = DesktopCensus.extras().reduce(0) { $0 + $1.count - 1 }
-        if extraDesktops > 0 {
+        // Desktop numbers are Mission Control's order; this setting shuffles
+        // it as you work, and ⌥3 stops meaning one desktop.
+        if SystemChecks.rearrangesSpacesByUse() {
             let item = NSMenuItem(
-                title: extraDesktops == 1
-                    ? "Remove 1 extra macOS desktop…" : "Remove \(extraDesktops) extra macOS desktops…",
-                action: #selector(openDesktopsHelp), keyEquivalent: ""
+                title: "macOS reorders desktops by recent use — turn it off…",
+                action: #selector(openStageManagerSettings), keyEquivalent: ""
             )
             item.target = self
             item.image = NSImage(
                 systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil
             )
-            item.toolTip = "weft works on one desktop per display. Windows on the others aren't arranged."
+            item.toolTip = "Desktop & Dock › Mission Control › Automatically rearrange Spaces based on most recent use"
             menu.addItem(item)
             menu.addItem(.separator())
         }
@@ -400,12 +398,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             let item = NSMenuItem()
-            let sName = space.label.isEmpty ? "\(space.id)" : space.label
             // The workspace's own ordinal — what `space focus <n>` counts —
             // not its row, which grouping by display can move.
             let ordinal = (spaces.firstIndex { $0.label == space.label && $0.display == space.display } ?? 0) + 1
             item.view = SpaceRowView(space: space, displayIndex: ordinal, icons: icons) { [weak self] in
-                BarIPC.post("space focus \(sName)")
+                BarIPC.post("space focus \(ordinal)")
                 self?.state.refresh()
             }
             menu.addItem(item)
@@ -584,10 +581,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openWorkspacesGuide() {
         OnboardingWindowController.shared.showWorkspaces()
-    }
-
-    @objc private func openDesktopsHelp() {
-        ConfigEditorWindowController.shared.show(section: .workspaces)
     }
 
     @objc private func openStageManagerSettings() {

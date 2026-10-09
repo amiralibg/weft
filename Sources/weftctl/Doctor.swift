@@ -375,7 +375,7 @@ public enum Doctor {
                 print("    - Keybindings: \(keyCount)")
                 print("    - Window rules: \(validated.rules.count)")
                 print("    - Spaces configured: \(validated.spaces.count)")
-                let workspaces = reportWorkspaces(validated)
+                reportWorkspaces(validated)
 
                 if !reportHelper(
                     name: "JankyBorders", binary: "borders", found: bordersFound,

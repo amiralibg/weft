@@ -74,6 +74,13 @@ private func samples(_ param: ActionParam) -> [String] {
     #expect(ActionCatalog.identify("mode default").0.id == "mode.leave")
     #expect(ActionCatalog.identify("focus display east").0.id == "display.focus")
     #expect(ActionCatalog.identify("move display east --follow").1 == ["east", "follow"])
+    // Staying is move-window's default: a bare command stays, and only
+    // following is written out.
+    #expect(ActionCatalog.identify("space move-window 3").1 == ["3", "stay"])
+    #expect(ActionCatalog.identify("space move-window 3 --no-follow").1 == ["3", "stay"])
+    #expect(ActionCatalog.identify("space move-window 3 --follow").1 == ["3", "follow"])
+    #expect(ActionCatalog.action("space.move")!.command(["3", "stay"]) == "space move-window 3")
+    #expect(ActionCatalog.action("space.move")!.command(["3", "follow"]) == "space move-window 3 --follow")
     #expect(ActionCatalog.identify("exec open -a Terminal ~").0.id == "shell")
     // The tilde stays outside the quotes, where the shell expands it.
     #expect(ActionCatalog.identify("exec open ~/Downloads").1 == ["~/Downloads"])

@@ -78,7 +78,7 @@ public enum ActionParam: Equatable, Sendable {
         case .edge: return ["left", "right", "up", "down"]
         case .layout: return ["bsp", "float", "toggle"]
         case .splitAxis: return ["vertical", "horizontal"]
-        case .follow: return ["follow", "stay"]
+        case .follow: return ["stay", "follow"]
         default: return nil
         }
     }
@@ -241,23 +241,24 @@ public enum ActionCatalog {
 
         // Workspaces
         one("space.focus", .workspaces, "square.grid.2x2", "Go to a workspace",
-            "Show a workspace. It opens on its own display if it has one.", prefix: "space focus", .workspace) {
+            "Show that desktop, at once. One already showing on another display just takes focus.", prefix: "space focus", .workspace) {
             "go to \(ActionWords.workspace($0))"
         },
         fixed("space.recent", .workspaces, "arrow.uturn.backward", "Go back to the last workspace",
               "Flip between two workspaces.", command: "space focus recent", phrase: "go back to the last workspace"),
         ShortcutAction(
             id: "space.move", category: .workspaces, symbol: "rectangle.portrait.and.arrow.right",
-            title: "Send the window to a workspace", detail: "And go with it, or stay where you are.",
+            title: "Send the window to a workspace", detail: "Stay where you are, or go with it.",
             params: [.workspace, .follow],
-            command: { "space move-window \($0[0])" + ($0[1] == "stay" ? " --no-follow" : "") },
+            // Staying is the default (NATIVE.md), so only following is written.
+            command: { "space move-window \($0[0])" + ($0[1] == "follow" ? " --follow" : "") },
             read: { command in
                 var w = command.split(separator: " ").map(String.init)
                 guard w.count >= 3, w[0] == "space", w[1] == "move-window" else { return nil }
-                let stay = w.contains("--no-follow") || w.contains("no-follow")
+                let follow = w.contains("--follow") || w.contains("follow")
                 w.removeAll { ["--no-follow", "no-follow", "--follow", "follow"].contains($0) }
                 guard w.count == 3 else { return nil }
-                return [w[2], stay ? "stay" : "follow"]
+                return [w[2], follow ? "follow" : "stay"]
             },
             phrase: { "send the window to \(ActionWords.workspace($0[0]))" + ($0[1] == "stay" ? " and stay here" : " and go with it") }
         ),
