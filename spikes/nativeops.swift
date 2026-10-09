@@ -17,6 +17,7 @@
 //   ./nativeops axhidden              AX frame write to a window on a hidden desktop
 //   ./nativeops cross                 does the frame follow a cross-display move?
 //   ./nativeops batch                 five windows in one operation
+//   ./nativeops windows               real windows: id, app, desktops
 //   ./nativeops moveto <wid> <sid>    a real window to a space id, any display
 //   ./nativeops sticky                bridged AddWindowsToSpaces over every desktop
 //
@@ -531,6 +532,17 @@ case "exists" where args.count > 2:
     let sid = UInt64(args[2])!
     print("space \(sid): type \(SLSSpaceGetType(cid, sid)), in managed list: \(displays().flatMap(\.spaces).contains(sid))")
 case "attach": attach()
+case "windows":
+    // Real windows with their ids and desktops, for `moveto`.
+    for w in (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []) {
+        guard (w[kCGWindowLayer as String] as? Int) == 0,
+              let b = w[kCGWindowBounds as String] as? [String: Double],
+              (b["Width"] ?? 0) > 200, (b["Height"] ?? 0) > 200,
+              let wid = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+              !spaces(of: wid).isEmpty, (w[kCGWindowOwnerName as String] as? String) != "borders"
+        else { continue }
+        print("\(wid)\t\(w[kCGWindowOwnerName as String] ?? "?")\tdesktops \(spaces(of: wid))\t\(w[kCGWindowName as String] ?? "")")
+    }
 case "watch":
     // Swipe by hand while this runs: does IsAnimating ever go true, and when
     // does the current-space read change relative to it?
@@ -565,7 +577,7 @@ case "batch": batch()
 case "sticky": sticky()
 case "helper" where args.count > 3: runHelper(widFile: args[2], count: Int(args[3])!)
 default:
-    print("usage: nativeops list | create [keep] | destroy <sid> | switch <n> | animating | axhidden | cross | batch | sticky | moveto <wid> <sid> | watch | switch <n> showhide [stay]")
+    print("usage: nativeops list | create [keep] | destroy <sid> | switch <n> | animating | axhidden | cross | batch | sticky | windows | moveto <wid> <sid> | watch | switch <n> showhide [stay]")
     exit(2)
 }
 if !["switch", "animating", "helper"].contains(args.count > 1 ? args[1] : ""), currents() != before {
