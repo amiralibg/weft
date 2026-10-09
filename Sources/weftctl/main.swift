@@ -66,7 +66,6 @@ if ["--version", "-v", "version"].contains(args[0]) {
 ignoreSIGPIPE()
 
 // 1. Doctor command
-if args[0] == "__selftest-window" { LiveSelfTest.serveWindow() }
 if args[0] == "doctor" {
     if args.contains("--selftest") {
         exit(LiveSelfTest.run() ? 0 : 1)

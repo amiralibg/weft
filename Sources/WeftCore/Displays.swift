@@ -1,54 +1,10 @@
-// WeftCore/Displays.swift — where hidden windows go, and which display a
-// workspace is pinned to. Pure geometry and matching; no AppKit.
+// WeftCore/Displays.swift — which display a name means, and where 0.9.21
+// parked windows. Pure geometry and matching; no AppKit.
 
-/// A corner of a display, where a hidden workspace's windows are parked.
+/// A corner of a display, where 0.9.21 parked a hidden workspace's windows.
+/// Read back from its ledger at startup; nothing parks any more.
 public enum Corner: String, Sendable, Equatable, CaseIterable {
     case bottomRight, bottomLeft, topRight, topLeft
-}
-
-/// The overlap, in points², of two frames. Zero when they only touch.
-private func overlap(_ a: Frame, _ b: Frame) -> Double {
-    let w = min(a.x + a.width, b.x + b.width) - max(a.x, b.x)
-    let h = min(a.y + a.height, b.y + b.height) - max(a.y, b.y)
-    return w > 0 && h > 0 ? w * h : 0
-}
-
-/// The area a window parked at `corner` of `display` can cover: from the
-/// one point left on screen, outward by the display's own size — no window
-/// weft lays out is bigger than its display.
-func parkZone(_ corner: Corner, of display: Frame) -> Frame {
-    let right = display.x + display.width - 1
-    let bottom = display.y + display.height - 1
-    switch corner {
-    case .bottomRight:
-        return Frame(x: right, y: bottom, width: display.width, height: display.height)
-    case .bottomLeft:
-        return Frame(x: display.x - display.width + 1, y: bottom, width: display.width, height: display.height)
-    case .topRight:
-        return Frame(x: right, y: display.y - display.height + 1, width: display.width, height: display.height)
-    case .topLeft:
-        return Frame(
-            x: display.x - display.width + 1, y: display.y - display.height + 1,
-            width: display.width, height: display.height
-        )
-    }
-}
-
-/// The first corner of `display` a parked window can use without landing on
-/// another display, in the order bottom-right, bottom-left, top-right,
-/// top-left. Nil when every corner has a neighbour — a middle monitor with
-/// displays on both sides and above.
-///
-/// A window parked into a neighbour does not stay hidden: it shows up on the
-/// other monitor, and macOS may move it to that display's desktop.
-/// Bottom-right comes first because it is the corner S9 measured, and because
-/// Accessibility clamps parking toward negative x (S4).
-public func freeCorner(of display: Frame, among others: [Frame]) -> Corner? {
-    let neighbours = others.filter { $0 != display }
-    return Corner.allCases.first { corner in
-        let zone = parkZone(corner, of: display)
-        return !neighbours.contains { overlap(zone, $0) > 0 }
-    }
 }
 
 /// Where a window of `size` goes to be parked at `corner`: the window sits

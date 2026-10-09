@@ -1,14 +1,14 @@
-// WeftCore/Spaces.swift — weft's workspaces, on one macOS desktop per display.
+// WeftCore/Spaces.swift — weft's workspaces: one per macOS desktop.
 //
-// macOS owns its desktops and weft does not drive them: it cannot move a
-// window between them or switch between them without SIP off or simulated
-// input (spikes/RESULTS.md S8), and both break on macOS updates. So weft picks
-// one desktop per display — the *managed* desktop — and keeps its own
-// workspaces there, hiding and showing them by parking windows
-// (REDESIGN.md). Other desktops, and native fullscreen spaces, are left to
-// macOS entirely; weft pauses on a display while one of them is showing.
+// A workspace IS a desktop (docs/NATIVE.md). macOS owns which desktops exist,
+// their order and which display each is on, and which desktop every window is
+// on; weft owns each desktop's layout, its label and its focus history. weft
+// switches desktops and moves windows between them through SkyLight's bridged
+// operations, verified by read-back (WeftPlatform/Bridge.swift); nothing here
+// touches the Mac.
 //
-// Labels persist by ordinal (sids are NOT stable across reboot, DESIGN §5.3).
+// Identity in memory is the SpaceID. On disk it is (display uuid, position),
+// because SpaceIDs do not survive a logout. Labels attach by global number.
 // Switching a workspace between bsp and float preserves membership: float
 // remembers each window's real frame, and coming back out rebuilds a tree in
 // that order.
@@ -19,16 +19,59 @@ public enum LayoutKind: String, Codable, Sendable, Equatable {
 }
 
 /// One display as the WindowServer reports it: its desktops in Mission
-/// Control order (fullscreen spaces excluded) and the one showing now.
+/// Control order (fullscreen and Split View spaces excluded) and the space
+/// showing now, which is one of them or a fullscreen space.
 public struct DisplayDesktops: Sendable, Equatable {
     public var uuid: String
     public var desktops: [SpaceID]
     public var current: SpaceID
+    /// The display with the menu bar at rest. Its desktops are numbered first.
+    public var isMain: Bool
+    /// The display's left edge, in global coordinates: the others are
+    /// numbered west to east.
+    public var originX: Double
 
-    public init(uuid: String, desktops: [SpaceID], current: SpaceID) {
+    public init(uuid: String, desktops: [SpaceID], current: SpaceID, isMain: Bool = false, originX: Double = 0) {
         self.uuid = uuid
         self.desktops = desktops
         self.current = current
+        self.isMain = isMain
+        self.originX = originX
+    }
+}
+
+/// The displays in the order their desktops are numbered: the main display
+/// first, then the others west to east (NATIVE.md, "Numbering and labels").
+/// Mission Control reads the same way, so ⌥3 is the third desktop the user
+/// can see in the overview. With no display marked main, the first reported
+/// one is.
+public func numberingOrder(_ displays: [DisplayDesktops]) -> [DisplayDesktops] {
+    let main = displays.firstIndex(where: \.isMain) ?? displays.indices.first
+    guard let main else { return [] }
+    let rest = displays.enumerated().filter { $0.offset != main }
+        .sorted { $0.element.originX == $1.element.originX ? $0.offset < $1.offset : $0.element.originX < $1.element.originX }
+        .map(\.element)
+    return [displays[main]] + rest
+}
+
+/// Where a desktop is, as it survives a logout: its display, and its 1-based
+/// place among that display's desktops in Mission Control order. SpaceIDs are
+/// handed out afresh at login; this is not.
+public struct DesktopKey: Hashable, Sendable, Codable, CustomStringConvertible {
+    public var display: String
+    public var position: Int
+
+    public init(display: String, position: Int) {
+        self.display = display
+        self.position = position
+    }
+
+    /// "uuid#2", for a JSON object key.
+    public var description: String { "\(display)#\(position)" }
+
+    public init?(_ text: String) {
+        guard let hash = text.lastIndex(of: "#"), let n = Int(text[text.index(after: hash)...]) else { return nil }
+        self.init(display: String(text[..<hash]), position: n)
     }
 }
 
@@ -89,23 +132,18 @@ public func floatFromWindows(_ order: [WindowID], actuals: [WindowID: Frame], fo
     return FloatState(order: order, remembered: remembered, focus: order.contains(focus ?? 0) ? focus : order.first)
 }
 
-/// weft's own id for a workspace, handed out within a launch and never
-/// persisted.
+/// weft's own handle for a workspace, handed out within a launch and never
+/// persisted. One workspace per desktop, for as long as the desktop exists.
 ///
-/// A struct rather than `typealias WorkspaceID = UInt32`, and the reason is the
-/// seam this whole type exists to draw. macOS owns which *desktop* a window is
-/// on; weft owns which *workspace within that desktop*. Several places derive
-/// one from the other in the same expression — the layout holding a window is
-/// looked up and then used as the desktop to switch to — and with a bare
-/// integer every one of those compiles. `WindowID` is a `UInt32` too, so a bare
-/// alias would let a window id stand in for a workspace as well.
+/// A struct rather than a bare integer so that a window id (`UInt32` too) or
+/// a desktop id cannot stand in for one in an expression that compiles.
 ///
-/// Deliberately NOT `Codable`. Nothing outside the daemon has any use for one:
-/// `labels.json` and `layouts.json` are keyed by ordinal, and `query spaces`
-/// and `query bar-state` speak in desktop ids because that is what weft-bar and
-/// weftctl resolve against. Withholding the conformance means a workspace id
-/// put on the wire by accident is a build error rather than a number in the
-/// menu bar that decodes cleanly and means nothing.
+/// Deliberately NOT `Codable`. `labels.json` is keyed by number and
+/// `layouts.json` by `DesktopKey`, and `query spaces` and `query bar-state`
+/// speak in desktop ids, which is what weft-bar and weftctl resolve against.
+/// Withholding the conformance means a workspace id put on the wire by
+/// accident is a build error rather than a number that decodes and means
+/// nothing.
 public struct WorkspaceID: Hashable, Sendable, Comparable, CustomStringConvertible {
     public let raw: UInt32
 
@@ -116,20 +154,16 @@ public struct WorkspaceID: Hashable, Sendable, Comparable, CustomStringConvertib
     public var description: String { "ws\(raw)" }
 }
 
-/// A named set of windows with a layout. It lives on one display's managed
-/// desktop at a time — showing there, or hidden with its windows parked — and
-/// moves to another display's when it is shown there.
+/// One macOS desktop's layout and the windows on it.
 ///
-/// No `display` field. A workspace lives on one desktop and a desktop on one
-/// display, so the display is `SpaceState.displayBySpace[desktop]` — already
-/// the answer every screen-rect lookup goes through. Storing it here would be a
-/// second copy of a fact that has an owner, and the two would drift the first
-/// time a display was unplugged.
+/// No `display` field: macOS decides a desktop's display, and
+/// `SpaceState.displayBySpace` is where that answer lives.
 public struct Workspace: Sendable, Equatable {
     public var id: WorkspaceID
-    /// The name `space focus <label>` and `[[rule]] space = "..."` resolve to.
+    /// The name `space focus <label>` and `[[rule]] space = "..."` resolve to:
+    /// the label at this desktop's number, or the number itself.
     public var label: String
-    /// The managed desktop it lives on: the one its display tiles on.
+    /// The desktop it is. Never changes.
     public var desktop: SpaceID
     public var layout: SpaceLayout
     /// The kind the user asked for with `space layout <kind>`, as opposed to
@@ -139,16 +173,17 @@ public struct Workspace: Sendable, Equatable {
     /// the next restart all quietly undo the choice.
     public var overrideKind: LayoutKind?
     /// Members that are not laid out: floated by hand, unmanaged by a rule,
-    /// struck out as a quirk, or an app weft always floats. They belong to the
-    /// workspace all the same — hidden with it, shown with it, followed to it
-    /// by focus — and only the layout ignores them.
-    ///
-    /// Membership used to be the layout, so every one of these windows was in
-    /// no workspace at all and stayed on screen whichever workspace was
-    /// showing (REDESIGN.md, defect 3). Panels and popovers are deliberately
-    /// not here: a menu-bar extra's popover belongs to the menu bar, not to
-    /// whatever workspace was showing when it opened.
+    /// struck out as a quirk, or an app weft always floats. They are on this
+    /// desktop all the same, and focus follows them here; only the layout
+    /// ignores them. Panels and popovers are not here: a menu-bar extra's
+    /// popover belongs to the menu bar.
     public var loose: Set<WindowID>
+    /// The window last focused on this desktop, laid out or loose: what a
+    /// switch here focuses (NATIVE.md, "Switching").
+    public var lastFocused: WindowID?
+    /// Where the desktop was when last numbered, so its layout can be stashed
+    /// there if it goes away (`SpaceState.stash`).
+    public var keyHint: DesktopKey?
 
     public init(
         id: WorkspaceID,
@@ -156,7 +191,8 @@ public struct Workspace: Sendable, Equatable {
         desktop: SpaceID,
         layout: SpaceLayout,
         overrideKind: LayoutKind? = nil,
-        loose: Set<WindowID> = []
+        loose: Set<WindowID> = [],
+        lastFocused: WindowID? = nil
     ) {
         self.id = id
         self.label = label
@@ -164,10 +200,11 @@ public struct Workspace: Sendable, Equatable {
         self.layout = layout
         self.overrideKind = overrideKind
         self.loose = loose
+        self.lastFocused = lastFocused
     }
 
     /// Every window in the workspace: the laid-out ones in layout order, then
-    /// the loose ones by id. What hiding and showing a workspace acts on.
+    /// the loose ones by id.
     public var members: [WindowID] {
         let tiled = layout.windows
         let placed = Set(tiled)
@@ -177,77 +214,81 @@ public struct Workspace: Sendable, Equatable {
     public func contains(_ wid: WindowID) -> Bool {
         loose.contains(wid) || layout.windows.contains(wid)
     }
+
+    /// The window a switch here should focus: the last one focused, while it
+    /// is still here, else the layout's focus, else any member. Nil for an
+    /// empty desktop, which takes focus itself.
+    public var focusTarget: WindowID? {
+        if let w = lastFocused, contains(w) { return w }
+        return layout.focus ?? members.first
+    }
 }
 
 public struct SpaceState: Sendable, Equatable {
-    /// Every workspace weft knows about, by id.
+    /// Every workspace, by id: one per ordinary desktop that exists.
     public var workspaces: [WorkspaceID: Workspace]
-    /// Which workspace is showing on each managed desktop. A workspace is
-    /// "active" when its display would show it; whether the display is
-    /// showing its managed desktop at all is `isPaused`.
-    ///
-    /// Every managed desktop MUST have an entry, and only managed desktops
-    /// have one. A desktop with no entry drops what lands there
-    /// (`reconcileWorkspaces`) — which is exactly right for a desktop weft
-    /// does not manage, and a silent failure for one it does.
+    /// The workspace of each desktop. Every ordinary desktop has one, and only
+    /// ordinary desktops do: a fullscreen or Split View space is not a
+    /// workspace.
     public var active: [SpaceID: WorkspaceID]
-    /// The one desktop per display weft tiles on, by display uuid. Recorded
-    /// once and kept while it exists; weft never switches to it or away.
-    public var managed: [String: SpaceID]
-    /// What each display last showed, by display uuid, kept after the display
-    /// goes. A monitor plugged back in shows it again rather than whatever
-    /// happened to be free.
-    public var lastShown: [String: WorkspaceID] = [:]
-    /// Workspace ids in the order labels and `space focus <n>` count in.
+    /// Labels by global number (index 0 is desktop 1), from `[[space]]` or
+    /// `labels.json`. May be longer than the desktops that exist: a label with
+    /// no desktop yet waits for one (NATIVE.md, "Desktop count").
+    public var names: [String]
+    /// Workspaces in global number order: what `space focus N` counts.
     public var wsOrder: [WorkspaceID]
-    /// Next id to hand out. Ids are unique within a launch and never
-    /// persisted — `labels.json` and `layouts.json` are keyed by ordinal, so
-    /// nothing outside the process ever names a workspace by id.
+    /// Next id to hand out. Unique within a launch, never persisted.
     public var nextWorkspaceID: UInt32
-    /// display uuid → current sid (mirrors the WindowServer; read-only copy).
+    /// display uuid → the space showing there now: a desktop, or a fullscreen
+    /// space. Re-read from the WindowServer, never inferred.
     public var currentByDisplay: [String: SpaceID]
-    /// Display uuids in SLS order (stable within a launch; main first).
+    /// Display uuids in numbering order: main first, then west to east.
     public var displays: [String]
-    /// sid → display uuid. A space belongs to exactly one display, and its
-    /// layout must be computed in *that* display's rect — deriving one rect
-    /// from the main display tiled every second-monitor space into the first
-    /// monitor's frame (§13.10).
+    /// Desktop → its display uuid. A desktop's layout is computed in that
+    /// display's rect.
     public var displayBySpace: [SpaceID: String]
+    /// Desktop → where it is as a logout leaves it: (display, position).
+    public var keyBySpace: [SpaceID: DesktopKey]
     /// The display holding the active menu bar, i.e. the one keyboard focus
-    /// is on. With two displays both have a "current" space; only this one
-    /// says which space the user means. Nil = fall back to `displays.first`.
+    /// is on. Nil = fall back to `displays.first`.
     public var focusedDisplay: String?
-    /// Space ids in **Mission Control order** (display-major, then the order
-    /// SLSCopyManagedDisplaySpaces reports within each display), managed or
-    /// not. Only diagnostics read it.
+    /// Desktops in global number order.
     public var order: [SpaceID]
-    /// The workspace to go back to for `space focus recent``.
+    /// The workspace to go back to for `space focus recent`.
     public var recentWorkspace: WorkspaceID?
+    /// Layouts of desktops that went away — a display unplugged, a desktop
+    /// removed — by where they were. A desktop that appears at the same
+    /// place takes its layout back, so docking does not cost an arrangement.
+    public var stash: [DesktopKey: Workspace]
 
     public init(
         workspaces: [WorkspaceID: Workspace] = [:],
         active: [SpaceID: WorkspaceID] = [:],
-        managed: [String: SpaceID] = [:],
+        names: [String] = [],
         wsOrder: [WorkspaceID] = [],
         nextWorkspaceID: UInt32 = 1,
         currentByDisplay: [String: SpaceID] = [:],
         displays: [String] = [],
         displayBySpace: [SpaceID: String] = [:],
+        keyBySpace: [SpaceID: DesktopKey] = [:],
         focusedDisplay: String? = nil,
         order: [SpaceID] = [],
-        recentWorkspace: WorkspaceID? = nil
+        recentWorkspace: WorkspaceID? = nil,
+        stash: [DesktopKey: Workspace] = [:]
     ) {
         self.workspaces = workspaces
         self.active = active
-        self.managed = managed
+        self.names = names
         self.wsOrder = wsOrder
         self.nextWorkspaceID = nextWorkspaceID
         self.currentByDisplay = currentByDisplay
         self.displays = displays
         self.displayBySpace = displayBySpace
+        self.keyBySpace = keyBySpace
         self.focusedDisplay = focusedDisplay
         self.order = order
         self.recentWorkspace = recentWorkspace
+        self.stash = stash
     }
 
     /// The space the user is on: the focused display's current space. Falls
@@ -257,8 +298,9 @@ public struct SpaceState: Sendable, Equatable {
         return displays.first.flatMap { currentByDisplay[$0] }
     }
 
-    /// Every visible desktop — one per display. These are the desktops a sweep
-    /// may bind AX elements for and apply frames to.
+    /// The space showing on each display — a desktop, or a fullscreen space.
+    /// These are the spaces a sweep may bind AX elements for and apply
+    /// frames to; a fullscreen one has no workspace, so nothing is applied.
     public var visibleSpaces: [SpaceID] {
         displays.compactMap { currentByDisplay[$0] }
     }
@@ -266,30 +308,27 @@ public struct SpaceState: Sendable, Equatable {
     // MARK: - Reading a workspace
     //
     // Every accessor below is a method on the state rather than on the daemon,
-    // and that is load-bearing: a dozen call sites read one of these from
-    // inside an `updateSpaces` closure, which already holds `spaces` for
-    // writing. A daemon method that went back through `readSpaces()` would be
-    // an exclusivity violation and Swift aborts the process on the spot —
-    // `convertLayout` carries the scar.
+    // and that is load-bearing: call sites read these from inside an
+    // `updateSpaces` closure, which already holds `spaces` for writing. A
+    // daemon method that went back through `readSpaces()` would be an
+    // exclusivity violation and Swift aborts the process on the spot.
 
-    /// The workspace showing on a desktop.
+    /// The workspace of a desktop.
     public func workspace(on desktop: SpaceID) -> Workspace? {
         active[desktop].flatMap { workspaces[$0] }
     }
 
-    /// The layout showing on a desktop. The direct replacement for what used
-    /// to be `layouts[sid]`.
+    /// The layout of a desktop.
     public func layout(on desktop: SpaceID) -> SpaceLayout? {
         workspace(on: desktop)?.layout
     }
 
-    /// The desktop a workspace lives on.
+    /// The desktop a workspace is.
     public func desktop(of id: WorkspaceID) -> SpaceID? {
         workspaces[id]?.desktop
     }
 
-    /// The display a workspace's windows must be laid out in. Derived, never
-    /// stored: a workspace is on one desktop and a desktop on one display.
+    /// The display a workspace's desktop is on.
     public func display(of id: WorkspaceID) -> String? {
         desktop(of: id).flatMap { displayBySpace[$0] }
     }
@@ -298,97 +337,88 @@ public struct SpaceState: Sendable, Equatable {
         workspaces[id]?.label
     }
 
-    /// The workspace showing on each visible desktop.
+    /// The workspace showing on each display that shows a desktop.
     public var visibleWorkspaces: [WorkspaceID] {
         visibleSpaces.compactMap { active[$0] }
     }
 
-    /// The workspace the user is in.
+    /// The workspace the user is in. Nil while the focused display shows a
+    /// fullscreen space.
     public var currentWorkspace: WorkspaceID? {
         currentSpace.flatMap { active[$0] }
     }
 
-    /// Every workspace whose desktop still exists. What a sweep is allowed to
-    /// keep — and deliberately not "every visible workspace", which would
-    /// delete a hidden one on the next sweep.
-    public func liveWorkspaces(desktops: Set<SpaceID>) -> Set<WorkspaceID> {
-        Set(workspaces.values.filter { desktops.contains($0.desktop) }.map { $0.id })
+    /// The global number of a workspace, 1-based.
+    public func number(of id: WorkspaceID) -> Int? {
+        wsOrder.firstIndex(of: id).map { $0 + 1 }
     }
 
     public func id(forLabel label: String) -> WorkspaceID? {
         wsOrder.first { workspaces[$0]?.label == label }
-            ?? workspaces.first(where: { $0.value.label == label })?.key
     }
 
-    /// Resolve `space focus <…>` targets: label first, then 1-based ordinal,
-    /// then a raw space id (keeps alt-digit keybinds working after renames —
-    /// "1" means the first workspace even when it isn't named so).
-    /// The workspace `step` places along from the one on the focused
-    /// display, in the configured order, wrapping around.
-    ///
-    /// For stepping through workspaces — `space focus next` on a key, or a
-    /// swipe — so it passes over the ones there is no point landing on:
-    /// empty ones (with a dozen named workspaces, a swipe would otherwise
-    /// crawl through all the empty ones), ones showing on another display
-    /// (focusing those moves the pointer, not the workspace), and any in
-    /// `skipping`, which the daemon fills with those pinned elsewhere. Nil
-    /// when there is nowhere else to go.
-    public func workspace(steppingBy step: Int, skipping: Set<WorkspaceID> = []) -> WorkspaceID? {
-        guard let current = currentWorkspace, let at = wsOrder.firstIndex(of: current), step != 0 else {
-            return nil
-        }
-        let n = wsOrder.count
-        for i in 1..<max(n, 1) {
-            let id = wsOrder[((at + i * step.signum()) % n + n) % n]
-            guard !skipping.contains(id), workspaces[id]?.members.isEmpty == false else { continue }
-            if showingDisplay(of: id).map({ $0 != focusedDisplay }) ?? false { continue }
-            return id
-        }
-        return nil
+    /// The desktop next to the focused display's current one, by `step`
+    /// within that display's desktops, the way ⌃←/⌃→ go. No wrap: stepping
+    /// off the end is nil, as it is for macOS.
+    public func workspace(steppingBy step: Int) -> WorkspaceID? {
+        guard step != 0, let display = focusedDisplay ?? displays.first,
+              let current = currentByDisplay[display]
+        else { return nil }
+        let mine = order.filter { displayBySpace[$0] == display }
+        guard let at = mine.firstIndex(of: current) else { return nil }
+        let next = at + step.signum()
+        return mine.indices.contains(next) ? active[mine[next]] : nil
     }
 
+    /// Resolve a `space focus` / `move-window` target: `recent`, `next`,
+    /// `prev`, a label, a global number, or a raw desktop id out of `query
+    /// spaces`. Nil when it names no desktop that exists — see
+    /// `missingDesktop` for the ones that could exist.
     public func resolveWorkspace(_ text: String) -> WorkspaceID? {
-        if text == "recent" { return recentWorkspace }
-        if text == "next" { return workspace(steppingBy: 1) }
-        if text == "prev" { return workspace(steppingBy: -1) }
+        switch text {
+        case "recent": return recentWorkspace.flatMap { workspaces[$0] != nil ? $0 : nil }
+        case "next": return workspace(steppingBy: 1)
+        case "prev": return workspace(steppingBy: -1)
+        default: break
+        }
         if let id = id(forLabel: text) { return id }
-        // A bare integer is an ordinal first (that is what the user types on
-        // alt-3) and only falls through to a raw space id when it is too large
-        // to be one — real sids are far outside 1...count.
-        if let n = Int(text), (1...wsOrder.count).contains(n) { return wsOrder[n - 1] }
-        // The escape hatch stays pointed at DESKTOPS. Someone typing a number
-        // out of `query spaces` is naming a native space, which is what that
-        // JSON reports; answering with a workspace of the same number would
-        // hand them a different desktop entirely.
+        // A bare integer is a number first (that is what the user types on
+        // ⌥3) and a raw desktop id only when it is far too large to be one.
+        if let n = Int(text), n >= 1, n <= wsOrder.count { return wsOrder[n - 1] }
         if let raw = UInt64(text), let id = active[raw] { return id }
         return nil
     }
 
-    /// Whether a display is showing something other than its managed desktop
-    /// — another macOS desktop, or a native fullscreen space. weft does no
-    /// work there: nothing is tiled, parked or moved on that display until
-    /// its managed desktop is back.
-    public func isPaused(_ display: String) -> Bool {
-        guard let managed = managed[display] else { return true }
-        return currentByDisplay[display] != managed
+    /// The number of the desktop `text` names but that does not exist yet:
+    /// a label past the desktops there are, or a small number past the end.
+    /// What `space focus` answers with "desktop N does not exist".
+    public func missingDesktop(_ text: String) -> Int? {
+        guard resolveWorkspace(text) == nil else { return nil }
+        if let i = names.firstIndex(of: text), i >= wsOrder.count { return i + 1 }
+        if let n = Int(text), n > wsOrder.count, n <= 99 { return n }
+        return nil
     }
 
-    /// The display a workspace is showing on right now, or nil when it is
-    /// hidden — or active on a display that is paused, which shows nothing
-    /// of weft's either.
+    /// Whether a display is showing something that is not a workspace: a
+    /// native fullscreen or Split View space. weft does no work there until
+    /// the display shows a desktop again.
+    public func isPaused(_ display: String) -> Bool {
+        guard let current = currentByDisplay[display] else { return true }
+        return active[current] == nil
+    }
+
+    /// The display a workspace is showing on right now, or nil when its
+    /// desktop is not the one its display shows.
     public func showingDisplay(of id: WorkspaceID) -> String? {
-        guard let desktop = desktop(of: id), active[desktop] == id,
-              let display = displayBySpace[desktop], !isPaused(display)
+        guard let desktop = desktop(of: id), let display = displayBySpace[desktop],
+              currentByDisplay[display] == desktop
         else { return nil }
         return display
     }
 
-    /// The workspace a window is a member of, laid out or loose. Searched in
-    /// `wsOrder` so the answer does not depend on dictionary order — a sticky
-    /// window can be a member of one workspace per desktop.
+    /// The workspace a window is a member of, laid out or loose.
     public func workspace(holding wid: WindowID) -> WorkspaceID? {
         wsOrder.first { workspaces[$0]?.contains(wid) == true }
-            ?? workspaces.keys.sorted().first { workspaces[$0]?.contains(wid) == true }
     }
 
     // MARK: - Writing a workspace
@@ -398,8 +428,7 @@ public struct SpaceState: Sendable, Equatable {
     }
 
     /// Take a window out of every workspace but `keep`: out of each layout and
-    /// out of each loose set. The one way a window leaves a workspace other
-    /// than the sweep noticing it has gone.
+    /// out of each loose set.
     public mutating func removeWindow(_ wid: WindowID, except keep: WorkspaceID? = nil) {
         for (id, ws) in workspaces where id != keep {
             switch ws.layout {
@@ -415,9 +444,9 @@ public struct SpaceState: Sendable, Equatable {
     }
 
     /// Make `target` the one workspace holding `wid`: in its layout when weft
-    /// lays the window out, in its loose set when it does not. Every command
-    /// that moves a window between workspaces ends here, so a floating window
-    /// sent somewhere arrives floating instead of being tiled by the move.
+    /// lays the window out, in its loose set when it does not. A move between
+    /// desktops ends here, so a floating window sent somewhere arrives
+    /// floating instead of being tiled by the move.
     ///
     /// `screen` decides the split axis of a tree insertion, as it does in a
     /// sweep; `focus` makes the window the layout's focus when it is laid out.
@@ -451,297 +480,153 @@ public struct SpaceState: Sendable, Equatable {
             if focus { f = f.focusing(wid) }
             ws.layout = .float(f)
         }
+        if focus { ws.lastFocused = wid }
         workspaces[target] = ws
     }
 
-    /// Edit the layout showing on a desktop. The replacement for
-    /// `layouts[sid] = …`, and a no-op on a desktop with no workspace rather
-    /// than a way to create one — creation happens in `adoptDisplays`.
+    /// Edit the layout of a desktop. A no-op on a space with no workspace.
     public mutating func setLayout(_ layout: SpaceLayout, on desktop: SpaceID) {
         if let id = active[desktop] { workspaces[id]?.layout = layout }
     }
 
-    /// Make the workspace set match the displays that exist.
+    /// Record that `wid` took focus on its desktop: what a later switch there
+    /// focuses again.
+    public mutating func noteFocus(_ wid: WindowID) {
+        guard let id = workspace(holding: wid) else { return }
+        workspaces[id]?.lastFocused = wid
+    }
+
+    /// Make the workspace set match the desktops that exist: one workspace
+    /// per ordinary desktop, numbered main display first, then west to east.
     ///
-    /// - Each display gets a managed desktop: the one it already had, while
-    ///   that desktop exists, or else whichever desktop it is showing.
-    /// - A workspace whose desktop stopped being managed — its display was
-    ///   unplugged, or its desktop deleted in Mission Control — moves to its
-    ///   display's new managed desktop, or to the first display's. Workspaces
-    ///   are never deleted here: a display going away must not take a tree,
-    ///   an override or a label with it.
-    /// - Every managed desktop gets a workspace to show. One already living
-    ///   there is preferred, then an empty hidden one — both cost nothing to
-    ///   show — and only then a new numbered one.
+    /// - A desktop that was here keeps its workspace (identity is the
+    ///   SpaceID).
+    /// - A desktop that is new takes the layout stashed at its place
+    ///   (display, position), if a desktop there went away earlier, and is
+    ///   otherwise empty.
+    /// - A desktop that went away has its workspace stashed at the place it
+    ///   was. Its windows are macOS's to move; the next sweep files them
+    ///   wherever they land.
+    /// - Labels are re-attached by number.
     ///
-    /// `names` seeds the set on a fresh start (from `[[space]]`, else
-    /// `labels.json`); nil means "keep what is named". `pins` maps a label to
-    /// the display uuid its `[[space]] display =` resolved to right now.
-    ///
-    /// A display with nothing to show takes, in order: a hidden workspace
-    /// pinned to it, what it last showed, a hidden workspace already living
-    /// on its desktop, an empty hidden one — the last three only if not
-    /// pinned to another connected display — and only then a new numbered one.
-    public mutating func adoptDisplays(
-        _ reported: [DisplayDesktops], names: [String]?, pins: [String: String] = [:]
-    ) {
-        let previousDisplayBySpace = displayBySpace
-        order = reported.flatMap { $0.desktops }
-        displays = reported.map { $0.uuid }
-        displayBySpace = [:]
-        for d in reported { for sid in d.desktops { displayBySpace[sid] = d.uuid } }
+    /// `names`, when given, replaces the labels (`[[space]]`, else
+    /// `labels.json`). No displays at all is a transient (sleep, a
+    /// reconfiguration mid-flight) and leaves everything as it is.
+    public mutating func adoptDisplays(_ reported: [DisplayDesktops], names: [String]? = nil) {
+        if let names { self.names = names }
+        let numbered = numberingOrder(reported)
+        guard numbered.contains(where: { !$0.desktops.isEmpty }) else { return }
+        displays = numbered.map(\.uuid)
         currentByDisplay = Dictionary(uniqueKeysWithValues: reported.map { ($0.uuid, $0.current) })
-        // No displays is a transient (sleep, a reconfiguration mid-flight). Leave
-        // the workspaces exactly as they are rather than rehoming them onto
-        // nothing.
-        guard let main = reported.first(where: { !$0.desktops.isEmpty }) else { return }
-
-        var nextManaged: [String: SpaceID] = [:]
-        for d in reported {
-            if let kept = managed[d.uuid], d.desktops.contains(kept) {
-                nextManaged[d.uuid] = kept
-            } else if d.desktops.contains(d.current) {
-                nextManaged[d.uuid] = d.current
-            } else if let first = d.desktops.first {
-                // Showing a fullscreen space right now, which is never a
-                // desktop weft manages. Its first real desktop is.
-                nextManaged[d.uuid] = first
+        order = numbered.flatMap(\.desktops)
+        displayBySpace = [:]
+        keyBySpace = [:]
+        for d in numbered {
+            for (i, sid) in d.desktops.enumerated() {
+                displayBySpace[sid] = d.uuid
+                keyBySpace[sid] = DesktopKey(display: d.uuid, position: i + 1)
             }
         }
-        managed = nextManaged
-        let managedDesktops = Set(nextManaged.values)
-        guard let mainDesktop = nextManaged[main.uuid] ?? nextManaged.values.first else { return }
-
-        for (id, ws) in workspaces where !managedDesktops.contains(ws.desktop) {
-            let display = previousDisplayBySpace[ws.desktop]
-            workspaces[id]?.desktop = display.flatMap { nextManaged[$0] } ?? mainDesktop
-        }
-        active = active.filter { managedDesktops.contains($0.key) && workspaces[$0.value]?.desktop == $0.key }
-        wsOrder = wsOrder.filter { workspaces[$0] != nil }
-        for id in workspaces.keys.sorted() where !wsOrder.contains(id) { wsOrder.append(id) }
-
-        if let names, workspaces.isEmpty {
-            for (i, name) in names.enumerated() {
-                makeWorkspace(label: name.isEmpty ? "\(i + 1)" : name, on: mainDesktop)
+        let live = Set(order)
+        for (sid, id) in active where !live.contains(sid) {
+            if let ws = workspaces.removeValue(forKey: id), let key = ws.keyHint {
+                stash[key] = ws
             }
+            active.removeValue(forKey: sid)
+            if recentWorkspace == id { recentWorkspace = nil }
         }
-        let connected = Set(reported.map { $0.uuid })
-        func pinnedDisplay(_ id: WorkspaceID) -> String? {
-            workspaces[id].flatMap { pins[$0.label] }.flatMap { connected.contains($0) ? $0 : nil }
+        for sid in order where active[sid] == nil {
+            let id = WorkspaceID(nextWorkspaceID)
+            nextWorkspaceID += 1
+            var ws = Workspace(id: id, label: "", desktop: sid, layout: .tiling(Tree()))
+            if let key = keyBySpace[sid], let saved = stash.removeValue(forKey: key) {
+                ws.layout = saved.layout
+                ws.overrideKind = saved.overrideKind
+                ws.loose = saved.loose
+                ws.lastFocused = saved.lastFocused
+            }
+            workspaces[id] = ws
+            active[sid] = id
         }
-        for d in reported {
-            guard let desktop = nextManaged[d.uuid], active[desktop] == nil else { continue }
-            let showing = Set(active.values)
-            let hidden = wsOrder.filter { !showing.contains($0) }
-            let free = hidden.filter { pinnedDisplay($0) == nil || pinnedDisplay($0) == d.uuid }
-            let pick = hidden.first { pinnedDisplay($0) == d.uuid }
-                ?? lastShown[d.uuid].flatMap { free.contains($0) ? $0 : nil }
-                ?? free.first { workspaces[$0]?.desktop == desktop }
-                ?? free.first { workspaces[$0]?.members.isEmpty == true }
-                ?? makeWorkspace(label: freshLabel(), on: desktop)
-            workspaces[pick]?.desktop = desktop
-            active[desktop] = pick
-        }
-        for d in reported { if let desktop = nextManaged[d.uuid], let id = active[desktop] { lastShown[d.uuid] = id } }
+        // Where each workspace is, for the stash should its desktop go.
+        for sid in order { if let id = active[sid] { workspaces[id]?.keyHint = keyBySpace[sid] } }
+        wsOrder = order.compactMap { active[$0] }
+        relabel()
     }
 
-    @discardableResult
-    private mutating func makeWorkspace(label: String, on desktop: SpaceID) -> WorkspaceID {
-        let id = WorkspaceID(nextWorkspaceID)
-        nextWorkspaceID += 1
-        workspaces[id] = Workspace(id: id, label: label, desktop: desktop, layout: .tiling(Tree()))
-        wsOrder.append(id)
-        return id
-    }
-
-    /// The next number not already used as a label, counting from the
-    /// workspace count — so a display plugged into a machine with three
-    /// workspaces gets "4".
-    private func freshLabel() -> String {
-        let used = Set(workspaces.values.map { $0.label })
-        var n = workspaces.count + 1
-        while used.contains("\(n)") { n += 1 }
-        return "\(n)"
-    }
-
-    /// Resolve a target, creating numbered workspaces when it is a small
-    /// number past the end — `space focus 4` on a machine with two creates
-    /// "3" and "4", hidden on the first display, the way AeroSpace makes a
-    /// workspace by naming it. Only 1…99: a larger number is a desktop id
-    /// out of `query spaces`, not a workspace someone wants.
-    public mutating func resolveOrCreateWorkspace(_ text: String) -> WorkspaceID? {
-        if let id = resolveWorkspace(text) { return id }
-        guard let n = Int(text), (1...99).contains(n), n > wsOrder.count,
-              let first = displays.first(where: { managed[$0] != nil }),
-              let desktop = managed[first]
-        else { return nil }
-        let used = Set(workspaces.values.map { $0.label })
-        while wsOrder.count < n {
-            let label = "\(wsOrder.count + 1)"
-            makeWorkspace(label: used.contains(label) ? "\(label)'" : label, on: desktop)
+    /// Labels by number: the configured name at each position, else the
+    /// number itself.
+    private mutating func relabel() {
+        for (i, id) in wsOrder.enumerated() {
+            let name = i < names.count ? names[i] : ""
+            workspaces[id]?.label = name.isEmpty ? "\(i + 1)" : name
         }
-        return wsOrder[n - 1]
     }
 
-    /// Make the workspace set follow an edited `[[space]]` list without
-    /// touching a window.
-    ///
-    /// Matched by label first: a workspace whose name is still in the list
-    /// keeps its windows and moves to its new place in the order. A name that
-    /// is new takes over the workspace that used to sit at its position, if
-    /// that one's name has gone (a rename), and is otherwise a new, hidden
-    /// workspace. A workspace whose name has gone and was not renamed is
-    /// dropped when it is hidden and empty; one that still holds windows keeps
-    /// its old name at the end of the order, so nothing parked in it is lost.
-    ///
-    /// Matching by position alone, as this used to, meant reordering cards in
-    /// Settings, or deleting one in the middle, handed every name after it —
-    /// and its display pin and app rules — to another workspace's windows.
+    /// Replace the labels (an edited `[[space]]` list). No window moves.
     public mutating func relabel(_ names: [String]) {
-        let labels = names.enumerated().map { $0.element.isEmpty ? "\($0.offset + 1)" : $0.element }
-        let before = wsOrder
-        var byLabel: [String: WorkspaceID] = [:]
-        for id in before { if let l = workspaces[id]?.label, byLabel[l] == nil { byLabel[l] = id } }
-        var claimed = Set(labels.compactMap { byLabel[$0] })
-        var order: [WorkspaceID] = []
-        for (i, label) in labels.enumerated() {
-            if let id = byLabel[label] {
-                if !order.contains(id) { order.append(id) }
-            } else if i < before.count, !claimed.contains(before[i]) {
-                workspaces[before[i]]?.label = label
-                claimed.insert(before[i])
-                order.append(before[i])
-            } else if let first = displays.first(where: { managed[$0] != nil }), let desktop = managed[first] {
-                order.append(makeWorkspace(label: label, on: desktop))
-            }
-        }
-        let showing = Set(active.values)
-        for id in before where !claimed.contains(id) {
-            if !showing.contains(id), workspaces[id]?.members.isEmpty == true {
-                workspaces.removeValue(forKey: id)
-                if recentWorkspace == id { recentWorkspace = nil }
-            } else {
-                order.append(id)
-            }
-        }
-        wsOrder = order.filter { workspaces[$0] != nil }
+        self.names = names
+        relabel()
     }
 
-    /// Show `id` on the display whose managed desktop is `desktop`: it moves
-    /// there and becomes what that display shows. Pure state — the caller
-    /// parks what was showing and moves the windows.
-    public mutating func show(_ id: WorkspaceID, on desktop: SpaceID) {
-        guard workspaces[id] != nil, active[desktop] != nil else { return }
-        // Showing elsewhere: that display must not be left pointing at a
-        // workspace that has left it. It takes what this display showed.
-        if let from = workspaces[id]?.desktop, from != desktop, active[from] == id, let other = active[desktop] {
-            active[from] = other
-            workspaces[other]?.desktop = from
-        }
-        workspaces[id]?.desktop = desktop
-        active[desktop] = id
-        if let display = displayBySpace[desktop] { lastShown[display] = id }
+    /// Name the desktop with number `n` (1-based): `space label`.
+    public mutating func setLabel(_ name: String, number n: Int) {
+        guard n >= 1 else { return }
+        while names.count < n { names.append("") }
+        names[n - 1] = name
+        relabel()
     }
 
-
-    /// Throw the whole workspace set away, keeping the desktop facts.
-    ///
-    /// For one caller: the `[[space]]` list changed under a running daemon, so
-    /// which workspaces exist is no longer derivable from what is here. The
-    /// caller unparks every window first.
-    ///
-    /// Emptying `workspaces` is what makes the next sweep take its seeding
-    /// branch, which re-reads the `[[space]]` names and the saved overrides.
-    /// Trees do not survive it, and that is the honest outcome: the set they
-    /// described has been replaced.
-    ///
-    /// `order`, `displays`, `displayBySpace`, `currentByDisplay` and `managed`
-    /// are facts about the desktops, not about the workspaces, so they stay.
-    public mutating func resetWorkspaces() {
-        workspaces = [:]
-        active = [:]
-        wsOrder = []
-        recentWorkspace = nil
-    }
-
-    /// Ordered label names for persistence (ordinal → label).
+    /// Labels for `labels.json`: every configured name, and every desktop's
+    /// label, by number.
     public func persistedNames() -> [String] {
-        wsOrder.map { workspaces[$0]?.label ?? "" }
+        (0..<max(names.count, wsOrder.count)).map { i in
+            i < wsOrder.count ? (workspaces[wsOrder[i]]?.label ?? "") : names[i]
+        }
     }
 
-    /// Every workspace's members by ordinal, for `membership.json`. Window ids
-    /// are the WindowServer's and last as long as the window, so this is what
-    /// lets a daemon restart — an update, a crash — put every window back in
-    /// the workspace it was in instead of collapsing them all into the first.
-    public func persistedMembership() -> [[WindowID]] {
-        wsOrder.map { workspaces[$0]?.members ?? [] }
+    // MARK: - Layouts on disk, by DesktopKey
+
+    /// Each desktop's chosen layout and, for a restart within one boot, its
+    /// tree and its hand-floated windows. Keyed by place, not SpaceID.
+    public func persistedLayouts() -> [DesktopKey: SavedDesktop] {
+        var out: [DesktopKey: SavedDesktop] = [:]
+        for id in wsOrder {
+            guard let ws = workspaces[id], let key = keyBySpace[ws.desktop] else { continue }
+            var saved = SavedDesktop(override: ws.overrideKind?.rawValue)
+            if case .tiling(let tree) = ws.layout, !tree.windows.isEmpty { saved.tree = SavedTree(tree) }
+            if saved.override != nil || saved.tree != nil { out[key] = saved }
+        }
+        return out
     }
 
-    /// Put saved members back, by ordinal, before the first sweep reconciles.
-    /// They go in as loose members; the sweep moves the ones weft lays out
-    /// into the layout, and drops any that no longer exist. A window already
-    /// filed somewhere keeps that.
-    ///
-    /// `trees` puts each tiling workspace's saved arrangement back first, so
-    /// the sweep keeps it — it only inserts windows a tree lacks and removes
-    /// the ones that have closed. A workspace whose layout is not a tree, or
-    /// already holds windows, keeps what it has.
-    public mutating func seedMembership(_ saved: [[WindowID]], trees: [SavedTree?] = []) {
-        for (i, saved) in trees.enumerated() where i < wsOrder.count {
-            let id = wsOrder[i]
-            guard let saved, case .tiling(let current)? = workspaces[id]?.layout, current.windows.isEmpty
-            else { continue }
-            var tree = saved.tree
-            for wid in tree.windows where workspace(holding: wid) != nil {
-                tree = tree.removing(wid)
+    /// Put saved layouts back, by place, after `adoptDisplays`. An override
+    /// always comes back. A tree comes back only when `trees` (the file is
+    /// from this boot — window ids last as long as the window) and only into
+    /// a desktop holding no layout yet; the sweep then drops the windows that
+    /// are not there.
+    public mutating func restore(_ saved: [DesktopKey: SavedDesktop], trees: Bool) {
+        for (sid, key) in keyBySpace {
+            guard let s = saved[key], let id = active[sid] else { continue }
+            if let kind = s.override.flatMap(LayoutKind.init(rawValue:)) {
+                workspaces[id]?.overrideKind = kind
+                if workspaces[id]?.layout.windows.isEmpty == true {
+                    workspaces[id]?.layout = kind == .float ? .float(FloatState()) : .tiling(Tree())
+                }
             }
-            workspaces[id]?.layout = .tiling(tree)
-        }
-        for (i, wids) in saved.enumerated() where i < wsOrder.count {
-            for wid in wids where workspace(holding: wid) == nil {
-                workspaces[wsOrder[i]]?.loose.insert(wid)
+            if trees, let tree = s.tree?.tree, case .tiling(let current)? = workspaces[id]?.layout,
+               current.windows.isEmpty {
+                workspaces[id]?.layout = .tiling(tree)
             }
         }
     }
 
-    /// Every tiling workspace's tree by ordinal, for `membership.json`; nil
-    /// for one that is not tiling or holds nothing.
-    public func persistedTrees() -> [SavedTree?] {
-        wsOrder.map { id -> SavedTree? in
-            guard case .tiling(let tree)? = workspaces[id]?.layout, !tree.windows.isEmpty else { return nil }
-            return SavedTree(tree)
-        }
-    }
-
-    /// Layout overrides by ordinal, ready to persist as `["", "float", ""]`.
-    ///
-    /// Persisting by ordinal rather than by id lets the choices survive a
-    /// daemon restart — macOS hands out fresh space ids on reboot, and weft's
-    /// own workspace ids are not persisted at all — while remaining
-    /// independent of whether workspaces are labelled.
-    public func persistedOverrides() -> [String] {
-        wsOrder.map { workspaces[$0]?.overrideKind?.rawValue ?? "" }
-    }
-
-    /// Re-apply a previously persisted list of layout overrides by ordinal.
-    /// Call it after `adoptDisplays`, which is what builds the order they are
-    /// counted in.
-    ///
-    /// A kind this build does not recognise is dropped rather than rejected,
-    /// which is how a `layouts.json` written when `scroll` existed comes back
-    /// as bsp: no override survives, and bsp is what a workspace with no
-    /// override gets. Nothing to migrate, and nothing to explain to the user
-    /// beyond the space they left in scroll now tiling.
+    /// 0.9.21's `layouts.json`: overrides by number. Read once on upgrade.
+    /// A kind this build does not recognise (`scroll`) is dropped.
     public mutating func assignOverrides(kinds: [String]) {
         for (i, id) in wsOrder.enumerated() where i < kinds.count {
             guard let kind = LayoutKind(rawValue: kinds[i]) else { continue }
             workspaces[id]?.overrideKind = kind
-            // Restoring a saved choice onto a workspace that holds nothing is
-            // exact — an empty float and an empty tree differ only in kind, so
-            // there is nothing to convert and nothing to lose. A workspace that
-            // already holds windows is left alone: this runs at startup, and
-            // rearranging someone's windows on the strength of a file is the
-            // caller's decision to make, through `convertLayout`.
             if workspaces[id]?.layout.windows.isEmpty == true {
                 workspaces[id]?.layout = kind == .float ? .float(FloatState()) : .tiling(Tree())
             }
@@ -749,69 +634,53 @@ public struct SpaceState: Sendable, Equatable {
     }
 }
 
-/// Decide which workspace each window is in, from where the WindowServer says
-/// it is and where weft last filed it.
-///
-/// **This function is the seam, and every bug in the workspace model will live
-/// in it.** It is written against plain dictionaries rather than `SpaceState`
-/// so that it can be read and tested on its own, and so that it cannot reach
-/// for a fact it was not handed.
-///
-/// `activeOn` has one entry per **managed** desktop and nothing else, and that
-/// is what defines which desktops weft works on. The rule:
-///
-/// - A window on no managed desktop is in no workspace. It is on a desktop
-///   weft pauses on, or in native fullscreen, and weft leaves it to macOS.
-/// - A window already filed **keeps its workspace** — whether that workspace
-///   is showing or hidden, and whichever managed desktop its parked window is
-///   reported on. Membership is weft's fact; a hidden workspace's windows are
-///   reported on some desktop exactly like the showing ones, and without this
-///   they would be swept into whatever is on screen.
-/// - …except when its workspace is **showing on a different managed desktop**
-///   from the one the window is on. The workspace is on screen over there and
-///   the window is not in it: the user dragged it to another display, or the
-///   app moved it. It joins what is showing where it is.
-/// - `inFlight` windows keep their workspace regardless. They are being moved
-///   between displays by weft itself, and the WindowServer may still report
-///   the display they are leaving.
-/// - A window filed nowhere joins what is showing on its desktop.
-///
-/// Output arrays are sorted, so a sweep's membership does not depend on
-/// dictionary iteration order.
-public func reconcileWorkspaces(
-    windowDesktops: [WindowID: [SpaceID]],
-    membership: [WorkspaceID: [WindowID]],
-    desktopOf: [WorkspaceID: SpaceID],
-    activeOn: [SpaceID: WorkspaceID],
-    inFlight: Set<WindowID> = []
-) -> [WorkspaceID: [WindowID]] {
-    var held: [WindowID: WorkspaceID] = [:]
-    for (wsid, wids) in membership.sorted(by: { $0.key < $1.key }) where desktopOf[wsid] != nil {
-        for wid in wids where held[wid] == nil { held[wid] = wsid }
+/// One desktop's entry in `layouts.json`.
+public struct SavedDesktop: Codable, Sendable, Equatable {
+    /// `space layout`'s choice, if one was made.
+    public var override: String?
+    /// The tiling tree, believed only within the boot it was written in.
+    public var tree: SavedTree?
+
+    public init(override: String? = nil, tree: SavedTree? = nil) {
+        self.override = override
+        self.tree = tree
     }
-    var out: [WorkspaceID: [WindowID]] = [:]
+}
+
+/// Which workspace each window is in: the one of the single desktop macOS
+/// reports it on (NATIVE.md, "The model": macOS owns membership).
+///
+/// - On exactly one desktop with a workspace: that workspace.
+/// - On several (Dock › Options › All Desktops): no workspace. It is in
+///   `everywhere`, and weft floats it and never moves it.
+/// - On none with a workspace (a fullscreen space): no workspace. When it
+///   leaves fullscreen macOS puts it back on its desktop, and the next call
+///   files it there.
+///
+/// Output arrays are sorted, so a sweep does not depend on dictionary order.
+public func membershipByDesktop(
+    _ windowDesktops: [WindowID: [SpaceID]], active: [SpaceID: WorkspaceID]
+) -> (members: [WorkspaceID: [WindowID]], everywhere: Set<WindowID>) {
+    var members: [WorkspaceID: [WindowID]] = [:]
+    var everywhere: Set<WindowID> = []
     for (wid, desktops) in windowDesktops {
-        guard let desktop = desktops.first(where: { activeOn[$0] != nil }) else { continue }
-        let target: WorkspaceID?
-        if let wsid = held[wid], let home = desktopOf[wsid] {
-            let showingElsewhere = activeOn[home] == wsid && !desktops.contains(home)
-            target = showingElsewhere && !inFlight.contains(wid) ? activeOn[desktop] : wsid
-        } else {
-            target = activeOn[desktop]
+        let ours = Set(desktops).filter { active[$0] != nil }
+        if ours.count > 1 {
+            everywhere.insert(wid)
+        } else if let only = ours.first, let id = active[only] {
+            members[id, default: []].append(wid)
         }
-        if let target { out[target, default: []].append(wid) }
     }
-    return out.mapValues { $0.sorted() }
+    return (members.mapValues { $0.sorted() }, everywhere)
 }
 
 /// Pure membership sync per layout kind: insert new windows (id order),
 /// drop windows that left. Unbound windows (S0 cold-start gap) join like any
-/// other — layout is computed, application waits for space_changed. Returns
-/// the ids that are new anywhere (need AX binding).
+/// other — layout is computed, application waits until the desktop shows.
+/// Returns the ids that are new anywhere (need AX binding).
 ///
-/// Keyed by workspace, not by desktop. `reconcileWorkspaces` has already
-/// decided which workspace each window belongs to; this only grows and shrinks
-/// the trees.
+/// `membershipByDesktop` has already decided which workspace each window
+/// belongs to; this only grows and shrinks the trees.
 public func syncMembership(
     _ state: SpaceState,
     membership: [WorkspaceID: [WindowID]],
@@ -821,13 +690,8 @@ public func syncMembership(
 ) -> (SpaceState, Set<WindowID>) {
     var next = state
     var fresh: Set<WindowID> = []
-    // Every workspace that exists, not just the ones holding a managed window,
-    // so an emptied workspace keeps its layout kind (with empty membership).
-    //
-    // `live` is every workspace whose DESKTOP still exists — never "every
-    // workspace showing". Passing the showing ones would delete every hidden
-    // workspace on the next sweep, which is invisible while each desktop holds
-    // one and fatal the moment one holds two.
+    // Every workspace that exists, not just the ones holding a window, so an
+    // emptied workspace keeps its layout kind (with empty membership).
     let ids = live ?? Set(membership.keys)
     for wsid in ids {
         guard next.workspaces[wsid] != nil else { continue }

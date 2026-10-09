@@ -43,48 +43,34 @@ public struct SpaceStatus: Codable, Sendable, Equatable {
 }
 
 extension SpaceStatus {
-    /// Every workspace, in the order `space focus N` counts, as the socket
-    /// reports it to `query spaces` and `query bar-state`.
+    /// Every workspace — one per desktop — in the order `space focus N`
+    /// counts, as the socket reports it to `query spaces` and `query
+    /// bar-state`.
     ///
-    /// `id` is the managed desktop the workspace lives on — what weft-bar and
-    /// weftctl have always decoded, as `UInt64` — so several workspaces on one
-    /// desktop share it; they are told apart by `label`. `current` means
-    /// showing on its display right now. A workspace holding nothing reports
-    /// the kind it *would* get: its override, else its `[[space]] layout`,
-    /// else the default — an empty tree's kind is `bsp`, which told Settings
-    /// `bsp` for a workspace the file declares `float`.
-    /// `pinnedDisplay` is `[[space]] display = …` resolved to a display uuid.
-    /// A hidden workspace is reported on the display it pins to, because that
-    /// is where showing it puts it; it lives on whichever desktop it was
-    /// created on until then. Reporting that one listed a workspace pinned to
-    /// the second display under the first, and the menu counted a display
-    /// that does not exist.
+    /// `id` is the desktop's space id, what weft-bar and weftctl have always
+    /// decoded as `UInt64`. `current` means its display is showing it right
+    /// now. A workspace holding nothing reports the kind it *would* get: its
+    /// override, else its `[[space]] layout`, else the default — an empty
+    /// tree's kind is `bsp`, which told Settings `bsp` for a desktop the file
+    /// declares `float`.
     public static func workspaces(
         in sp: SpaceState,
         declaredLayout: (String) -> LayoutKind?,
-        defaultLayout: LayoutKind,
-        pinnedDisplay: (String) -> String? = { _ in nil }
+        defaultLayout: LayoutKind
     ) -> [SpaceStatus] {
         sp.wsOrder.compactMap { wsid -> SpaceStatus? in
-            guard let ws = sp.workspaces[wsid], var display = sp.displayBySpace[ws.desktop] else {
+            guard let ws = sp.workspaces[wsid], let display = sp.displayBySpace[ws.desktop] else {
                 return nil
             }
-            let label = ws.label.isEmpty ? "\(wsid.raw)" : ws.label
-            var desktop = ws.desktop
-            let showing = sp.showingDisplay(of: wsid) != nil
-            if !showing, let pin = pinnedDisplay(label), let pinnedDesktop = sp.managed[pin] {
-                display = pin
-                desktop = pinnedDesktop
-            }
             let layout = ws.layout.windows.isEmpty
-                ? (ws.overrideKind ?? declaredLayout(label) ?? defaultLayout)
+                ? (ws.overrideKind ?? declaredLayout(ws.label) ?? defaultLayout)
                 : ws.layout.kind
             return SpaceStatus(
-                id: desktop,
-                label: label,
+                id: ws.desktop,
+                label: ws.label,
                 layout: layout.rawValue,
                 windows: ws.members.sorted(),
-                current: showing,
+                current: sp.showingDisplay(of: wsid) != nil,
                 display: display
             )
         }

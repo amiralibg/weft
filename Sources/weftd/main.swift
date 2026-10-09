@@ -40,28 +40,24 @@ final class Daemon: @unchecked Sendable {
     private let hub = SubscriberHub()
     private let bus = EventBus()
     private let observers = ObserverSet()
-    /// Hides and shows a workspace's windows, with a crash-safe ledger read at
-    /// startup (WORKSPACES.md, "Park and unpark").
+    /// The 0.9.21 park ledger, read once at startup to bring back anything an
+    /// older weft left off screen. weft no longer parks; the ledger goes in
+    /// the release after this one (NATIVE.md, "Persistence").
     private let parker: Parker
-    /// Held while a switch or a move decides what is hidden and parks or
-    /// unparks it, and while the re-hide pass does the same. Switches run on
-    /// the command queue and on the sync queue (focus), and the re-hide runs
-    /// on the sync queue. Without the lock, a re-hide that read "hidden" just
-    /// before a switch showed the workspace would park the windows it showed.
-    /// Recursive because following a moved window is a move, then a switch.
+    /// Held while a switch decides and performs a desktop switch, so a switch
+    /// from a keybind and one from the sync queue (focus) do not interleave.
     private let visibility = NSRecursiveLock()
-    /// Windows weft is moving between displays itself, and when it started.
-    /// The WindowServer can still report the display a window is leaving for
-    /// a moment, and a sweep in that moment would read the move as the user
-    /// dragging it back. `reconcileWorkspaces` keeps these in their
-    /// workspace; entries go stale after `inFlightGrace`. Core-owned.
-    private var inFlight: [WindowID: Date] = [:]
-    private static let inFlightGrace: TimeInterval = 1.5
+    /// The private routes this macOS build passed (NATIVE.md, "Self-tests
+    /// and degradation"). Set once the launch self-test is in; until then
+    /// nothing bridged runs. Under `routesLock`.
+    private var routesLocked: NativeRoutes?
+    private let routesLock = NSLock()
+    /// A bridged switch failed its per-call verify: the triple is off for the
+    /// rest of this launch, and switches go by Dock swipe.
+    private var bridgedSwitchOffLocked = false
     /// Windows in no workspace at all, by `sticky`: never hidden, never laid
     /// out. Core-owned.
     private var sticky: Set<WindowID> = []
-    /// Windows in native fullscreen, and the workspace each left. Core-owned.
-    private var fullscreenMemo: [WindowID: WorkspaceID] = [:]
     /// Debounced handling of a display reconfiguration storm.
     private var pendingDisplaySettle: DispatchWorkItem?
     private let input = InputManager()
@@ -356,26 +352,48 @@ final class Daemon: @unchecked Sendable {
         // `inserting(in:)` picks split axes from it, and the sweep tiles
         // around windows it should have been putting back.
         syncQueue.async { [weak self] in
-            self?.unparkFromLedger()
-            self?.restoreFloatingAndSticky()
-            self?.syncFromSnapshot(initial: true)
+            guard let self else { return }
+            self.unparkFromLedger()
+            self.restoreFloating()
+            // The invisible tests before the first sweep, whose rules may move
+            // windows; the visible switch test after it, when this macOS
+            // build has none on record.
+            self.testRoutes(visible: false)
+            self.syncFromSnapshot(initial: true)
+            if self.routes?[.switchDesktop].state == .untested { self.testRoutes(visible: true) }
         }
     }
 
     func stop() {
-        // Membership first: the next launch puts every window back in its
-        // workspace from this, and unparking below is what makes the windows
-        // visible while weft is not running.
-        writeMembership(membershipSnapshot())
+        // The layouts first: a restart in this boot puts every tree back from
+        // them. Nothing is parked any more; the unpark is for a ledger an
+        // older weft left that the startup pass could not finish.
+        writeLayouts(layoutsSnapshot())
         parker.unparkAll()
     }
 
+    /// The launch self-test (NATIVE.md, "Self-tests and degradation"): the
+    /// symbol walk and the invisible move test every launch, the visible
+    /// switch test once per macOS build — after the first sweep, so the
+    /// desktops it switches between are already tiled.
+    private func testRoutes(visible: Bool) {
+        let routes = NativeSelfTest.routes(allowVisible: visible)
+        routesLock.withLock { routesLocked = routes }
+        let line = NativeRoute.allCases.map { "\($0.rawValue) \(routes[$0].state.rawValue)" }.joined(separator: ", ")
+        fputs("weftd: native routes on \(routes.macOSBuild): \(line); switching by \(routes.switchMethod.rawValue)\n", stderr)
+        for route in NativeRoute.allCases where routes[route].state == .failed {
+            fputs("weftd: \(route.rawValue) failed (\(routes[route].detail)) — lost: \(route.lostWithout)\n", stderr)
+        }
+    }
+
+    /// The routes this launch may use. Nil until the self-test is in.
+    private var routes: NativeRoutes? { routesLock.withLock { routesLocked } }
+
     /// Put back anything a previous run left off screen.
     ///
-    /// Everything comes back, including windows of workspaces that were
-    /// hidden: the first sweep re-files them from `membership.json` and parks
-    /// the hidden ones again. Unparking first is the safe order — a window a
-    /// failed launch never re-hides is on screen, not lost.
+    /// 0.9.21 hid workspaces by parking their windows at a screen corner, with
+    /// a ledger of where each came from. The first launch of 0.9.22 brings
+    /// every one of them back, and nothing parks again.
     ///
     /// Needs no AX, no display lookup and no permission — the ledger holds
     /// each window's frame, and the move is pure WindowServer.
@@ -433,18 +451,21 @@ final class Daemon: @unchecked Sendable {
     private func findWindow(at point: CGPoint) -> (wid: WindowID, frame: Frame, isFloating: Bool)? {
         let px = Double(point.x)
         let py = Double(point.y)
-        let parked = parker.parkedWIDs
+        let sp = readSpaces()
+        // A float on a desktop that is not showing keeps its frame — only
+        // the desktop is hidden — so it must not be found under the pointer.
+        let showing = Set(sp.visibleWorkspaces)
         // Off-core (this runs on `incoming`), so take the set through core
         // rather than reading the live one under the frame reads below.
         for wid in core.sync(execute: { self.manualFloat }) {
-            if !parked.contains(wid), let f = WorldReader.frame(of: wid), f.contains(x: px, y: py) {
+            guard let ws = sp.workspace(holding: wid), showing.contains(ws) else { continue }
+            if let f = WorldReader.frame(of: wid), f.contains(x: px, y: py) {
                 return (wid, f, true)
             }
         }
         // The pointer decides which display, and that display's current
         // space owns the layout under it — not whichever space has keyboard
         // focus, which may be on the other monitor entirely.
-        let sp = readSpaces()
         let onDisplay = displayUUID(containing: point)
         guard let sid = onDisplay.flatMap({ sp.currentByDisplay[$0] }) ?? sp.currentSpace,
               let layout = sp.layout(on: sid)
@@ -454,11 +475,11 @@ final class Daemon: @unchecked Sendable {
         switch layout {
         case .tiling(let t):
             let frames = WeftCore.layout(t, in: screen, config: config)
-            for (w, f) in frames where !parked.contains(w) && f.contains(x: px, y: py) {
+            for (w, f) in frames where f.contains(x: px, y: py) {
                 return (w, f, false)
             }
         case .float(let fl):
-            for w in fl.windows.reversed() where !parked.contains(w) {
+            for w in fl.windows.reversed() {
                 if let f = WorldReader.frame(of: w), f.contains(x: px, y: py) {
                     return (w, f, true)
                 }
@@ -597,7 +618,7 @@ final class Daemon: @unchecked Sendable {
                 // that is exactly where the user's cursor already is.
                 refreshDividerZones()
                 bus.emit(stateChangedEvent())
-                scheduleMembershipSave()
+                scheduleLayoutSave()
                 return
             }
             if button == .left && !drag.isFloating {
@@ -613,7 +634,7 @@ final class Daemon: @unchecked Sendable {
                     }
                     applyCurrentSpace()
                     bus.emit(stateChangedEvent())
-                    scheduleMembershipSave()
+                    scheduleLayoutSave()
                 }
             }
         }
@@ -1244,53 +1265,41 @@ final class Daemon: @unchecked Sendable {
             let label: String
         }
         var pendingMoves: [RuleMove] = []
-        let reported = world.displays.map {
+        // For telling a borderless-fullscreen game or player from a window,
+        // and for numbering the displays west to east.
+        let screenFrames = SpaceControl.displayLayout()
+        let mainDisplay = SpaceControl.mainDisplayUUID()
+        let reported = world.displays.map { d in
             DisplayDesktops(
-                uuid: $0.uuid,
-                desktops: $0.spaces.filter(liveSids.contains),
-                current: $0.currentSpace
+                uuid: d.uuid,
+                desktops: d.spaces.filter(liveSids.contains),
+                current: d.currentSpace,
+                isMain: d.uuid == mainDisplay,
+                originX: screenFrames.first { $0.uuid == d.uuid }?.frame.x ?? 0
             )
         }
-        let pins = currentPins(cfg)
-        // Native fullscreen spaces: in the topology, never in `liveSids`.
-        let fullscreenSids = Set(world.displays.flatMap(\.spaces)).subtracting(liveSids)
-        // For telling a borderless-fullscreen game or player from a window.
-        let screenFrames = SpaceControl.displayLayout()
-        // Windows back from native fullscreen whose workspace is hidden: shown
-        // in phase 3, once the state is settled.
-        var backFromFullscreen: [(wid: WindowID, workspace: WorkspaceID)] = []
         let (currentSids, visible, total) = core.sync { () -> (Set<SpaceID>, [WindowInfo], Int) in
             var sp = self.spaces
             // Which workspaces already existed, taken before `adoptDisplays`
-            // creates any. A workspace absent here is one weft has not visited
-            // this launch, and further down that is what earns it a seeded
-            // layout kind.
+            // creates any. A workspace absent here is a desktop weft has not
+            // seen this launch, and further down that is what earns it a
+            // seeded layout kind.
             let priorKeys = Set(sp.workspaces.keys)
             let oldCurrent = sp.currentSpace
             if sp.workspaces.isEmpty {
-                // Fresh launch: seed names from weft.toml [[space]] decls so a
-                // first config just works; falls back to labels.json, then
-                // numerics. Delete labels.json to re-adopt the config's names
-                // wholesale.
+                // Fresh launch: labels from weft.toml [[space]], else
+                // labels.json, else numbers. Delete labels.json to re-adopt
+                // the config's names wholesale.
                 let declared = cfg.spaces.map { $0.label }
-                // The desktops weft managed before a restart in this boot;
-                // `adoptDisplays` keeps each one that still exists.
-                if sp.managed.isEmpty { sp.managed = Daemon.loadManaged() }
-                sp.adoptDisplays(
-                    reported, names: !declared.isEmpty ? declared : Daemon.loadLabels(), pins: pins
-                )
-                // After, not before: an override belongs to a workspace, and
-                // `adoptDisplays` is what builds both the workspaces and the
-                // order the saved list is counted in.
-                sp.assignOverrides(kinds: Daemon.loadLayoutOverrides())
-                // And the windows back into the workspaces they were in,
-                // when the file is from this boot.
-                sp.seedMembership(Daemon.loadMembership(), trees: Daemon.loadTrees())
+                sp.adoptDisplays(reported, names: !declared.isEmpty ? declared : Daemon.loadLabels())
+                // After, not before: a saved layout belongs to a desktop's
+                // place, and `adoptDisplays` is what numbers the places.
+                Daemon.restoreLayouts(&sp)
             } else {
-                // Displays or desktops changed at runtime: keep every
-                // workspace and label, rehome what lost its desktop, and give
-                // any new display something to show.
-                sp.adoptDisplays(reported, names: nil, pins: pins)
+                // Desktops added, removed or reordered in Mission Control, or
+                // a display plugged or unplugged: one workspace per desktop
+                // again, layouts kept by SpaceID and stashed by place.
+                sp.adoptDisplays(reported)
             }
             // Seed only. The menu-bar display is right at startup but stale
             // afterwards (see noteFocusedWindow), so it must not overwrite a
@@ -1351,6 +1360,11 @@ final class Daemon: @unchecked Sendable {
             // the menu bar — and not to the workspace showing at the time.
             var looseDesktops: [WindowID: [SpaceID]] = [:]
             let showing = Set(sp.currentByDisplay.values)
+            // On every desktop (Dock › Options › All Desktops): floats, and
+            // weft never moves it (NATIVE.md).
+            let everywhere = membershipByDesktop(
+                Dictionary(uniqueKeysWithValues: world.windows.map { ($0.id, $0.spaces) }), active: sp.active
+            ).everywhere
             func fileLoose(_ w: WindowInfo) {
                 if screenLocked || w.isTileable(visibleSpaces: showing) { looseDesktops[w.id] = w.spaces }
             }
@@ -1371,7 +1385,7 @@ final class Daemon: @unchecked Sendable {
                 // already skips the membership line below, and this is the
                 // one that did not.
                 // Sticky: in no workspace, so neither laid out nor loose.
-                if self.sticky.contains(w.id) {
+                if self.sticky.contains(w.id) || everywhere.contains(w.id) {
                     unmanagedNow.insert(w.id)
                     continue
                 }
@@ -1490,47 +1504,14 @@ final class Daemon: @unchecked Sendable {
             self.floatFrames = self.floatFrames.filter { worldWids.contains($0.key) }
             unmanagedNow.formUnion(self.manualFloat)
             self.unmanaged = unmanagedNow
-            // The seam. Up to here everything came from SLS: `windowDesktops`
-            // is the WindowServer's answer to "which desktop is this window
-            // on", verbatim. `reconcileWorkspaces` turns that into "which
-            // workspace", which is weft's own answer and the only part of
-            // membership macOS does not own.
-            //
-            // Laid-out and loose windows go through it together, against the
-            // workspaces' whole membership, so a window keeps its workspace
-            // across being floated and tiled again — and a float in a hidden
-            // workspace stays in it rather than joining whatever is showing.
-            // The answer is then split back by which of the two it is.
-            let live = sp.liveWorkspaces(desktops: liveSids)
-            self.inFlight = self.inFlight.filter { now.timeIntervalSince($0.value) < Self.inFlightGrace }
-            // Native fullscreen. A window that went into a fullscreen space is
-            // on no managed desktop, so the reconcile below takes it out of its
-            // workspace — remember which one it was. When it comes back, it
-            // goes back there, not into whatever is showing, and a hidden
-            // workspace is shown: leaving fullscreen was the user's own act on
-            // that window.
-            let managedDesktops = Set(sp.managed.values)
-            for w in world.windows {
-                let on = Set(w.spaces)
-                if !on.isEmpty, on.isSubset(of: fullscreenSids) {
-                    if self.fullscreenMemo[w.id] == nil, let held = sp.workspace(holding: w.id) {
-                        self.fullscreenMemo[w.id] = held
-                    }
-                } else if !on.isDisjoint(with: managedDesktops),
-                          let memo = self.fullscreenMemo.removeValue(forKey: w.id),
-                          sp.workspaces[memo] != nil {
-                    if sp.workspace(holding: w.id) == nil { sp.workspaces[memo]?.loose.insert(w.id) }
-                    backFromFullscreen.append((w.id, memo))
-                }
-            }
-            self.fullscreenMemo = self.fullscreenMemo.filter { worldWids.contains($0.key) }
-            let reconciled = reconcileWorkspaces(
-                windowDesktops: windowDesktops.merging(looseDesktops) { tiled, _ in tiled },
-                membership: sp.workspaces.mapValues { $0.members },
-                desktopOf: sp.workspaces.mapValues { $0.desktop },
-                activeOn: sp.active,
-                inFlight: Set(self.inFlight.keys)
-            )
+            // Membership is macOS's: each window is in the workspace of the
+            // one desktop the WindowServer reports it on. Laid-out and loose
+            // windows go through it together and are split back by which of
+            // the two they are, so a float keeps its desktop's membership.
+            let live = Set(sp.wsOrder)
+            let reconciled = membershipByDesktop(
+                windowDesktops.merging(looseDesktops) { tiled, _ in tiled }, active: sp.active
+            ).members
             let looseIDs = Set(looseDesktops.keys)
             let membership = reconciled.mapValues { $0.filter { !looseIDs.contains($0) } }
             for id in live {
@@ -1555,15 +1536,6 @@ final class Daemon: @unchecked Sendable {
                     ?? cfg.spaces.first(where: { $0.label == ws.label })?.layout
                     ?? cfg.general.defaultLayout
                 self.convertLayout(&sp, workspace: id, to: kind)
-            }
-            // Every managed desktop must have a workspace to show, and the
-            // failure if one does not is silent from end to end: a window that
-            // arrives there is dropped by `reconcileWorkspaces`, and
-            // `refreshDividerZones` skips the desktop so its borders and grab
-            // zones are never drawn. `adoptDisplays` maintains this by
-            // construction, so reaching here means it has a hole — say so.
-            for (display, desktop) in sp.managed where sp.active[desktop] == nil {
-                fputs("weftd: display \(display) has no workspace — windows there will not be tiled\n", stderr)
             }
             self.spaces = sp
             let currentSids = Set(sp.currentByDisplay.values)
@@ -1625,14 +1597,6 @@ final class Daemon: @unchecked Sendable {
             pendingRuleResync = work
             syncQueue.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
-        for back in backFromFullscreen {
-            let sp = readSpaces()
-            guard sp.showingDisplay(of: back.workspace) == nil,
-                  let display = displayOf(window: back.wid) ?? sp.display(of: back.workspace),
-                  let desktop = sp.managed[display], !sp.isPaused(display)
-            else { continue }
-            switchWorkspace(on: desktop, to: back.workspace, focusWindow: back.wid, stealFocus: false)
-        }
         let tBind0 = Date()
         applier.bind(windows: visible.map { (wid: $0.id, pid: $0.pid) })
         applier.forget(keeping: worldWids)
@@ -1654,10 +1618,7 @@ final class Daemon: @unchecked Sendable {
             applySpaceLayout(sid, raiseFocus: sid == focusedSID)
         }
         watchCurrent()
-        // After a restart, the hidden workspaces' windows are all on screen.
-        // After that, only one an app has moved back is.
-        if initial { hideHiddenWorkspaces() } else { rehideStragglers() }
-        scheduleMembershipSave()
+        scheduleLayoutSave()
         bus.emit(stateChangedEvent())
         if initial {
             let geometry = displaysWestToEast().enumerated().map { i, uuid -> String in
@@ -1677,31 +1638,6 @@ final class Daemon: @unchecked Sendable {
                     + "\(ms(tClassify0, tClassify))ms, bind \(ms(tBind0, tBind))ms)\n",
                 stderr
             )
-        }
-    }
-
-    /// After the first sweep, park every workspace that is not showing.
-    ///
-    /// Startup unparks everything the ledger held, and `membership.json` has
-    /// just put those windows back in their workspaces — which leaves the
-    /// hidden ones on screen. One park per display, of every hidden
-    /// workspace's members, at that display's corner.
-    private func hideHiddenWorkspaces() {
-        let sp = readSpaces()
-        let showing = Set(sp.active.values)
-        var byDisplay: [String: [WindowID]] = [:]
-        for id in sp.wsOrder where !showing.contains(id) {
-            guard let ws = sp.workspaces[id], !ws.members.isEmpty,
-                  let display = sp.displayBySpace[ws.desktop]
-            else { continue }
-            byDisplay[display, default: []] += ws.members
-        }
-        for (display, wids) in byDisplay {
-            do {
-                try park(wids, from: display)
-            } catch {
-                fputs("weftd: could not re-hide \(wids.count) window(s) after restart: \(error)\n", stderr)
-            }
         }
     }
 
@@ -1725,7 +1661,6 @@ final class Daemon: @unchecked Sendable {
             self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
             self.sticky.remove(wid)
-            self.inFlight.removeValue(forKey: wid)
         }
         // The WindowServer recycles window ids, and `watchOnLoop` skips any wid
         // it already holds an element for — so a dead id left in the observer's
@@ -1789,14 +1724,8 @@ final class Daemon: @unchecked Sendable {
     /// Trailing re-apply after `space move-window`, for the size write an app
     /// drops while it is still changing spaces.
     private var pendingMoveSettle: DispatchWorkItem?
-    /// The re-hide pass after a switch or a move, for a frame write that
-    /// was already running when the window was parked (`rehideStragglers`).
-    private var pendingRehide: DispatchWorkItem?
-    /// Windows the re-hide pass could not move, left alone until the next
-    /// switch rather than tried again on every sweep. Guarded by `visibility`.
-    private var rehideRefused: Set<WindowID> = []
-    /// Debounced write of `membership.json`.
-    private var pendingMembershipSave: DispatchWorkItem?
+    /// Debounced write of `layouts.json`.
+    private var pendingLayoutSave: DispatchWorkItem?
 
     /// Request a world resync. `fast` collapses the current burst into a single
     /// sweep ~20 ms out; the 0.3 s trailing sweep always follows, because a
@@ -1912,14 +1841,14 @@ final class Daemon: @unchecked Sendable {
     private func evictOrderedOut() {
         guard !SystemChecks.screenLocked() else { return }
         let sp = readSpaces()
-        // Managed desktops showing right now, asked of the WindowServer rather
-        // than the cache: this forgets windows that left the screen, and a
-        // swipe the cache has not caught up with takes every window of the
-        // desktop swiped away from off screen — which is not them closing.
+        // Desktops showing right now, asked of the WindowServer rather than
+        // the cache: this forgets windows that left the screen, and a swipe
+        // the cache has not caught up with takes every window of the desktop
+        // swiped away from off screen — which is not them closing.
         let live = SpaceControl.currentSpaceByDisplay()
         let visible = sp.displays.compactMap { d -> SpaceID? in
-            guard let managed = sp.managed[d], live[d] == managed else { return nil }
-            return managed
+            guard let current = live[d], sp.active[current] != nil else { return nil }
+            return current
         }
         let held = visible.flatMap { sp.layout(on: $0)?.windows ?? [] }
         guard !held.isEmpty else { return }
@@ -1975,18 +1904,9 @@ final class Daemon: @unchecked Sendable {
         guard let homeSID = sp0.visibleSpaces.first(where: {
             sp0.layout(on: $0)?.windows.contains(wid) == true
         }) else {
-            // If the window belongs to an inactive workspace on a visible desktop,
-            // switch to that workspace immediately (Phase 4).
-            // A float counts: it is a member of its workspace, not of none.
-            if let targetID = sp0.workspace(holding: wid),
-               let sid = sp0.desktop(of: targetID),
-               sp0.visibleSpaces.contains(sid),
-               sp0.active[sid] != targetID
-            {
-                switchWorkspace(on: sid, to: targetID, focusWindow: wid, stealFocus: false)
-                bus.emit(DaemonEvent(kind: .windowFocused, window: wid))
-                return
-            }
+            // A float on a showing desktop: remember it as the one to come
+            // back to.
+            if sp0.workspace(holding: wid) != nil { updateSpaces { $0.noteFocus(wid) } }
             // A float, a rule's `manage = false`, a quirk, a panel: known
             // to the last sweep and deliberately in no layout. Another
             // sweep would reach the same verdict, and clicking back and
@@ -2008,6 +1928,7 @@ final class Daemon: @unchecked Sendable {
         updateSpaces { sp in
             guard let layout = sp.layout(on: homeSID) else { return }
             let sid = homeSID
+            sp.noteFocus(wid)
             switch layout {
             case .tiling(let t):
                 guard t.windows.contains(wid) else { return }
@@ -2109,21 +2030,13 @@ final class Daemon: @unchecked Sendable {
     /// The displays changed and have stopped changing.
     ///
     /// Geometry first: a resolution change or an unplug leaves every layout
-    /// sized to a screen that no longer exists. Windows parked at a corner
-    /// that is gone are brought back; the sweep rehomes the workspaces of a
-    /// display that went (`adoptDisplays`) and gives a display that arrived
-    /// something to show; and then every hidden workspace is parked again,
-    /// at the corners the new arrangement leaves free.
+    /// sized to a screen that no longer exists. The sweep then numbers the
+    /// desktops again: a display that went has its desktops' layouts stashed
+    /// by place, and one that came back takes them back (`adoptDisplays`).
     private func displaysSettled() {
         refreshScreens()
-        let displays = SpaceControl.displayLayout().map(\.frame)
-        parker.unparkOutside(displays: displays)
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
-        hideHiddenWorkspaces()
-        // A workspace shown on the main display while its own was unplugged
-        // goes back to it.
-        enforcePins()
     }
 
     // MARK: - Socket handling
@@ -2276,7 +2189,7 @@ final class Daemon: @unchecked Sendable {
             }
             if let sid = home { applySpaceLayout(sid) }
             bus.emit(stateChangedEvent())
-            scheduleMembershipSave()
+            scheduleLayoutSave()
             return IPCResponse(ok: true, output: "window \(wid) tiled")
         } else {
             let uScreen = usableScreen(for: home)
@@ -2314,7 +2227,7 @@ final class Daemon: @unchecked Sendable {
                 focusAndWarp(window: wid, pid: pid)
             }
             bus.emit(stateChangedEvent())
-            scheduleMembershipSave()
+            scheduleLayoutSave()
             return IPCResponse(ok: true, output: "window \(wid) floating")
         }
     }
@@ -2341,12 +2254,7 @@ final class Daemon: @unchecked Sendable {
         }
         if let targetWs {
             if !sp.currentByDisplay.values.contains(sid) {
-                let label = targetWs.label.isEmpty ? "\(targetWs.id.raw)" : targetWs.label
-                let switched = handleSpace(.focus(label))
-                guard switched.ok else { return switched }
-            } else if sp.active[sid] != targetWs.id {
-                switchWorkspace(on: sid, to: targetWs.id, focusWindow: wid, stealFocus: true)
-                return IPCResponse(ok: true, output: "focused \(wid)")
+                if let failure = showWorkspace(targetWs.id, focusWindow: wid) { return failure }
             }
         } else {
             if !sp.currentByDisplay.values.contains(sid) {
@@ -2545,7 +2453,7 @@ final class Daemon: @unchecked Sendable {
         if !frames.isEmpty {
             refreshDividerZones()
             // The tree changed shape; a restart should find it this way.
-            scheduleMembershipSave()
+            scheduleLayoutSave()
         }
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "\(describe()) dispatched=\(frames.count)")
@@ -2639,65 +2547,22 @@ final class Daemon: @unchecked Sendable {
 
     private func handleSpace(_ sub: SpaceCommand) -> IPCResponse {
         switch sub {
-        case .focus(let target) where target == "next" || target == "prev":
-            // Stepping, from a key or a swipe. Resolved here rather than by
-            // `resolveWorkspace` alone, because what to step over depends on
-            // the pins, which are config, and a paused display has no
-            // "current" workspace to step from.
-            let sp = refreshCurrentDesktops()
-            if let display = focusedDisplayUUID(sp), sp.isPaused(display) { return pausedError(sp, display) }
-            let here = focusedDisplayUUID(sp)
-            let pinnedElsewhere = Set(currentPins(currentConfig()).compactMap { label, display in
-                display == here ? nil : sp.id(forLabel: label)
-            })
-            guard let id = sp.workspace(steppingBy: target == "next" ? 1 : -1, skipping: pinnedElsewhere),
-                  let label = sp.label(of: id)
-            else {
-                return IPCResponse(ok: false, error: "no other \(target == "next" ? "next" : "previous") workspace "
-                    + "with windows in it on this display")
-            }
-            return handleSpace(.focus(label))
         case .focus(let target):
             // From the WindowServer, not the cache: a swipe or a fullscreen app
-            // the notification has not reported yet would otherwise have weft
-            // park and show windows on a display that is not showing them.
-            var created = false
-            _ = refreshCurrentDesktops()
-            let resolved: WorkspaceID? = core.sync {
-                let before = self.spaces.wsOrder.count
-                let id = self.spaces.resolveOrCreateWorkspace(target)
-                created = self.spaces.wsOrder.count != before
-                return id
-            }
-            if created { saveLabels() }
-            let sp = readSpaces()
-            guard let id = resolved else {
-                let known = sp.wsOrder.compactMap { sp.label(of: $0) }.joined(separator: ", ")
-                return IPCResponse(ok: false, error: "unknown space '\(target)' (labels: \(known))")
-            }
-            let label = sp.label(of: id) ?? "\(id.raw)"
-            let pinned = currentPins(currentConfig())[label].flatMap { sp.managed[$0] != nil ? $0 : nil }
-            // Showing, but not on the display it is pinned to: it goes there.
-            if let pinned, let showing = sp.showingDisplay(of: id), showing != pinned,
-               let desktop = sp.managed[pinned] {
-                if sp.isPaused(pinned) { return pausedError(sp, pinned) }
-                switchWorkspace(on: desktop, to: id, stealFocus: true)
-                return IPCResponse(ok: true, output: "moved \(label) to the display it is pinned to")
-            }
+            // the notification has not reported yet would otherwise decide.
+            let sp = refreshCurrentDesktops()
+            guard let id = sp.resolveWorkspace(target) else { return unknownDesktop(target, sp) }
+            let label = sp.label(of: id) ?? target
             // Already on screen somewhere. On this display that is nothing to
-            // do — re-tiling here yanked focus around on a repeated keypress.
-            // On the other display it is a focus move, not a switch: swapping
-            // workspaces between displays would move every window the user was
-            // not asking about.
-            if let desktop = sp.desktop(of: id), sp.active[desktop] == id,
-               let display = sp.displayBySpace[desktop] {
-                if sp.isPaused(display) { return pausedError(sp, display) }
+            // do. On another display it is a focus move, not a switch: nothing
+            // the user was not asking about changes (NATIVE.md, story 5).
+            if let display = sp.showingDisplay(of: id) {
                 if display == focusedDisplayUUID(sp) {
                     return IPCResponse(ok: true, output: "already on \(label)")
                 }
                 let previous = sp.currentWorkspace
                 updateSpaces { s in if let previous, previous != id { s.recentWorkspace = previous } }
-                let took = takeFocus(display: display, showing: desktop)
+                let took = takeFocus(display: display, showing: sp.desktop(of: id) ?? 0)
                 bus.emit(stateChangedEvent())
                 return IPCResponse(
                     ok: true,
@@ -2706,26 +2571,11 @@ final class Daemon: @unchecked Sendable {
                         : "focused \(label) on the other display"
                 )
             }
-            // Pinned: on its own display, wherever the user is. Otherwise here.
-            guard let display = pinned ?? focusedDisplayUUID(sp), let desktop = sp.managed[display] else {
-                return IPCResponse(ok: false, error: "no display to show '\(label)' on")
-            }
-            if sp.isPaused(display) { return pausedError(sp, display) }
-            switchWorkspace(on: desktop, to: id, stealFocus: true)
+            if let failure = showWorkspace(id) { return failure }
             return IPCResponse(ok: true, output: "switched to \(label)")
         case .moveWindow(let target, let widOpt, let follow):
-            _ = refreshCurrentDesktops()
-            var created = false
-            let resolved: WorkspaceID? = core.sync {
-                let before = self.spaces.wsOrder.count
-                let id = self.spaces.resolveOrCreateWorkspace(target)
-                created = self.spaces.wsOrder.count != before
-                return id
-            }
-            if created { saveLabels() }
-            guard let id = resolved else {
-                return IPCResponse(ok: false, error: "unknown space '\(target)'")
-            }
+            let sp = refreshCurrentDesktops()
+            guard let id = sp.resolveWorkspace(target) else { return unknownDesktop(target, sp) }
             guard let wid = widOpt ?? activeWindowID() else {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
@@ -2734,14 +2584,14 @@ final class Daemon: @unchecked Sendable {
             guard !name.isEmpty else {
                 return IPCResponse(ok: false, error: "usage: space label <name>")
             }
-            guard let sid = currentSID() else {
-                return IPCResponse(ok: false, error: "no current space")
+            let sp = refreshCurrentDesktops()
+            guard let id = sp.currentWorkspace, let n = sp.number(of: id) else {
+                return IPCResponse(ok: false, error: "no current desktop")
             }
-            updateSpaces { sp in
-                if let id = sp.active[sid] { sp.workspaces[id]?.label = name }
-            }
+            updateSpaces { $0.setLabel(name, number: n) }
             saveLabels()
-            return IPCResponse(ok: true, output: "space \(sid) labelled '\(name)'")
+            bus.emit(stateChangedEvent())
+            return IPCResponse(ok: true, output: "desktop \(n) labelled '\(name)'")
         case .layout(let kind):
             let targetKind: LayoutKind
             // Set when the request named something weft no longer does, so
@@ -2787,13 +2637,32 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
+    /// The answer for a target that names no desktop (NATIVE.md, "Desktop
+    /// count"): weft cannot create desktops, so it says how to add one.
+    private func unknownDesktop(_ target: String, _ sp: SpaceState) -> IPCResponse {
+        if target == "next" || target == "prev" {
+            return IPCResponse(ok: false, error: "no desktop \(target == "next" ? "after" : "before") this one on this display")
+        }
+        if target == "recent" {
+            return IPCResponse(ok: false, error: "no recent desktop yet")
+        }
+        if let n = sp.missingDesktop(target) {
+            let named = Int(target) == nil ? " ('\(target)')" : ""
+            return IPCResponse(
+                ok: false,
+                error: "desktop \(n)\(named) does not exist; add desktops in Mission Control (weft cannot create them)"
+            )
+        }
+        let known = sp.wsOrder.compactMap { sp.label(of: $0) }.joined(separator: ", ")
+        return IPCResponse(ok: false, error: "unknown desktop '\(target)' (desktops: \(known))")
+    }
+
     // MARK: - Showing and moving
 
-    /// The display "here" means: the one keyboard focus is on, while weft
-    /// manages it; else the first display.
+    /// The display "here" means: the one keyboard focus is on, else the first.
     private func focusedDisplayUUID(_ sp: SpaceState) -> String? {
-        if let d = sp.focusedDisplay, sp.managed[d] != nil { return d }
-        return sp.displays.first { sp.managed[$0] != nil }
+        if let d = sp.focusedDisplay, sp.currentByDisplay[d] != nil { return d }
+        return sp.displays.first
     }
 
     /// Bring `currentByDisplay` up to date from the WindowServer before a
@@ -2813,22 +2682,17 @@ final class Daemon: @unchecked Sendable {
         return readSpaces()
     }
 
-    /// Why a command did nothing on a display weft is paused on. Said rather
-    /// than swallowed: weft does not switch macOS desktops, so the user has to,
-    /// and the message says which one.
+    /// Why a command did nothing on a display showing a fullscreen app.
     private func pausedError(_ sp: SpaceState, _ display: String) -> IPCResponse {
         let which = displaysWestToEast().firstIndex(of: display).map { "display \($0 + 1)" } ?? "this display"
-        let desktops = sp.order.filter { sp.displayBySpace[$0] == display }
-        let number = sp.managed[display].flatMap { desktops.firstIndex(of: $0) }.map { " (desktop \($0 + 1))" } ?? ""
         return IPCResponse(
             ok: false,
-            error: "weft is paused on \(which): it is showing another macOS desktop or a fullscreen app. "
-                + "Go back to weft's desktop\(number) there first."
+            error: "\(which) is showing a fullscreen app, which weft leaves alone. "
+                + "Leave fullscreen or switch to a desktop first."
         )
     }
 
-    /// The whole frame of the display a desktop is on — where its parked
-    /// windows go.
+    /// The whole frame of the display a desktop is on.
     private func displayBounds(for sid: SpaceID) -> Frame {
         displayFrame(readSpaces().displayBySpace[sid])
     }
@@ -2837,37 +2701,6 @@ final class Daemon: @unchecked Sendable {
         let layout = SpaceControl.displayLayout()
         if let uuid, let d = layout.first(where: { $0.uuid == uuid }) { return d.frame }
         return layout.first?.frame ?? usableScreen(onDisplay: uuid)
-    }
-
-    /// `[[space]] display = …`, resolved against the displays connected now:
-    /// label → display uuid. Empty, and free, when nothing is pinned.
-    private func currentPins(_ cfg: ValidatedConfig) -> [String: String] {
-        let pinned = cfg.spaces.compactMap { d in d.display.map { (d.label, $0) } }
-        guard !pinned.isEmpty else { return [:] }
-        let ids = SpaceControl.displayIdentities()
-        var out: [String: String] = [:]
-        for (label, pin) in pinned { out[label] = resolvePin(pin, among: ids) }
-        return out
-    }
-
-    /// Put every pinned workspace that is on screen on the wrong display back
-    /// on its own. Run when the pins or the displays change.
-    ///
-    /// Pins used to be read only when a hidden workspace was shown, so
-    /// pinning one that was showing left it where it was, and `space focus`
-    /// on it went to the wrong display. Hidden ones need nothing: showing
-    /// one reads its pin. When two workspaces are pinned to one display,
-    /// the one already showing there stays.
-    private func enforcePins() {
-        let pins = currentPins(currentConfig())
-        for (label, display) in pins.sorted(by: { $0.key < $1.key }) {
-            let sp = readSpaces()
-            guard let id = sp.id(forLabel: label), let desktop = sp.managed[display], !sp.isPaused(display),
-                  let showingOn = sp.showingDisplay(of: id), showingOn != display
-            else { continue }
-            if let there = sp.active[desktop], let l = sp.label(of: there), pins[l] == display { continue }
-            switchWorkspace(on: desktop, to: id, stealFocus: false)
-        }
     }
 
     /// A window exactly the size of its display, menu bar included, on a
@@ -2880,191 +2713,125 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// Where a display's hidden windows go: its own free corner, or — for a
-    /// display with neighbours at every corner — the free corner of another.
-    /// Nil only when no display has one, which a real arrangement cannot
-    /// produce; the bottom-right of the display is used then.
-    private func parkPlace(for uuid: String?) -> (display: Frame, corner: Corner) {
-        let layout = SpaceControl.displayLayout()
-        let frames = layout.map(\.frame)
-        let own = layout.first { $0.uuid == uuid }?.frame ?? frames.first ?? displayFrame(uuid)
-        if let corner = freeCorner(of: own, among: frames) { return (own, corner) }
-        for other in frames where other != own {
-            if let corner = freeCorner(of: other, among: frames) { return (other, corner) }
-        }
-        return (own, .bottomRight)
-    }
-
+    /// Show a workspace: switch its display to its desktop (NATIVE.md,
+    /// "Switching"), then focus the window last used there — or `focusWindow`
+    /// — or, on an empty desktop, the desktop itself. Nil when it is showing;
+    /// otherwise the answer to give.
     @discardableResult
-    private func park(_ wids: [WindowID], from display: String?) throws -> Parker.ParkOutcome {
-        let place = parkPlace(for: display)
-        // A layout write still queued for one of these would land after the
-        // park and bring the window back on screen.
-        applier.cancelWrites(for: wids)
-        return try parker.park(wids, on: place.display, corner: place.corner)
-    }
-
-    /// Park again every window of a hidden workspace that is on screen anyway.
-    ///
-    /// A park is one move, and an app can undo it: a frame write already
-    /// running in a slow app lands just after it, and an app that sets its
-    /// own frame (a browser, an Electron app) puts back the frame it thinks
-    /// it has. Either way the window shows on whichever workspace is
-    /// showing — an empty one included — until its own is shown. `park`
-    /// skips windows still at their spot, so this costs one frame read per
-    /// hidden window and moves only the ones that came back.
-    ///
-    /// Skips paused displays, where nothing of weft's is on screen, and
-    /// windows weft is moving between displays itself.
-    private func rehideStragglers() {
+    private func showWorkspace(
+        _ id: WorkspaceID, focusWindow: WindowID? = nil, stealFocus: Bool = true
+    ) -> IPCResponse? {
         visibility.lock()
         defer { visibility.unlock() }
-        let sp = readSpaces()
-        let moving = core.sync { Set(self.inFlight.keys) }
-        var byDisplay: [String: [WindowID]] = [:]
-        for id in sp.wsOrder where sp.showingDisplay(of: id) == nil {
-            guard let ws = sp.workspaces[id], let display = sp.displayBySpace[ws.desktop],
-                  !sp.isPaused(display)
-            else { continue }
-            byDisplay[display, default: []] += ws.members.filter {
-                !moving.contains($0) && !rehideRefused.contains($0)
-            }
+        let sp = refreshCurrentDesktops()
+        guard let desktop = sp.desktop(of: id), let display = sp.displayBySpace[desktop],
+              let from = sp.currentByDisplay[display]
+        else {
+            return IPCResponse(ok: false, error: "desktop \(sp.label(of: id) ?? "?") has no display")
         }
-        for (display, wids) in byDisplay where !wids.isEmpty {
-            do {
-                let outcome = try park(wids, from: display)
-                rehideRefused.formUnion(outcome.refused)
-                if !outcome.parked.isEmpty {
-                    fputs("weftd: re-hid \(outcome.parked) — back on screen while their workspace was hidden\n", stderr)
-                }
-            } catch {
-                fputs("weftd: could not re-hide \(wids.count) window(s): \(error)\n", stderr)
-            }
+        let previous = sp.currentWorkspace
+        if from != desktop {
+            let t = Trace.start("switch")
+            if let failure = switchDesktop(display: display, from: from, to: desktop) { return failure }
+            t.end()
         }
-    }
-
-    /// One re-hide pass shortly after a switch or a move, replacing any
-    /// pass already waiting. Long enough for an app's frame write to finish:
-    /// one attempt and one retry, each bounded by the 150 ms AX timeout.
-    private func scheduleRehide() {
-        syncQueue.async { [weak self] in
-            guard let self else { return }
-            self.pendingRehide?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.rehideStragglers() }
-            self.pendingRehide = work
-            self.syncQueue.asyncAfter(deadline: .now() + 0.5, execute: work)
-        }
-    }
-
-    /// Record windows weft is about to move between displays, so a sweep that
-    /// lands mid-move keeps them in their workspace (`reconcileWorkspaces`).
-    private func markInFlight(_ wids: [WindowID]) {
-        let now = Date()
-        let mark = { for w in wids { self.inFlight[w] = now } }
-        if isOnCore() { mark() } else { core.sync(execute: mark) }
-    }
-
-    /// Show `targetWsID` on the display whose managed desktop is `sid`.
-    ///
-    /// What was showing there is parked; the target's windows are unparked and
-    /// laid out. When the target last lived on another display it moves here:
-    /// its tiled windows go by the layout, its floats by `translate`, and all
-    /// of them are marked in flight. When it is *showing* on another display,
-    /// `SpaceState.show` swaps the two, which is what `move space display` is.
-    private func switchWorkspace(
-        on sid: SpaceID,
-        to targetWsID: WorkspaceID,
-        focusWindow: WindowID? = nil,
-        stealFocus: Bool = true
-    ) {
-        visibility.lock()
-        var locked = true
-        defer { if locked { visibility.unlock() } }
-        rehideRefused = []
-        let sp = readSpaces()
-        guard let currentActive = sp.active[sid], let display = sp.displayBySpace[sid] else { return }
-        if currentActive == targetWsID {
-            if let wid = focusWindow {
-                noteFocusedWindow(wid)
-                if let pid = pid(of: wid) { applier.focusWindow(wid, pid: pid) }
-            }
-            return
-        }
-        let fromDesktop = sp.desktop(of: targetWsID)
-        let fromDisplay = fromDesktop.flatMap { sp.displayBySpace[$0] }
-        let crossing = fromDisplay != nil && fromDisplay != display
-        let swapping = fromDesktop.map { sp.active[$0] == targetWsID } ?? false
-
-        // 1. Park what is showing here — unless it is about to show on the
-        //    other display instead, in a swap.
-        let outgoing = sp.workspaces[currentActive]?.members ?? []
-        if !swapping, !outgoing.isEmpty {
-            do {
-                let t = Trace.start("switch.park")
-                try park(outgoing, from: display)
-                t.end(detail: "\(outgoing.count) window(s)")
-            } catch {
-                fputs("weftd: failed to park workspace \(currentActive): \(error)\n", stderr)
-            }
-        }
-        // 2. Unpark the target. Nothing it holds is parked when it was showing.
-        let incoming = sp.workspaces[targetWsID]?.members ?? []
-        if !incoming.isEmpty {
-            let t = Trace.start("switch.unpark")
-            parker.unpark(incoming)
-            t.end(detail: "\(incoming.count) window(s)")
-        }
-        if crossing { markInFlight(incoming + (swapping ? outgoing : [])) }
-
-        // 3. The state.
+        var target: WindowID?
         updateSpaces { s in
-            s.recentWorkspace = currentActive
-            s.show(targetWsID, on: sid)
+            s.currentByDisplay[display] = desktop
+            if let previous, previous != id { s.recentWorkspace = previous }
             s.focusedDisplay = display
-            if let wid = focusWindow, let layout = s.workspaces[targetWsID]?.layout {
+            if let wid = focusWindow, s.workspaces[id]?.contains(wid) == true { s.noteFocus(wid) }
+            target = s.workspaces[id]?.focusTarget
+            if let w = target, let layout = s.workspaces[id]?.layout {
                 switch layout {
-                case .tiling(let t) where t.windows.contains(wid):
-                    s.workspaces[targetWsID]?.layout = .tiling(t.focusing(wid))
-                case .float(let f) where f.windows.contains(wid):
-                    s.workspaces[targetWsID]?.layout = .float(f.focusing(wid))
-                default:
-                    break
+                case .tiling(let t) where t.windows.contains(w): s.setLayout(.tiling(t.focusing(w)), of: id)
+                case .float(let f) where f.windows.contains(w): s.setLayout(.float(f.focusing(w)), of: id)
+                default: break
                 }
             }
         }
-        visibility.unlock()
-        locked = false
-
-        // 4. Floats that changed display. Tiled windows are placed by the
-        //    layout below; a float has no layout slot, so it keeps its place
-        //    relative to the display it left — or, when the place it was
-        //    parked from is on no display at all (the monitor it was on went
-        //    away), it comes to the middle of this one.
-        rescueLooseOffscreen(of: targetWsID, onto: display)
-        if crossing, let fromDisplay {
-            relocateLoose(of: targetWsID, from: fromDisplay, to: display)
-            if swapping, let fromDesktop {
-                relocateLoose(of: currentActive, from: display, to: fromDisplay)
-                applySpaceLayout(fromDesktop, raiseFocus: false)
+        applySpaceLayout(desktop, raiseFocus: true)
+        if stealFocus {
+            if let target, let pid = pid(of: target) {
+                focusAndWarp(window: target, pid: pid)
+            } else {
+                focusNothing()
             }
         }
-
-        // 5. Lay it out. Nothing to lay out leaves focus on a window just
-        //    hidden, so it goes to nothing.
-        let tLayout = Trace.start("switch.layout")
-        applySpaceLayout(sid, stealFocus: stealFocus)
-        tLayout.end()
-        if stealFocus, incoming.isEmpty { focusNothing() }
-        // The layout focuses its own focus. A window focus was asked for that
-        // is not laid out — a float — has to be focused by name.
-        if let wid = focusWindow, readSpaces().workspaces[targetWsID]?.loose.contains(wid) == true,
-           let pid = pid(of: wid) {
-            applier.focusWindow(wid, pid: pid)
-        }
-        if crossing { scheduleMoveSettle([sid] + (swapping ? fromDesktop.map { [$0] } ?? [] : [])) }
-        if !outgoing.isEmpty, !swapping { scheduleRehide() }
-        scheduleMembershipSave()
+        scheduleLayoutSave()
         bus.emit(stateChangedEvent())
+        return nil
+    }
+
+    /// Switch one display from `from` to `to` by the best route this macOS
+    /// passed: the bridged triple, else Dock swipes. Nil once the display
+    /// reads back `to`; otherwise the answer to give.
+    ///
+    /// The bridged switch returns at the read-back. Its windows are checked
+    /// just after, off the keystroke's path; a failed check turns the triple
+    /// off for the rest of this launch, with a notice.
+    private func switchDesktop(display: String, from: SpaceID, to: SpaceID) -> IPCResponse? {
+        guard let routes else {
+            return IPCResponse(ok: false, error: "weft is still checking how to switch desktops on this macOS — try again in a moment")
+        }
+        let bridgedOff = routesLock.withLock { bridgedSwitchOffLocked }
+        // The Dock swipe verifies each step itself, so after the triple fails
+        // a verify it is used even if its own test was not needed yet.
+        let swipeAllowed = [.passed, .untested].contains(routes[.dockSwipe].state) && DockSwipe.isSupported
+        let method: SwitchMethod = routes.switchMethod == .bridged && !bridgedOff ? .bridged
+            : routes.switchMethod == .dockSwipe || swipeAllowed ? .dockSwipe : .none
+        let number = readSpaces().active[to].flatMap { readSpaces().number(of: $0) }.map { "desktop \($0)" } ?? "that desktop"
+        switch method {
+        case .bridged:
+            let sp = readSpaces()
+            let members = sp.workspace(on: to)?.members ?? []
+            let hiddenApps = Set(NSWorkspace.shared.runningApplications.filter(\.isHidden).map(\.processIdentifier))
+            let pids = allPids()
+            let expectShown = members.filter { pids[$0].map { !hiddenApps.contains($0) } ?? false }
+            let onScreenBefore = WorldReader.onScreenWindowIDs()
+            let expectHidden = (sp.workspace(on: from)?.members ?? []).filter { onScreenBefore.contains($0) }
+            let r = NativeBridge.switchDisplay(display, from: from, to: to, windows: false)
+            guard r.verdict.landed else {
+                disableBridgedSwitch("the display did not read back \(number): \(r.verdict.detail)")
+                return switchDesktop(display: display, from: SpaceControl.currentSpaceByDisplay()[display] ?? from, to: to)
+            }
+            let start = Date()
+            syncQueue.async { [weak self] in
+                let check = NativeBridge.awaitSwitch(
+                    display, to: to, expectShown: expectShown, expectHidden: expectHidden, since: start, quorum: .any
+                )
+                // A switch the user made since lands somewhere else; only a
+                // display still on `to` says anything about this one.
+                guard !check.verdict.landed,
+                      SpaceControl.currentSpaceByDisplay()[display] == to
+                else { return }
+                self?.disableBridgedSwitch("after switching to \(number): \(check.verdict.detail)")
+            }
+            return nil
+        case .dockSwipe:
+            let r = NativeBridge.dockSwitch(display, to: to)
+            guard r.verdict.landed else {
+                return IPCResponse(ok: false, error: "the Dock swipe did not reach \(number) (\(r.verdict.detail))")
+            }
+            return nil
+        case .none:
+            return IPCResponse(ok: false, error: "weft cannot switch desktops on this macOS; use ⌃←/⌃→ (weftctl doctor says why)")
+        }
+    }
+
+    /// The bridged switch failed a verify: off for the rest of this launch.
+    private func disableBridgedSwitch(_ why: String) {
+        let first = routesLock.withLock { () -> Bool in
+            defer { bridgedSwitchOffLocked = true }
+            return !bridgedSwitchOffLocked
+        }
+        guard first else { return }
+        fputs("weftd: the instant desktop switch failed its check (\(why)) — switching by Dock swipe until weft restarts\n", stderr)
+        bus.emit(DaemonEvent(
+            kind: .commandFailed, title: "switch",
+            message: "weft's instant desktop switch did not check out on this macOS, so desktops switch by "
+                + "Dock swipe until weft restarts. weftctl doctor --selftest re-tests it."
+        ))
     }
 
     /// Give keyboard focus to nothing, for a workspace on screen that holds
@@ -3083,10 +2850,9 @@ final class Daemon: @unchecked Sendable {
     /// macOS is free to treat as not taking focus at all. Both remain as the
     /// fallback for a WeftBar without the sink.
     ///
-    /// weft's own record of focus is cleared either way. It named the window
-    /// just hidden, and `activeWindowID` counts a hidden window as showing —
-    /// it is still on weft's desktop, only parked — so `space move-window`
-    /// on an empty workspace moved a window the user could not see.
+    /// weft's own record of focus is cleared either way. It named a window on
+    /// the desktop just left, and `space move-window` on an empty desktop
+    /// would have moved a window the user could not see.
     private func focusNothing() {
         systemFocusLock.withLock { systemFocusLocked = nil }
         let running = { (id: String) in NSRunningApplication.runningApplications(withBundleIdentifier: id).first }
@@ -3110,39 +2876,6 @@ final class Daemon: @unchecked Sendable {
 
     private func isFocusSink(_ wid: WindowID) -> Bool {
         focusSinkLock.withLock { focusSinkLocked == wid }
-    }
-
-    private func rescueLooseOffscreen(of id: WorkspaceID, onto display: String) {
-        let loose = readSpaces().workspaces[id]?.loose ?? []
-        guard !loose.isEmpty else { return }
-        let screens = SpaceControl.displayLayout().map(\.frame)
-        let target = usableScreen(onDisplay: display)
-        var frames: [WindowID: Frame] = [:]
-        for wid in loose {
-            guard let live = WorldReader.frame(of: wid), !screens.contains(where: { $0.intersects(live) })
-            else { continue }
-            let w = min(live.width, target.width), h = min(live.height, target.height)
-            frames[wid] = Frame(
-                x: target.x + (target.width - w) / 2, y: target.y + (target.height - h) / 2,
-                width: w, height: h
-            )
-        }
-        if !frames.isEmpty { applyFrames(frames, force: true) }
-    }
-
-    /// Move a workspace's floats from one display to another, each keeping its
-    /// place relative to the display it left.
-    private func relocateLoose(of id: WorkspaceID, from: String, to: String) {
-        let loose = readSpaces().workspaces[id]?.loose ?? []
-        guard !loose.isEmpty else { return }
-        let source = usableScreen(onDisplay: from)
-        let target = usableScreen(onDisplay: to)
-        var frames: [WindowID: Frame] = [:]
-        for wid in loose {
-            guard let live = WorldReader.frame(of: wid) else { continue }
-            frames[wid] = translate(live, from: source, to: target)
-        }
-        if !frames.isEmpty { applyFrames(frames, force: true) }
     }
 
     /// Re-apply once the apps have finished moving between displays.
@@ -3172,107 +2905,84 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// Move a window into a workspace. Always a state change plus, at most, a
-    /// park or a frame write — no desktop switch, no keystroke, no drag — so
-    /// it works for every window, including one with no title bar.
-    ///
-    /// - Target showing on the window's display: re-tile both workspaces.
-    /// - Target showing on another display: the window is moved there (the
-    ///   layout places a tile; a float keeps its relative place).
-    /// - Target hidden: the window is parked where it stands, or with
-    ///   `follow`, the target is shown on the window's display.
+    /// Move a window to a desktop (NATIVE.md, "Moving windows"): one bridged
+    /// move, verified by reading the window's desktop back. Without `follow`
+    /// the user stays where they are. The desktop it left is re-tiled, and
+    /// the one it went to is laid out — through held AX elements when it is
+    /// not showing, so it is in its tile on arrival.
     private func moveWindow(_ wid: WindowID, toWorkspace id: WorkspaceID, follow: Bool) -> IPCResponse {
-        let sp = readSpaces()
-        let label = sp.label(of: id) ?? "\(id.raw)"
-        let source = sp.workspace(holding: wid)
-        let managedDesktops = Set(sp.managed.values)
-        guard SpaceControl.spacesForWindow(wid).contains(where: managedDesktops.contains) || source != nil else {
+        let sp = refreshCurrentDesktops()
+        let label = sp.label(of: id) ?? "?"
+        guard let target = sp.desktop(of: id), let toDisplay = sp.displayBySpace[target] else {
+            return IPCResponse(ok: false, error: "desktop \(label) does not exist")
+        }
+        let on = SpaceControl.spacesForWindow(wid)
+        if Set(on).filter({ sp.active[$0] != nil }).count > 1 {
             return IPCResponse(
                 ok: false,
-                error: "window \(wid) is on a macOS desktop weft does not manage. "
-                    + "Drag it to weft's desktop in Mission Control first."
+                error: "window \(wid) is on every desktop (Dock › Options › All Desktops), so weft does not move it"
             )
         }
-        let windowDisplay = displayOf(window: wid)
-            ?? source.flatMap { sp.display(of: $0) }
-            ?? focusedDisplayUUID(sp)
-        if let windowDisplay, sp.isPaused(windowDisplay) { return pausedError(sp, windowDisplay) }
-        if source == id {
+        if on == [target] {
+            if follow, let failure = showWorkspace(id, focusWindow: wid) { return failure }
             return IPCResponse(ok: true, output: "already on \(label)")
         }
-        guard let targetDesktop = sp.desktop(of: id) else {
-            return IPCResponse(ok: false, error: "workspace '\(label)' has no desktop")
+        guard let routes else {
+            return IPCResponse(ok: false, error: "weft is still checking how to move windows on this macOS — try again in a moment")
         }
-        let sourceDesktop = source.flatMap { sp.desktop(of: $0) }
-        let sourceShowing = source.flatMap { sp.showingDisplay(of: $0) } != nil
-        let targetShowingOn = sp.showingDisplay(of: id)
+        guard routes.canMove else {
+            return IPCResponse(
+                ok: false,
+                error: "weft cannot move windows between desktops on this macOS (\(routes[.move].detail)); "
+                    + "drag the window in Mission Control instead"
+            )
+        }
+        let source = sp.workspace(holding: wid)
+        let sourceDesktop = source.flatMap { sp.desktop(of: $0) } ?? on.first
+        let fromDisplay = sourceDesktop.flatMap { sp.displayBySpace[$0] } ?? displayOf(window: wid)
+        let before = WorldReader.frame(of: wid)
+        let moved = NativeBridge.move([wid], to: target)
+        guard moved.verdict.complete else {
+            let now = SpaceControl.spacesForWindow(wid)
+            return IPCResponse(
+                ok: false,
+                error: "macOS did not move window \(wid) to \(label) — it is still on desktop \(now.map(String.init).joined(separator: ", "))"
+            )
+        }
+        Trace.record("move", ms: moved.milliseconds, detail: "1 window")
         let laidOut = !core.sync { self.unmanaged.contains(wid) }
         let tile = currentConfig().general.asTilingConfig()
-
-        // Following into a hidden workspace is showing it where the window is,
-        // or on its own display when it is pinned: file the window, then
-        // switch. The window is not parked in between.
-        let pinned = currentPins(currentConfig())[label].flatMap { sp.managed[$0] != nil ? $0 : nil }
-        if targetShowingOn == nil, follow, let display = pinned ?? windowDisplay, let here = sp.managed[display] {
-            if sp.isPaused(display) { return pausedError(sp, display) }
-            updateSpaces { s in
-                s.file(wid, in: id, laidOut: laidOut, screen: self.usableScreen(onDisplay: display),
-                       config: tile, focus: true)
-            }
-            switchWorkspace(on: here, to: id, focusWindow: wid, stealFocus: true)
-            // Shown on another display: the workspace the window left is still
-            // on screen here, with a hole where the window was.
-            if display != windowDisplay, sourceShowing, let sourceDesktop {
-                applySpaceLayout(sourceDesktop, raiseFocus: false)
-            }
-            return IPCResponse(ok: true, output: "moved \(wid) to \(label) and followed")
-        }
-
-        let targetScreen = usableScreen(for: targetDesktop)
         updateSpaces { s in
-            s.file(wid, in: id, laidOut: laidOut, screen: targetScreen, config: tile, focus: follow)
+            s.file(wid, in: id, laidOut: laidOut, screen: self.usableScreen(for: target), config: tile, focus: true)
         }
-        if let targetShowingOn {
-            if targetShowingOn != windowDisplay {
-                markInFlight([wid])
-                if !laidOut, let windowDisplay, let live = WorldReader.frame(of: wid) {
-                    applyFrames([wid: translate(
-                        live, from: usableScreen(onDisplay: windowDisplay), to: usableScreen(onDisplay: targetShowingOn)
-                    )], force: true)
-                }
-                applier.bind(windows: pid(of: wid).map { [(wid: wid, pid: $0)] } ?? [])
-                scheduleMoveSettle([targetDesktop])
+        // Across displays the frame is whatever macOS remembers, which can be
+        // off screen (S12). A tile is placed by the layout below; a float
+        // keeps its size, centred on the display it arrived on.
+        if fromDisplay != toDisplay {
+            if !laidOut, let before {
+                let area = usableScreen(onDisplay: toDisplay)
+                let w = min(before.width, area.width), h = min(before.height, area.height)
+                applyFrames([wid: Frame(
+                    x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h
+                )], force: true)
             }
-            // Following means the destination is where the user is going, so
-            // it gets the raise and the window gets focus. Not following, a
-            // raise there would hand its display the active menu bar (§14.6).
-            applySpaceLayout(targetDesktop, stealFocus: follow, raiseFocus: follow)
-            if follow {
-                updateSpaces { $0.focusedDisplay = targetShowingOn }
-                if !laidOut, let pid = pid(of: wid) { focusAndWarp(window: wid, pid: pid) }
-            }
-        } else {
-            do {
-                try park([wid], from: windowDisplay)
-            } catch {
-                // Filed but not hidden: say so, and put it back where it was
-                // rather than leave a window on screen that belongs elsewhere.
-                updateSpaces { s in
-                    if let source { s.file(wid, in: source, laidOut: laidOut) }
-                }
-                return IPCResponse(ok: false, error: "could not hide \(wid): \(error)")
-            }
-            scheduleRehide()
+            scheduleMoveSettle([target])
         }
-        if sourceShowing, let sourceDesktop, sourceDesktop != targetDesktop || targetShowingOn == nil {
-            applySpaceLayout(sourceDesktop, raiseFocus: !follow)
-            // The last window sent away, staying put: the workspace on screen
-            // is empty and focus is on the window that just left it.
-            if !follow, let source, readSpaces().workspaces[source]?.members.isEmpty == true {
+        if let sourceDesktop, sp.active[sourceDesktop] != nil {
+            applySpaceLayout(sourceDesktop, raiseFocus: false)
+        }
+        applySpaceLayout(target, raiseFocus: false)
+        if follow {
+            if let failure = showWorkspace(id, focusWindow: wid) { return failure }
+        } else if let source, sp.showingDisplay(of: source) != nil {
+            // Staying put: focus goes to what is left here, or to the desktop.
+            if let next = readSpaces().workspaces[source]?.focusTarget, let pid = pid(of: next) {
+                focusAndWarp(window: next, pid: pid)
+            } else {
                 focusNothing()
             }
         }
-        scheduleMembershipSave()
+        scheduleLayoutSave()
         bus.emit(stateChangedEvent())
         return IPCResponse(ok: true, output: "moved \(wid) to \(label)\(follow ? " and followed" : "")")
     }
@@ -3349,7 +3059,7 @@ final class Daemon: @unchecked Sendable {
         // window that just arrived there.
         if !on { syncFromSnapshot() }
         bus.emit(stateChangedEvent())
-        scheduleMembershipSave()
+        scheduleLayoutSave()
         return IPCResponse(ok: true, output: "sticky \(on ? "on" : "off") for \(wid)")
     }
 
@@ -3511,8 +3221,8 @@ final class Daemon: @unchecked Sendable {
         }
         let sp = refreshCurrentDesktops()
         if sp.isPaused(uuid) { return pausedError(sp, uuid) }
-        guard let desktop = sp.managed[uuid], let id = sp.active[desktop] else {
-            return IPCResponse(ok: false, error: "display \(describe(target)) has no workspace")
+        guard let desktop = sp.currentByDisplay[uuid], let id = sp.active[desktop] else {
+            return IPCResponse(ok: false, error: "display \(describe(target)) has no desktop")
         }
         // The window in front, whether or not it is laid out: a float is the
         // window most likely to need sending, and it is never the layout's
@@ -3526,37 +3236,15 @@ final class Daemon: @unchecked Sendable {
         return moveWindow(wid, toWorkspace: id, follow: follow)
     }
 
-    /// Send the whole current workspace to another display (yabai's
-    /// `space --display`). The two displays trade what they are showing:
-    /// the other display's workspace comes here, so neither is left empty.
-    ///
-    /// Native desktops cannot do this from an ordinary process —
-    /// `SLSSetDisplaySpaceCompatID` no longer exists (SkyLightShim.h) — but a
-    /// workspace is weft's, and moving one is frame writes.
+    /// `move space display`: gone with the virtual engine. macOS decides which
+    /// display a desktop is on, and the bridge cannot move a real desktop
+    /// (NATIVE.md, "Out of Scope").
     private func handleMoveSpaceToDisplay(_ target: DisplayTarget) -> IPCResponse {
-        let uuid: String
-        switch resolveDisplay(target) {
-        case .display(let u): uuid = u
-        case .failed(let e): return IPCResponse(ok: false, error: e)
-        }
-        let sp = refreshCurrentDesktops()
-        guard let here = focusedDisplayUUID(sp), let hereDesktop = sp.managed[here],
-              let moving = sp.active[hereDesktop]
-        else {
-            return IPCResponse(ok: false, error: "no current workspace")
-        }
-        if here == uuid {
-            return IPCResponse(ok: true, output: "already on display \(describe(target))")
-        }
-        for display in [here, uuid] where sp.isPaused(display) { return pausedError(sp, display) }
-        guard let thereDesktop = sp.managed[uuid] else {
-            return IPCResponse(ok: false, error: "display \(describe(target)) has no workspace")
-        }
-        // Showing `moving` over there is the swap: `SpaceState.show` hands this
-        // display what that one showed.
-        switchWorkspace(on: thereDesktop, to: moving, stealFocus: true)
-        let label = sp.label(of: moving) ?? "\(moving.raw)"
-        return IPCResponse(ok: true, output: "\(label) is on display \(describe(target))")
+        IPCResponse(
+            ok: false,
+            error: "weft cannot move a desktop to another display; macOS decides that. "
+                + "Drag the desktop between displays in Mission Control"
+        )
     }
 
     // MARK: - Config (M6)
@@ -3720,31 +3408,18 @@ final class Daemon: @unchecked Sendable {
         // old values, so every change showed up one step behind.
         let reshaped = previous.general.asTilingConfig() != next.general.asTilingConfig()
             || previous.general.reserve != next.general.reserve
-        // Which workspaces exist is the one thing a reload cannot leave to the
-        // next sweep: the sweep only seeds names on a fresh start. An edited
-        // `[[space]]` list renames, adds and drops workspaces in place —
-        // `relabel` never touches a window, so nothing is unparked or lost.
+        // Labels are the one thing a reload cannot leave to the next sweep:
+        // the sweep only seeds them on a fresh start. An edited `[[space]]`
+        // list re-labels the desktops by number; no window moves.
         let names = next.spaces.map { $0.label }
-        let pinsChanged = !initial && previous.spaces.map { "\($0.label)=\(String(describing: $0.display))" }
-            != next.spaces.map { "\($0.label)=\(String(describing: $0.display))" }
         if !initial, previous.spaces.map({ $0.label }) != names {
-            fputs("weft: [[space]] list changed — \(names.count) workspace(s)\n", stderr)
+            fputs("weft: [[space]] list changed — \(names.count) label(s)\n", stderr)
             syncQueue.async { [weak self] in
                 guard let self else { return }
+                // Labels attach by number; no window moves.
                 self.updateSpaces { $0.relabel(names) }
-                // All three files count by position, and a reorder moved
-                // workspaces between positions.
                 self.saveLabels()
-                self.saveLayoutOverrides()
-                self.scheduleMembershipSave()
                 self.syncFromSnapshot()
-                if pinsChanged { self.enforcePins() }
-            }
-        } else if pinsChanged {
-            syncQueue.async { [weak self] in
-                guard let self else { return }
-                if reshaped { self.syncFromSnapshot() }
-                self.enforcePins()
             }
         } else if !initial, reshaped {
             syncQueue.async { [weak self] in self?.syncFromSnapshot() }
@@ -3894,66 +3569,26 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    // MARK: - Layout persistence (by ordinal; sids die on reboot, §5.3)
+    // MARK: - Layout persistence (by desktop place; SpaceIDs die at logout)
     //
-    // Only *chosen* layouts are written here — the ones `space layout` set.
-    // A layout that came from `[[space]] layout` or `default-layout` is
-    // already persisted, in weft.toml, and copying it into a second file
-    // would make editing weft.toml stop working.
+    // `layouts.json` holds, per desktop place (display uuid, position), the
+    // layout `space layout` chose — and, for a restart within one boot, the
+    // tiling tree and the windows floated by hand, whose ids last as long as
+    // the window. A layout from `[[space]] layout` or `default-layout` is
+    // already in weft.toml and is not copied here: a second copy would make
+    // editing weft.toml stop working. 0.9.21 wrote overrides by number as a
+    // bare array; that is read once, on upgrade.
+
+    private struct SavedLayouts: Codable {
+        var version = 2
+        var boot: Int
+        var desktops: [String: SavedDesktop]
+        var floating: [WindowID]?
+    }
 
     static func layoutsFile() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/weft/layouts.json")
-    }
-
-    static func loadLayoutOverrides() -> [String] {
-        guard let data = try? Data(contentsOf: layoutsFile()),
-              let kinds = try? JSONDecoder().decode([String].self, from: data)
-        else { return [] }
-        return kinds
-    }
-
-    private func saveLayoutOverrides() {
-        let sp = readSpaces()
-        let kinds = sp.persistedOverrides()
-        layoutSaveQueue.async {
-            let url = Daemon.layoutsFile()
-            try? FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-            )
-            if let data = try? JSONEncoder().encode(kinds) {
-                try? data.write(to: url)
-            }
-        }
-    }
-
-    // MARK: - Membership persistence (by ordinal, valid for one boot)
-    //
-    // Window ids live as long as their window, not as long as the machine:
-    // after a reboot the same numbers name different windows. So the file
-    // carries the boot time and a file from another boot is ignored.
-
-    private struct SavedMembership: Codable {
-        var boot: Int
-        var workspaces: [[WindowID]]
-        /// Display uuid → the desktop weft managed there. Space ids hold for
-        /// a boot, which is exactly how long this file is believed; without it
-        /// a restart while another desktop is showing — an update does that —
-        /// would make that desktop weft's and leave the real one untiled.
-        var managed: [String: SpaceID]?
-        /// Each workspace's tiling tree, by ordinal, so a restart puts the
-        /// arrangement back and not just the windows.
-        var trees: [SavedTree?]?
-        /// Windows floated by hand, and windows made sticky. Both are weft's
-        /// own state, nothing on screen records them, and a restart used to
-        /// tile every one of them again.
-        var floating: [WindowID]?
-        var sticky: [WindowID]?
-    }
-
-    static func membershipFile() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/weft/membership.json")
     }
 
     private static func bootTime() -> Int {
@@ -3964,78 +3599,103 @@ final class Daemon: @unchecked Sendable {
         return Int(tv.tv_sec)
     }
 
-    private static func loadSaved() -> SavedMembership? {
-        guard let data = try? Data(contentsOf: membershipFile()),
-              let saved = try? JSONDecoder().decode(SavedMembership.self, from: data),
-              saved.boot == bootTime()
-        else { return nil }
-        return saved
+    private static func loadLayouts() -> SavedLayouts? {
+        guard let data = try? Data(contentsOf: layoutsFile()) else { return nil }
+        return try? JSONDecoder().decode(SavedLayouts.self, from: data)
     }
 
-    static func loadMembership() -> [[WindowID]] { loadSaved()?.workspaces ?? [] }
+    /// 0.9.21's `layouts.json`: overrides by number, or nil when the file is
+    /// not that shape.
+    static func loadLegacyOverrides() -> [String]? {
+        guard let data = try? Data(contentsOf: layoutsFile()) else { return nil }
+        return try? JSONDecoder().decode([String].self, from: data)
+    }
 
-    static func loadTrees() -> [SavedTree?] { loadSaved()?.trees ?? [] }
+    /// Put back which windows were floated by hand, before the first sweep:
+    /// that sweep decides what is laid out, and a float it does not know about
+    /// is tiled. Only from a file of this boot.
+    private func restoreFloating() {
+        guard let saved = Self.loadLayouts(), saved.boot == Self.bootTime() else { return }
+        core.sync { self.manualFloat.formUnion(saved.floating ?? []) }
+    }
 
-    /// Put back which windows were floated by hand or sticky, before the
-    /// first sweep: that sweep decides what is laid out, and a float it does
-    /// not know about is tiled. Windows that have since closed drop out on
-    /// that sweep, as they would at any other time.
-    private func restoreFloatingAndSticky() {
-        guard let saved = Self.loadSaved() else { return }
-        core.sync {
-            self.manualFloat.formUnion(saved.floating ?? [])
-            self.sticky.formUnion(saved.sticky ?? [])
+    /// Put each desktop's saved layout back, in the first sweep, after the
+    /// desktops are numbered: by place, so a logout's new SpaceIDs find them.
+    private static func restoreLayouts(_ sp: inout SpaceState) {
+        if let saved = loadLayouts() {
+            var byKey: [DesktopKey: SavedDesktop] = [:]
+            for (k, v) in saved.desktops { if let key = DesktopKey(k) { byKey[key] = v } }
+            sp.restore(byKey, trees: saved.boot == bootTime())
+        } else if let legacy = loadLegacyOverrides() {
+            sp.assignOverrides(kinds: legacy)
         }
     }
 
-    static func loadManaged() -> [String: SpaceID] { loadSaved()?.managed ?? [:] }
-
-    /// Everything `membership.json` records, taken together so the file
-    /// never pairs one moment's workspaces with another's floats.
-    private func membershipSnapshot() -> (SpaceState, floating: Set<WindowID>, sticky: Set<WindowID>) {
-        let taken = { (self.spaces, self.manualFloat, self.sticky) }
-        let (sp, floating, sticky) = isOnCore() ? taken() : core.sync(execute: taken)
-        return (sp, floating, sticky)
+    /// Everything `layouts.json` records, taken together so the file never
+    /// pairs one moment's trees with another's floats.
+    private func layoutsSnapshot() -> (SpaceState, floating: Set<WindowID>) {
+        let taken = { (self.spaces, self.manualFloat) }
+        return isOnCore() ? taken() : core.sync(execute: taken)
     }
 
-    private func writeMembership(_ snapshot: (SpaceState, floating: Set<WindowID>, sticky: Set<WindowID>)) {
+    private func writeLayouts(_ snapshot: (SpaceState, floating: Set<WindowID>)) {
         let sp = snapshot.0
         guard !sp.wsOrder.isEmpty else { return }
-        let saved = SavedMembership(
-            boot: Self.bootTime(), workspaces: sp.persistedMembership(), managed: sp.managed,
-            trees: sp.persistedTrees(),
-            floating: snapshot.floating.sorted(), sticky: snapshot.sticky.sorted()
+        let saved = SavedLayouts(
+            boot: Self.bootTime(),
+            desktops: Dictionary(uniqueKeysWithValues: sp.persistedLayouts().map { ($0.key.description, $0.value) }),
+            floating: snapshot.floating.sorted()
         )
-        let url = Daemon.membershipFile()
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        if let data = try? JSONEncoder().encode(saved) { try? data.write(to: url) }
+        let url = Daemon.layoutsFile()
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        if let data = try? encoder.encode(saved) { try? data.write(to: url, options: .atomic) }
     }
 
-    /// Write membership a second after it last changed — a burst of window
-    /// events is one write, and an idle machine writes nothing.
-    private func scheduleMembershipSave() {
+    /// A chosen layout: written now, since it is the user's decision.
+    private func saveLayoutOverrides() {
+        let snapshot = layoutsSnapshot()
+        layoutSaveQueue.async { self.writeLayouts(snapshot) }
+    }
+
+    /// Trees and floats: written a second after they last changed, so a burst
+    /// of window events is one write and an idle machine writes nothing.
+    private func scheduleLayoutSave() {
         syncQueue.async { [weak self] in
             guard let self else { return }
-            self.pendingMembershipSave?.cancel()
+            self.pendingLayoutSave?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let snapshot = self.membershipSnapshot()
-                self.layoutSaveQueue.async { self.writeMembership(snapshot) }
+                let snapshot = self.layoutsSnapshot()
+                self.layoutSaveQueue.async { self.writeLayouts(snapshot) }
             }
-            self.pendingMembershipSave = work
+            self.pendingLayoutSave = work
             self.syncQueue.asyncAfter(deadline: .now() + 1.0, execute: work)
         }
     }
 
+    // MARK: - 0.9.21's membership.json (read for the migration spread)
+
+    /// The virtual workspaces' windows by number, as 0.9.21 left them. Read,
+    /// never written: `weftctl spread` and the first launch move each old
+    /// workspace's windows to the desktop with its number (NATIVE.md,
+    /// "Migration from 0.9.21").
+    struct SavedMembership: Codable {
+        var boot: Int
+        var workspaces: [[WindowID]]
+    }
+
+    static func membershipFile() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/weft/membership.json")
+    }
+
     private func workspaceStatuses(_ sp: SpaceState, _ cfg: ValidatedConfig) -> [SpaceStatus] {
-        let pins = currentPins(cfg)
-        return SpaceStatus.workspaces(
+        SpaceStatus.workspaces(
             in: sp,
             declaredLayout: { label in cfg.spaces.first(where: { $0.label == label })?.layout },
-            defaultLayout: cfg.general.defaultLayout,
-            pinnedDisplay: { pins[$0] }
+            defaultLayout: cfg.general.defaultLayout
         )
     }
 
@@ -4146,21 +3806,17 @@ final class Daemon: @unchecked Sendable {
             let sp = refreshCurrentDesktops()
             let order = displaysWestToEast()
             let names = Dictionary(uniqueKeysWithValues: SpaceControl.displayIdentities().map { ($0.uuid, $0.name) })
-            let layout = SpaceControl.displayLayout()
-            let frames = layout.map(\.frame)
             let displays = order.enumerated().compactMap { i, uuid -> WorkspacesStatus.Display? in
                 let desktops = sp.order.filter { sp.displayBySpace[$0] == uuid }
-                let managed = sp.managed[uuid]
+                let current = sp.currentByDisplay[uuid]
                 return WorkspacesStatus.Display(
                     uuid: uuid,
                     index: i + 1,
-                    managedDesktop: managed.flatMap { desktops.firstIndex(of: $0) }.map { $0 + 1 },
+                    managedDesktop: current.flatMap { desktops.firstIndex(of: $0) }.map { $0 + 1 },
                     desktops: desktops.count,
                     paused: sp.isPaused(uuid),
-                    showing: managed.flatMap { sp.active[$0] }.flatMap { sp.label(of: $0) },
-                    name: names[uuid],
-                    parkCorner: layout.first { $0.uuid == uuid }
-                        .flatMap { freeCorner(of: $0.frame, among: frames) }?.rawValue
+                    showing: current.flatMap { sp.active[$0] }.flatMap { sp.label(of: $0) },
+                    name: names[uuid]
                 )
             }
             return emit(WorkspacesStatus(workspaces: sp.wsOrder.count, displays: displays))
@@ -4382,7 +4038,7 @@ final class Daemon: @unchecked Sendable {
         let layout = currentLayout()
         let sp = readSpaces()
         func label(_ uuid: String?) -> String? {
-            uuid.flatMap { sp.managed[$0] }.flatMap { sp.active[$0] }.flatMap { sp.workspaces[$0]?.label }
+            uuid.flatMap { sp.currentByDisplay[$0] }.flatMap { sp.active[$0] }.flatMap { sp.workspaces[$0]?.label }
         }
         return DaemonEvent(
             kind: .stateChanged, focus: layout.focus, windows: layout.windows.sorted(),

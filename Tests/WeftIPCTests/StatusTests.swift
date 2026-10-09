@@ -9,9 +9,8 @@ import Testing
 // shape is pinned here rather than left to be discovered from a menu bar
 // showing the wrong desktop.
 
-/// Workspace ids that are nowhere near the desktop ids they sit on, so a
-/// mix-up between the two shows up. Two workspaces on desktop 11 of one
-/// display; desktop 12 exists and is not managed.
+/// Workspace ids that are nowhere near the desktop ids they are, so a mix-up
+/// between the two shows up. Two desktops, 11 showing.
 private func state() -> SpaceState {
     var s = SpaceState()
     s.nextWorkspaceID = 900
@@ -31,7 +30,7 @@ private func statuses(_ s: SpaceState, declared: [String: LayoutKind] = [:]) -> 
 /// nothing, and nothing anywhere would throw.
 @Test func theWireReportsDesktopIdsNotWorkspaceIds() {
     let out = statuses(state())
-    #expect(out.map(\.id) == [11, 11])
+    #expect(out.map(\.id) == [11, 12])
     #expect(!out.contains { $0.id == 900 || $0.id == 901 })
     #expect(out.map(\.label) == ["code", "web"])
 }
@@ -58,11 +57,19 @@ private func statuses(_ s: SpaceState, declared: [String: LayoutKind] = [:]) -> 
     #expect(out[0].layout == "bsp")
 }
 
-/// A display showing another desktop is paused, and nothing on it is current.
+/// A display showing a fullscreen app is paused, and no desktop on it is
+/// current.
 @Test func nothingIsCurrentOnAPausedDisplay() {
     var s = state()
-    s.adoptDisplays([DisplayDesktops(uuid: "DISPLAY-A", desktops: [11, 12], current: 12)], names: nil)
+    s.adoptDisplays([DisplayDesktops(uuid: "DISPLAY-A", desktops: [11, 12], current: 425)], names: nil)
     #expect(statuses(s).allSatisfy { !$0.current })
+}
+
+/// Switching desktops moves `current` with it.
+@Test func theShowingDesktopIsCurrent() {
+    var s = state()
+    s.adoptDisplays([DisplayDesktops(uuid: "DISPLAY-A", desktops: [11, 12], current: 12)], names: nil)
+    #expect(statuses(s).map(\.current) == [false, true])
 }
 
 /// The field names and types weft-bar's own decoder expects. It declares
@@ -107,32 +114,6 @@ private func statuses(_ s: SpaceState, declared: [String: LayoutKind] = [:]) -> 
     let data = try JSONEncoder().encode(sent)
     #expect(try JSONDecoder().decode(WorkspacesStatus.self, from: data) == sent)
     #expect(sent.displaysWithExtraDesktops.map(\.uuid) == ["A"])
-}
-
-/// A hidden workspace pinned to another display is listed on that display —
-/// where showing it puts it — and a showing one where it is.
-@Test func aHiddenPinnedWorkspaceIsReportedOnItsPinnedDisplay() {
-    var s = SpaceState()
-    s.nextWorkspaceID = 900
-    s.adoptDisplays(
-        [
-            DisplayDesktops(uuid: "DISPLAY-A", desktops: [11], current: 11),
-            DisplayDesktops(uuid: "DISPLAY-B", desktops: [21], current: 21),
-        ],
-        names: ["1", "2", "3"]
-    )
-    let pins = ["3": "DISPLAY-B", "1": "DISPLAY-B"]
-    let out = SpaceStatus.workspaces(
-        in: s, declaredLayout: { _ in nil }, defaultLayout: .bsp, pinnedDisplay: { pins[$0] }
-    )
-    let byLabel = Dictionary(uniqueKeysWithValues: out.map { ($0.label, $0) })
-    #expect(byLabel["3"]?.current == false)
-    #expect(byLabel["3"]?.display == "DISPLAY-B")
-    #expect(byLabel["3"]?.id == 21)
-    for status in out where status.current {
-        // Showing is a fact, not a pin.
-        #expect(s.displayBySpace[status.id] == status.display)
-    }
 }
 
 /// The menu bar names the workspace on the display focus is on, not the

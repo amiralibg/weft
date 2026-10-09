@@ -2,16 +2,13 @@ import Testing
 @testable import WeftCore
 
 // A workspace's members are more than its layout. A window floated by hand, a
-// window a rule unmanages, a quirk: each is out of the layout and still in the
-// workspace, so it hides and shows with it (REDESIGN.md, phase 2). Before
-// this, membership WAS the layout, and every such window stayed on screen
-// whichever workspace was showing.
+// window a rule unmanages, a quirk: each is out of the layout and still on its
+// desktop's workspace, so focus history and moves treat it as a member.
 
-/// Three workspaces on one desktop: a window's desktop does not say which
-/// workspace it is in.
+/// Three desktops, one workspace each.
 private func anchor() -> (SpaceState, [WorkspaceID]) {
     var s = SpaceState()
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [9], current: 9)], names: ["a", "b", "c"])
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [7, 8, 9], current: 9)], names: ["a", "b", "c"])
     return (s, s.wsOrder)
 }
 
@@ -76,18 +73,3 @@ private func anchor() -> (SpaceState, [WorkspaceID]) {
 /// whole membership. A float in a hidden workspace is reported on the anchor
 /// desktop like everything else there, and must stay where it is rather than
 /// join whichever workspace is showing.
-@Test func aFloatInAHiddenWorkspaceStaysInIt() {
-    var (s, ids) = anchor()
-    s.file(10, in: ids[0], laidOut: true)
-    s.file(30, in: ids[1], laidOut: false)
-    s.active[9] = ids[0]
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [9], 30: [9], 40: [9]],
-        membership: s.workspaces.mapValues { $0.members },
-        desktopOf: s.workspaces.mapValues { $0.desktop },
-        activeOn: s.active
-    )
-    #expect(out[ids[1]] == [30])
-    // A new window joins what is showing.
-    #expect(out[ids[0]] == [10, 40])
-}

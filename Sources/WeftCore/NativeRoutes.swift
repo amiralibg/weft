@@ -133,18 +133,32 @@ public enum SwitchVerdict: Sendable, Equatable {
 
     public var landed: Bool { self == .landed }
 
+    /// How many of `expectShown` must be on screen.
+    public enum Quorum: Sendable {
+        /// Every one: the self-test, which expects only windows it saw on
+        /// screen moments before.
+        case all
+        /// At least one: the daemon, whose idea of a desktop's windows can
+        /// include one an app has since hidden (⌘H) without closing. A switch
+        /// that painted nothing of the target fails either way.
+        case any
+    }
+
     /// - Parameters:
     ///   - expectShown: managed windows on the target alone.
-    ///   - expectHidden: managed windows on the old desktop alone (a window
-    ///     on both is on every desktop and shows either way).
+    ///   - expectHidden: managed windows on the old desktop alone that were on
+    ///     screen before the switch (a window on both is on every desktop and
+    ///     shows either way).
     ///   - onScreen: the public on-screen window list, after the switch.
     public static func judge(
         target: SpaceID, currentAfter: SpaceID,
-        expectShown: [WindowID], expectHidden: [WindowID], onScreen: Set<WindowID>
+        expectShown: [WindowID], expectHidden: [WindowID], onScreen: Set<WindowID>,
+        quorum: Quorum = .all
     ) -> SwitchVerdict {
         guard currentAfter == target else { return .notCurrent(showing: currentAfter) }
         let notShown = expectShown.filter { !onScreen.contains($0) }
-        if !notShown.isEmpty { return .targetNotShown(notShown) }
+        let enough = quorum == .all ? notShown.isEmpty : notShown.count < expectShown.count || expectShown.isEmpty
+        if !enough { return .targetNotShown(notShown) }
         let stillShown = expectHidden.filter { onScreen.contains($0) }
         if !stillShown.isEmpty { return .oldStillShown(stillShown) }
         return .landed

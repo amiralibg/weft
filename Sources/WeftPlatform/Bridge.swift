@@ -73,16 +73,24 @@ public enum NativeBridge {
     /// judge it by the display's current desktop and the on-screen window list
     /// (`SwitchVerdict`). `expectShown` / `expectHidden` are the managed
     /// windows on the target alone and on the old desktop alone.
+    ///
+    /// With `windows: false` it returns at the read-back, for the keystroke
+    /// path; the caller then checks the windows with `awaitSwitch` off that
+    /// path (NATIVE.md: a target's windows reach the on-screen list 70–100 ms
+    /// after the desktop changes).
     public static func switchDisplay(
         _ display: String, from: SpaceID, to: SpaceID,
-        expectShown: [WindowID] = [], expectHidden: [WindowID] = []
+        expectShown: [WindowID] = [], expectHidden: [WindowID] = [], windows: Bool = true
     ) -> Switched {
         let start = Date()
         guard weft_bridge_switch(display as CFString, from, to) else {
             let showing = SLSManagedDisplayGetCurrentSpace(WorldReader.cid, display as CFString)
             return Switched(verdict: .notCurrent(showing: showing), milliseconds: 0)
         }
-        return awaitSwitch(display, to: to, expectShown: expectShown, expectHidden: expectHidden, since: start)
+        return awaitSwitch(
+            display, to: to, expectShown: windows ? expectShown : [], expectHidden: windows ? expectHidden : [],
+            since: start
+        )
     }
 
     /// The fallback: Dock swipes, one desktop per step, each step read back
@@ -100,8 +108,9 @@ public enum NativeBridge {
 
     /// The read-back moves first; windows paint just after it. A good switch
     /// passes on an early pass, so only a failing one waits out the deadline.
-    static func awaitSwitch(
-        _ display: String, to: SpaceID, expectShown: [WindowID], expectHidden: [WindowID], since start: Date
+    public static func awaitSwitch(
+        _ display: String, to: SpaceID, expectShown: [WindowID], expectHidden: [WindowID], since start: Date,
+        quorum: SwitchVerdict.Quorum = .all
     ) -> Switched {
         let cid = WorldReader.cid
         let deadline = Date().addingTimeInterval(0.3)
@@ -110,7 +119,7 @@ public enum NativeBridge {
             verdict = SwitchVerdict.judge(
                 target: to, currentAfter: SLSManagedDisplayGetCurrentSpace(cid, display as CFString),
                 expectShown: expectShown, expectHidden: expectHidden,
-                onScreen: WorldReader.onScreenWindowIDs()
+                onScreen: WorldReader.onScreenWindowIDs(), quorum: quorum
             )
             if verdict.landed { break }
             usleep(1_000)

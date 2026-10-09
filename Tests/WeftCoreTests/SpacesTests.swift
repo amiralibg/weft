@@ -2,10 +2,9 @@ import Foundation
 import Testing
 @testable import WeftCore
 
-/// One display per desktop id, each showing its own — so every desktop is a
-/// managed one and shows one workspace. `adoptDisplays` is the only thing that
-/// creates a workspace, so it is also the only way to build a state to test
-/// with.
+/// One display per desktop id, each showing its own. `adoptDisplays` is the
+/// only thing that creates a workspace, so it is also the only way to build a
+/// state to test with (NATIVE.md, "Testing Decisions").
 private func desktops(_ sids: [SpaceID], names: [String] = []) -> SpaceState {
     var s = SpaceState()
     s.adoptDisplays(displays(sids), names: names)
@@ -30,15 +29,13 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     #expect(s.workspace(on: 3)?.label == "web")
     #expect(s.workspace(on: 7)?.label == "3")
     #expect(s.order == [5, 3, 7])
-    // `wsOrder` is built from `order` in the same pass, so the persistence
-    // files — which are keyed by ordinal — cannot come back scrambled.
+    // `wsOrder` is built from `order` in the same pass, so labels — which
+    // attach by number — cannot come back scrambled.
     #expect(s.wsOrder == [ws(s, 5), ws(s, 3), ws(s, 7)])
     #expect(s.persistedNames() == ["code", "web", "3"])
 }
 
-/// One workspace per desktop, and each one knows where it lives. The identity
-/// mapping stated as a test, so the commit that stops it being the identity
-/// mapping has to say so here.
+/// One workspace per desktop, and each one knows which it is.
 @Test func everyDesktopGetsExactlyOneWorkspace() {
     let s = desktops([5, 3, 7], names: [])
     #expect(s.workspaces.count == 3)
@@ -69,8 +66,8 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     // out of `query spaces` means the native space that JSON reports, and a
     // workspace id of the same value would hand them a different desktop.
     #expect(s.resolveWorkspace("5") == ws(s, 5))
-    #expect(s.resolveWorkspace("3") == ws(s, 7))      // label "3" wins over id/ordinal
-    #expect(s.resolveWorkspace("1") == ws(s, 3))      // ordinal 1 → first workspace
+    #expect(s.resolveWorkspace("3") == ws(s, 7))      // label "3" (the third desktop's number)
+    #expect(s.resolveWorkspace("1") == ws(s, 3))      // number 1 → first desktop
     #expect(s.resolveWorkspace("nope") == nil)
 }
 
@@ -145,7 +142,7 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     #expect(back.focus == 2)
 }
 
-/// A `layouts.json` saved while a space was in scroll comes back as bsp.
+/// 0.9.21's `layouts.json`, saved while a space was in scroll, comes back as bsp.
 /// The layout is gone; an override naming it simply does not survive, and a
 /// space with no override tiles bsp — so there is nothing to migrate.
 @Test func aPersistedScrollOverrideLoadsAsBsp() {
@@ -155,7 +152,7 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     s.assignOverrides(kinds: ["", "scroll", "float"])
     #expect(s.workspace(on: 20)?.overrideKind == nil)
     #expect(s.workspace(on: 30)?.overrideKind == .float)
-    let live = s.liveWorkspaces(desktops: [10, 20, 30])
+    let live = Set(s.wsOrder)
     let (s1, _) = syncMembership(s, membership: [ws(s, 20): [7]], live: live)
     #expect(s1.layout(on: 20)?.kind == .bsp)
     #expect(s1.layout(on: 30)?.kind == .float)
@@ -307,7 +304,7 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
 @Test func anEmptySpaceKeepsItsLayoutKind() {
     var s0 = desktops([7])
     s0.setLayout(.float(FloatState()), on: 7)
-    let live = s0.liveWorkspaces(desktops: [7])
+    let live = Set(s0.wsOrder)
     // Sweep with the space present but holding nothing.
     let (s1, _) = syncMembership(s0, membership: [:], live: live)
     #expect(s1.layout(on: 7)?.kind == .float)
@@ -319,59 +316,13 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     #expect(fresh == [11])
 }
 
-/// A display that goes away takes nothing with it: its workspace moves to the
-/// first display, hidden, with its layout, its override and its windows. A
-/// workspace is weft's, not the display's, and unplugging a monitor must not
-/// be a way to lose a tree.
-@Test func anUnpluggedDisplaysWorkspaceMovesToTheFirstDisplay() {
-    var s = desktops([7, 8])
-    let moved = ws(s, 8)
-    s.workspaces[moved]?.overrideKind = .float
-    s.file(42, in: moved, laidOut: true)
-    s.adoptDisplays(displays([7]), names: nil)
-    #expect(s.workspaces[moved]?.desktop == 7)
-    #expect(s.workspaces[moved]?.overrideKind == .float)
-    #expect(s.workspaces[moved]?.contains(42) == true)
-    #expect(s.active[8] == nil)
-    // Hidden there: the first display keeps showing what it showed.
-    #expect(s.active[7] != moved)
-    #expect(s.wsOrder.count == 2)
-}
-
-@Test func layoutOverridesRoundTripByOrdinal() {
-    var s = desktops([10, 20, 30], names: ["main", "web", "code"])
-    s.workspaces[ws(s, 20)]?.overrideKind = .float
-    let saved = s.persistedOverrides()
-    #expect(saved == ["", "float", ""])
-    // A restart hands out different sids for the same desktops, and fresh
-    // workspace ids for the same workspaces — which is why the file is keyed
-    // by ordinal and neither id is ever written down.
-    var next = desktops([11, 21, 31], names: ["main", "web", "code"])
-    next.assignOverrides(kinds: saved)
-    #expect(next.workspace(on: 21)?.overrideKind == .float)
-    #expect(next.workspace(on: 11)?.overrideKind == nil)
-    // An empty workspace takes the restored kind outright — nothing to convert.
-    #expect(next.layout(on: 21)?.kind == .float)
-}
-
-/// Plugging it back in shows something there again without inventing a
-/// workspace: an empty hidden one is free to move, so it is the one taken.
-@Test func aReturningDisplayTakesAnEmptyHiddenWorkspace() {
-    var s = desktops([10, 20], names: ["main", "web"])
-    s.adoptDisplays(displays([10]), names: nil)
-    #expect(s.wsOrder.count == 2)
-    s.adoptDisplays(displays([10, 30]), names: nil)
-    #expect(s.wsOrder.count == 2)
-    #expect(s.workspace(on: 30)?.label == "web")
-}
-
 @Test func spaceWithOverrideFloatKeepsFloatWhenNewWindowOpens() {
     var s0 = desktops([1])
     s0.setLayout(.float(FloatState(order: [1], remembered: [:], focus: 1)), on: 1)
     s0.workspaces[ws(s0, 1)]?.overrideKind = .float
     // A second window opens on space 1
     let (s1, fresh) = syncMembership(
-        s0, membership: [ws(s0, 1): [1, 2]], live: s0.liveWorkspaces(desktops: [1])
+        s0, membership: [ws(s0, 1): [1, 2]], live: Set(s0.wsOrder)
     )
     #expect(s1.layout(on: 1)?.kind == .float)
     #expect(s1.layout(on: 1)?.windows == [1, 2])
@@ -384,255 +335,223 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     var s0 = desktops([2], names: [])
     s0.assignOverrides(kinds: ["float"])
     let (s1, fresh) = syncMembership(
-        s0, membership: [ws(s0, 2): [100]], live: s0.liveWorkspaces(desktops: [2])
+        s0, membership: [ws(s0, 2): [100]], live: Set(s0.wsOrder)
     )
     #expect(s1.layout(on: 2)?.kind == .float)
     #expect(s1.layout(on: 2)?.windows == [100])
     #expect(fresh == [100])
 }
 
-// MARK: - The workspace seam
-//
-// `reconcileWorkspaces` is where the two owners of membership meet: SLS says
-// which desktop a window is on, weft says which workspace it is in. These
-// tests are the specification of that rule.
+// MARK: - Numbering (NATIVE.md, "Numbering and labels")
 
-private let ws1 = WorkspaceID(1)
-private let ws2 = WorkspaceID(2)
-private let ws3 = WorkspaceID(3)
-
-/// Two displays, one workspace each: whatever SLS reports is what comes out.
-@Test func oneWorkspacePerDisplayReproducesWhatSLSReports() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [3], 11: [3], 12: [5]],
-        membership: [ws1: [10, 11], ws2: [12]],
-        desktopOf: [ws1: 3, ws2: 5],
-        activeOn: [3: ws1, 5: ws2]
-    )
-    #expect(out == [ws1: [10, 11], ws2: [12]])
-}
-
-/// A window in a workspace that is showing on display A, reported on display
-/// B: the user dragged it across, or the app moved it. It joins B's.
-@Test func aWindowDraggedToAnotherDisplayJoinsWhatIsShowingThere() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [5]],
-        membership: [ws1: [10], ws2: []],
-        desktopOf: [ws1: 3, ws2: 5],
-        activeOn: [3: ws1, 5: ws2]
-    )
-    #expect(out[ws2] == [10])
-    #expect(out[ws1] == nil)
-}
-
-/// …unless weft is the one moving it. A workspace shown on another display
-/// is marked in flight, and a sweep that lands before the WindowServer
-/// catches up must not read the move as a drag back.
-@Test func aWindowInFlightKeepsItsWorkspace() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [5]],
-        membership: [ws1: [10], ws2: []],
-        desktopOf: [ws1: 3, ws2: 5],
-        activeOn: [3: ws1, 5: ws2],
-        inFlight: [10]
-    )
-    #expect(out[ws1] == [10])
-}
-
-/// The half that makes a hidden workspace possible at all. Two workspaces on
-/// desktop 3, `ws2` showing: SLS reports every window there either way — a
-/// parked window is still on its desktop (S9) — and `ws1`'s must not be swept
-/// into `ws2` on the next sweep.
-@Test func aHiddenWorkspaceKeepsItsWindowsWhileAnotherIsShowing() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [3], 11: [3], 12: [3]],
-        membership: [ws1: [10, 11], ws2: [12]],
-        desktopOf: [ws1: 3, ws2: 3],
-        activeOn: [3: ws2]
-    )
-    #expect(out[ws1] == [10, 11])
-    #expect(out[ws2] == [12])
-}
-
-/// A hidden workspace keeps its windows wherever they are parked. Its windows
-/// can be reported on another display's desktop — it last showed there — and
-/// that is not the user moving them.
-@Test func aHiddenWorkspaceKeepsWindowsParkedOnAnotherDisplay() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [5]],
-        membership: [ws1: [10]],
-        desktopOf: [ws1: 3, ws2: 3, ws3: 5],
-        activeOn: [3: ws2, 5: ws3]
-    )
-    #expect(out[ws1] == [10])
-}
-
-/// A new window goes to what is showing where it opened, not to the first
-/// workspace that happens to live on that desktop.
-@Test func aNewWindowLandsInTheShowingWorkspaceNotJustAnyOnThatDesktop() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [3], 99: [3]],
-        membership: [ws1: [10], ws2: []],
-        desktopOf: [ws1: 3, ws2: 3],
-        activeOn: [3: ws2]
-    )
-    #expect(out[ws1] == [10])
-    #expect(out[ws2] == [99])
-}
-
-/// A window on several desktops at once — macOS's own "All Desktops" — is
-/// filed once, where it first lands on a managed desktop. Membership is one
-/// workspace per window now.
-@Test func aWindowOnSeveralDesktopsIsFiledOnce() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [3, 5]],
-        membership: [:],
-        desktopOf: [ws1: 3, ws2: 5],
-        activeOn: [3: ws1, 5: ws2]
-    )
-    #expect(out == [ws1: [10]])
-}
-
-/// A window on a desktop weft does not manage — another desktop, a
-/// fullscreen space — is in no workspace. weft pauses there.
-@Test func aWindowOnAnUnmanagedDesktopIsInNoWorkspace() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [3], 11: [7]],
-        membership: [ws1: [10, 11]],
-        desktopOf: [ws1: 3],
-        activeOn: [3: ws1]
-    )
-    #expect(out == [ws1: [10]])
-}
-
-/// A workspace weft has no desktop for holds nothing back: its windows are
-/// reconciled like any others.
-@Test func aWorkspaceWithNoDesktopHoldsNothingBack() {
-    let out = reconcileWorkspaces(
-        windowDesktops: [10: [5]],
-        membership: [ws3: [10], ws2: []],
-        desktopOf: [ws2: 5],
-        activeOn: [5: ws2]
-    )
-    #expect(out == [ws2: [10]])
-}
-
-// MARK: - Displays and their managed desktops
-
-/// Every `[[space]]` is a workspace on the managed desktop, however many
-/// macOS desktops the display has. The other desktops get none.
-@Test func declaredWorkspacesAllLiveOnTheManagedDesktop() {
+/// The main display's desktops first, then every other display west to east —
+/// whatever order SkyLight lists the displays in.
+@Test func desktopsAreNumberedMainFirstThenWestToEast() {
     var s = SpaceState()
-    s.adoptDisplays(
-        [DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)],
-        names: ["term", "web", "code", "chat"]
-    )
-    #expect(s.wsOrder.count == 4)
-    #expect(s.managed == ["A": 10])
-    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
-    #expect(s.active == [10: s.wsOrder[0]])
-    #expect(s.resolveWorkspace("web") == s.wsOrder[1])
-    #expect(s.resolveWorkspace("4") == s.wsOrder[3])
-}
-
-/// Swiping to another macOS desktop does not move the managed one. The
-/// display is paused, and nothing weft shows is on screen there.
-@Test func anotherDesktopShowingPausesTheDisplay() {
-    var s = SpaceState()
-    let one = DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)
-    s.adoptDisplays([one], names: ["a", "b"])
-    #expect(!s.isPaused("A"))
-    #expect(s.showingDisplay(of: s.wsOrder[0]) == "A")
-
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 20)], names: nil)
-    #expect(s.managed["A"] == 10)
-    #expect(s.isPaused("A"))
-    #expect(s.showingDisplay(of: s.wsOrder[0]) == nil)
-    // And back.
-    s.adoptDisplays([one], names: nil)
-    #expect(!s.isPaused("A"))
-}
-
-/// A launch while a fullscreen app is showing must not manage the
-/// fullscreen space: it is not in `desktops`, so the first real one is.
-@Test func aFullscreenSpaceIsNeverManaged() {
-    var s = SpaceState()
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 99)], names: ["a"])
-    #expect(s.managed["A"] == 10)
-    #expect(s.isPaused("A"))
-}
-
-/// The managed desktop deleted in Mission Control: macOS moves its windows,
-/// weft manages what the display shows now, and the workspaces go with it.
-@Test func aDeletedManagedDesktopHandsItsWorkspacesToTheNextOne() {
-    var s = SpaceState()
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)], names: ["a", "b"])
-    s.file(42, in: s.wsOrder[1], laidOut: true)
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [20], current: 20)], names: nil)
-    #expect(s.managed["A"] == 20)
-    #expect(s.workspaces.values.allSatisfy { $0.desktop == 20 })
-    #expect(s.workspaces[s.wsOrder[1]]?.contains(42) == true)
-    #expect(s.active[20] == s.wsOrder[0])
-}
-
-/// A new display with no hidden workspace free to take gets a numbered one.
-@Test func aNewDisplayWithNothingFreeGetsANumberedWorkspace() {
-    var s = SpaceState()
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10], current: 10)], names: ["a"])
-    s.file(42, in: s.wsOrder[0], laidOut: true)
     s.adoptDisplays([
-        DisplayDesktops(uuid: "A", desktops: [10], current: 10),
-        DisplayDesktops(uuid: "B", desktops: [30], current: 30),
-    ], names: nil)
-    #expect(s.wsOrder.count == 2)
+        DisplayDesktops(uuid: "east", desktops: [40], current: 40, originX: 3000),
+        DisplayDesktops(uuid: "west", desktops: [30, 31], current: 30, originX: -2000),
+        DisplayDesktops(uuid: "laptop", desktops: [10, 11], current: 10, isMain: true, originX: 0),
+    ], names: ["mail"])
+    #expect(s.order == [10, 11, 30, 31, 40])
+    #expect(s.displays == ["laptop", "west", "east"])
+    #expect(s.workspace(on: 10)?.label == "mail")
+    #expect(s.workspace(on: 30)?.label == "3")
+    #expect(s.resolveWorkspace("5") == ws(s, 40))
+    #expect(s.keyBySpace[31] == DesktopKey(display: "west", position: 2))
+}
+
+/// Fullscreen spaces are not in `desktops`, so entering fullscreen shifts no
+/// number, and a display showing one is paused.
+@Test func aFullscreenSpaceHasNoNumberAndPausesItsDisplay() {
+    var s = SpaceState()
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [3, 76, 78], current: 425, isMain: true)])
+    #expect(s.wsOrder.count == 3)
+    #expect(s.active[425] == nil)
+    #expect(s.isPaused("A"))
+    #expect(s.currentWorkspace == nil)
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [3, 76, 78], current: 76, isMain: true)])
+    #expect(!s.isPaused("A"))
+    #expect(s.currentWorkspace == ws(s, 76))
+}
+
+/// Labels stay with numbers: a desktop added in front of the others takes the
+/// first label, as Mission Control's order says it should.
+@Test func labelsAttachByNumberWhenDesktopsChange() {
+    var s = desktops([10], names: ["mail", "code"])
+    #expect(s.workspace(on: 10)?.label == "mail")
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 10)])
+    #expect(s.workspace(on: 20)?.label == "code")
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [5, 10, 20], current: 10)])
+    #expect(s.workspace(on: 5)?.label == "mail")
+    #expect(s.workspace(on: 10)?.label == "code")
+    #expect(s.workspace(on: 20)?.label == "3")
+}
+
+@Test func aLabelOrNumberWithNoDesktopIsMissingNotUnknown() {
+    let s = desktops([10, 20], names: ["mail", "code", "music"])
+    #expect(s.resolveWorkspace("music") == nil)
+    #expect(s.missingDesktop("music") == 3)
+    #expect(s.missingDesktop("7") == 7)
+    #expect(s.missingDesktop("code") == nil)
+    #expect(s.missingDesktop("nope") == nil)
+    // A desktop id out of `query spaces` is not a desktop number.
+    #expect(s.missingDesktop("4000") == nil)
+}
+
+@Test func spaceLabelNamesTheDesktopByNumber() {
+    var s = desktops([10, 20])
+    s.setLabel("web", number: 2)
+    #expect(s.workspace(on: 20)?.label == "web")
+    #expect(s.persistedNames() == ["1", "web"])
+    s.setLabel("far", number: 4)
+    #expect(s.persistedNames() == ["1", "web", "", "far"])
+}
+
+/// `next`/`prev` stay on the focused display and stop at its ends, as ⌃←/⌃→
+/// do; empty desktops are not skipped.
+@Test func steppingStaysOnTheFocusedDisplayAndDoesNotWrap() {
+    var s = SpaceState()
+    s.adoptDisplays([
+        DisplayDesktops(uuid: "A", desktops: [1, 2, 3], current: 2, isMain: true),
+        DisplayDesktops(uuid: "B", desktops: [7, 8], current: 7, originX: 2000),
+    ])
+    s.focusedDisplay = "A"
+    #expect(s.resolveWorkspace("next") == ws(s, 3))
+    #expect(s.resolveWorkspace("prev") == ws(s, 1))
+    s.focusedDisplay = "B"
+    #expect(s.resolveWorkspace("prev") == nil)
+    #expect(s.resolveWorkspace("next") == ws(s, 8))
+}
+
+// MARK: - Membership (NATIVE.md: macOS owns it)
+
+@Test func eachWindowIsInTheWorkspaceOfItsDesktop() {
+    let s = desktops([3, 5])
+    let out = membershipByDesktop([10: [3], 11: [5], 12: [3]], active: s.active)
+    #expect(out.members[ws(s, 3)] == [10, 12])
+    #expect(out.members[ws(s, 5)] == [11])
+    #expect(out.everywhere.isEmpty)
+}
+
+/// Dock › Options › All Desktops: floats, never moved, in no workspace.
+@Test func aWindowOnEveryDesktopIsInNoWorkspace() {
+    let s = desktops([3, 5])
+    let out = membershipByDesktop([10: [3, 5], 11: [5]], active: s.active)
+    #expect(out.everywhere == [10])
+    #expect(out.members[ws(s, 3)] == nil)
+    #expect(out.members[ws(s, 5)] == [11])
+}
+
+/// A window in native fullscreen is on a space with no workspace: in none.
+/// Back on its desktop, it is that desktop's again.
+@Test func aFullscreenWindowRejoinsItsDesktopWhenItLeaves() {
+    var s = desktops([3])
+    var (synced, _) = syncMembership(s, membership: membershipByDesktop([10: [3], 11: [3]], active: s.active).members, live: Set(s.wsOrder))
+    s = synced
+    (synced, _) = syncMembership(s, membership: membershipByDesktop([10: [3], 11: [425]], active: s.active).members, live: Set(s.wsOrder))
+    #expect(synced.layout(on: 3)?.windows == [10])
+    (synced, _) = syncMembership(synced, membership: membershipByDesktop([10: [3], 11: [3]], active: s.active).members, live: Set(s.wsOrder))
+    #expect(synced.layout(on: 3)?.windows.sorted() == [10, 11])
+}
+
+// MARK: - Desktops coming and going
+
+/// A desktop removed in Mission Control loses its workspace; the others keep
+/// theirs, trees and all, and are numbered again.
+@Test func aRemovedDesktopTakesOnlyItsOwnWorkspace() {
+    var s = desktops([10], names: [])
+    s.adoptDisplays([DisplayDesktops(uuid: "D10", desktops: [10, 20, 30], current: 10)])
+    let kept = ws(s, 30)
+    s.file(42, in: kept, laidOut: true)
+    s.recentWorkspace = ws(s, 20)
+    s.adoptDisplays([DisplayDesktops(uuid: "D10", desktops: [10, 30], current: 10)])
+    #expect(s.active[20] == nil)
+    #expect(ws(s, 30) == kept)
+    #expect(s.workspaces[kept]?.contains(42) == true)
     #expect(s.workspace(on: 30)?.label == "2")
+    #expect(s.recentWorkspace == nil)
 }
 
-/// No displays at all is a transient — sleep, a reconfiguration in flight —
-/// and must leave the workspaces exactly where they were.
-@Test func noDisplaysLeavesTheWorkspacesAlone() {
-    var s = desktops([10], names: ["a", "b"])
-    let before = s.workspaces
-    s.adoptDisplays([], names: nil)
-    #expect(s.workspaces == before)
+/// Unplug a display and plug it back: its desktops come back — with new
+/// SpaceIDs, as after a logout — and each takes the layout it had (story 35).
+@Test func aDisplayPluggedBackInGetsItsLayoutsBack() {
+    var s = SpaceState()
+    let laptop = DisplayDesktops(uuid: "L", desktops: [1], current: 1, isMain: true)
+    s.adoptDisplays([laptop, DisplayDesktops(uuid: "X", desktops: [7, 8], current: 7, originX: 2000)])
+    s.workspaces[ws(s, 8)]?.overrideKind = .float
+    s.setLayout(.float(FloatState()), on: 8)
+    s.adoptDisplays([laptop])
+    #expect(s.wsOrder.count == 1)
+    s.adoptDisplays([laptop, DisplayDesktops(uuid: "X", desktops: [17, 18], current: 17, originX: 2000)])
+    #expect(s.workspace(on: 18)?.overrideKind == .float)
+    #expect(s.layout(on: 18)?.kind == .float)
+    #expect(s.workspace(on: 17)?.overrideKind == nil)
 }
 
-// MARK: - Showing
-
-@Test func showingAHiddenWorkspaceMakesItActiveThere() {
-    var s = desktops([10], names: ["a", "b"])
-    let b = s.wsOrder[1]
-    s.show(b, on: 10)
-    #expect(s.active[10] == b)
-    #expect(s.workspaces[b]?.desktop == 10)
-}
-
-/// Showing a workspace that is on screen elsewhere swaps the two displays,
-/// so neither is left showing nothing: `move space display`.
-@Test func showingAWorkspaceFromTheOtherDisplaySwapsThem() {
+@Test func noDisplaysIsATransientAndChangesNothing() {
     var s = desktops([10, 20], names: ["a", "b"])
-    let a = s.active[10]!, b = s.active[20]!
-    s.show(a, on: 20)
-    #expect(s.active[20] == a)
-    #expect(s.active[10] == b)
-    #expect(s.workspaces[a]?.desktop == 20)
-    #expect(s.workspaces[b]?.desktop == 10)
+    let before = s
+    s.adoptDisplays([])
+    #expect(s == before)
 }
 
-// MARK: - Editing the list and restarting
+// MARK: - Layouts on disk, by place
 
-@Test func relabelRenamesAddsAndDropsOnlyWhatIsSafeToDrop() {
-    var s = desktops([10], names: ["a", "b", "c", "d"])
-    s.file(42, in: s.wsOrder[3], laidOut: true)
-    s.relabel(["x", "y"])
-    #expect(s.persistedNames() == ["x", "y", "d"])  // "c" was empty and hidden
-    s.relabel(["x", "y", "z", "w"])
-    #expect(s.persistedNames() == ["x", "y", "z", "w"])
-    #expect(s.workspaces[s.wsOrder[2]]?.contains(42) == true)
+/// A logout hands out new SpaceIDs; the layout comes back by (display,
+/// position). The tree only within one boot.
+@Test func layoutsSurviveALogoutByPlace() throws {
+    let inner = Container(layout: .splitH, children: [.window(2), .window(3)], ratios: [0.4, 0.6])
+    let root = Container(layout: .splitV, children: [.window(1), .container(inner)], ratios: [0.7, 0.3])
+    var first = SpaceState()
+    first.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20, 30], current: 10)])
+    first.workspaces[ws(first, 20)]?.overrideKind = .float
+    first.setLayout(.tiling(Tree(root: .container(root), focus: 3)), on: 30)
+    let saved = first.persistedLayouts()
+    #expect(saved[DesktopKey(display: "A", position: 1)] == nil)
+    let data = try JSONEncoder().encode(Dictionary(uniqueKeysWithValues: saved.map { ($0.key.description, $0.value) }))
+    let decoded = try JSONDecoder().decode([String: SavedDesktop].self, from: data)
+    let byKey = Dictionary(uniqueKeysWithValues: decoded.compactMap { k, v in DesktopKey(k).map { ($0, v) } })
+
+    var restarted = SpaceState()
+    restarted.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [11, 21, 31], current: 11)])
+    restarted.restore(byKey, trees: true)
+    #expect(restarted.workspace(on: 21)?.overrideKind == .float)
+    #expect(restarted.layout(on: 21)?.kind == .float)
+    guard case .tiling(let tree)? = restarted.layout(on: 31) else { Issue.record("not tiling"); return }
+    #expect(tree.root == .container(root))
+    #expect(tree.focus == 3)
+
+    var nextBoot = SpaceState()
+    nextBoot.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [12, 22, 32], current: 12)])
+    nextBoot.restore(byKey, trees: false)
+    #expect(nextBoot.workspace(on: 22)?.overrideKind == .float)
+    #expect(nextBoot.layout(on: 32)?.windows == [])
 }
 
-/// What `labels.json` records has to survive being read back: the count is
-/// the count, with no desktops folded into it.
+@Test func aDesktopKeyRoundTripsThroughText() {
+    let key = DesktopKey(display: "37D8832A-2D66-02CA-B9F7-8F30A301B230", position: 3)
+    #expect(DesktopKey(key.description) == key)
+    #expect(DesktopKey("no-hash") == nil)
+}
+
+// MARK: - Focus history
+
+/// A switch focuses the window last used there — a float included — not the
+/// layout's own idea of focus.
+@Test func theLastFocusedWindowIsWhatASwitchFocuses() {
+    var s = desktops([3])
+    let id = ws(s, 3)
+    s.file(10, in: id, laidOut: true)
+    s.file(11, in: id, laidOut: true)
+    s.file(12, in: id, laidOut: false)
+    s.noteFocus(12)
+    #expect(s.workspaces[id]?.focusTarget == 12)
+    s.removeWindow(12)
+    #expect(s.workspaces[id]?.focusTarget == s.layout(on: 3)?.focus)
+    #expect(desktops([4]).workspace(on: 4)?.focusTarget == nil)
+}
+
 @Test func workspaceNamesSurviveARestart() {
     let one = [DisplayDesktops(uuid: "A", desktops: [10, 20, 30], current: 10)]
     var first = SpaceState()
@@ -640,42 +559,6 @@ private let ws3 = WorkspaceID(3)
     var second = SpaceState()
     second.adoptDisplays(one, names: first.persistedNames())
     #expect(second.persistedNames() == ["one", "two", "three"])
-}
-
-/// Membership survives a daemon restart by ordinal: windows go back into the
-/// workspace they were in rather than all into the first.
-@Test func membershipSurvivesARestartByOrdinal() {
-    var first = desktops([10], names: ["a", "b"])
-    first.file(42, in: first.wsOrder[1], laidOut: true)
-    first.file(43, in: first.wsOrder[0], laidOut: false)
-    let saved = first.persistedMembership()
-    var second = desktops([10], names: ["a", "b"])
-    second.seedMembership(saved)
-    #expect(second.workspace(holding: 42) == second.wsOrder[1])
-    #expect(second.workspace(holding: 43) == second.wsOrder[0])
-}
-
-/// A restart puts the arrangement back, not just the windows: the saved tree
-/// survives JSON and seeding, and the sweep then only adds and removes.
-@Test func theTreeSurvivesARestart() throws {
-    // [1 | [2 / 3]] at 70/30, then 3 zoomed into focus.
-    let inner = Container(layout: .splitH, children: [.window(2), .window(3)], ratios: [0.4, 0.6])
-    let root = Container(layout: .splitV, children: [.window(1), .container(inner)], ratios: [0.7, 0.3])
-    var first = desktops([10], names: ["a", "b"])
-    first.setLayout(.tiling(Tree(root: .container(root), focus: 3)), of: first.wsOrder[1])
-    let trees = first.persistedTrees()
-    #expect(trees[0] == nil)  // empty workspaces save nothing
-    let data = try JSONEncoder().encode(trees)
-    let decoded = try JSONDecoder().decode([SavedTree?].self, from: data)
-
-    var second = desktops([10], names: ["a", "b"])
-    second.seedMembership(first.persistedMembership(), trees: decoded)
-    guard case .tiling(let tree)? = second.workspaces[second.wsOrder[1]]?.layout else {
-        Issue.record("not tiling"); return
-    }
-    #expect(tree.root == .container(root))
-    #expect(tree.focus == 3)
-    #expect(second.workspaces[second.wsOrder[1]]?.loose.isEmpty == true)
 }
 
 /// A saved tree is repaired, not trusted: a container left with one child
@@ -697,20 +580,6 @@ private let ws3 = WorkspaceID(3)
     #expect(c.ratios.count == 3 && abs(c.ratios[0] - 1.0 / 3) < 1e-9)
 }
 
-@Test func resetWorkspacesClearsTheSetButKeepsTheDesktops() {
-    var s = desktops([10, 20], names: ["a", "b", "c"])
-    s.recentWorkspace = s.wsOrder.first
-    s.resetWorkspaces()
-    #expect(s.workspaces.isEmpty)
-    #expect(s.active.isEmpty)
-    #expect(s.wsOrder.isEmpty)
-    #expect(s.recentWorkspace == nil)
-    #expect(s.order == [10, 20])
-    #expect(s.managed == ["D10": 10, "D20": 20])
-    s.adoptDisplays(displays([10, 20]), names: ["a", "b"])
-    #expect(s.wsOrder.count == 2)
-}
-
 // MARK: - Moving a float between displays
 
 @Test func aFloatKeepsItsPlaceRelativeToTheDisplayItMovesTo() {
@@ -725,98 +594,3 @@ private let ws3 = WorkspaceID(3)
     #expect(g.width == 1000 && g.height == 800 && g.x == 0 && g.y == 0)
 }
 
-// MARK: - Numbered workspaces on demand
-
-@Test func aNumberPastTheEndCreatesWorkspacesUpToIt() {
-    var s = desktops([10])
-    #expect(s.wsOrder.count == 1)
-    let four = s.resolveOrCreateWorkspace("4")
-    #expect(s.persistedNames() == ["1", "2", "3", "4"])
-    #expect(four == s.wsOrder[3])
-    #expect(s.workspaces[four!]?.desktop == 10)
-    // A desktop-id-sized number is not a request for a thousand workspaces.
-    #expect(s.resolveOrCreateWorkspace("4242") == nil)
-    #expect(s.resolveOrCreateWorkspace("nope") == nil)
-    #expect(s.wsOrder.count == 4)
-}
-
-/// A restart while another desktop is showing — an update does that — must
-/// not make that desktop weft's. The one managed before is restored first,
-/// and the display starts paused until the user goes back.
-@Test func aRestartOnAnotherDesktopKeepsTheManagedOne() {
-    var s = SpaceState()
-    s.managed = ["A": 10]   // from membership.json, this boot
-    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [10, 20], current: 20)], names: ["a", "b"])
-    #expect(s.managed["A"] == 10)
-    #expect(s.isPaused("A"))
-    #expect(s.workspaces.values.allSatisfy { $0.desktop == 10 })
-}
-
-/// Reordering in Settings moves workspaces, not names. By position, every
-/// name after the move landed on another workspace's windows.
-@Test func relabelFollowsAReorderByName() {
-    var s = desktops([10], names: ["a", "b", "c"])
-    let b = s.wsOrder[1]
-    s.file(42, in: b, laidOut: true)
-    s.relabel(["b", "a", "c"])
-    #expect(s.persistedNames() == ["b", "a", "c"])
-    #expect(s.wsOrder[0] == b)
-    #expect(s.workspaces[b]?.contains(42) == true)
-}
-
-/// Deleting a workspace in the middle leaves the ones after it alone. By
-/// position, "c" was renamed onto the deleted one's windows and the real "c"
-/// kept its name too, so two workspaces answered to it.
-@Test func relabelDropsTheDeletedWorkspaceNotItsNeighbour() {
-    var s = desktops([10], names: ["a", "b", "c"])
-    let c = s.wsOrder[2]
-    s.file(42, in: c, laidOut: true)
-    s.relabel(["a", "c"])
-    #expect(s.persistedNames() == ["a", "c"])
-    #expect(s.workspaces[c]?.contains(42) == true)
-}
-
-/// A name changed in place is a rename: same workspace, same windows.
-@Test func relabelTreatsANewNameInPlaceAsARename() {
-    var s = desktops([10], names: ["a", "b", "c"])
-    let b = s.wsOrder[1]
-    s.file(42, in: b, laidOut: true)
-    s.relabel(["a", "web", "c"])
-    #expect(s.persistedNames() == ["a", "web", "c"])
-    #expect(s.wsOrder[1] == b)
-    #expect(s.workspaces[b]?.contains(42) == true)
-}
-
-// MARK: - Stepping (`space focus next` / `prev`, the trackpad swipe)
-
-@Test func steppingSkipsEmptyWorkspacesAndWraps() {
-    var s = desktops([10], names: ["a", "b", "c", "d"])
-    let id = { (label: String) in s.id(forLabel: label)! }
-    s.file(1, in: id("c"), laidOut: true)
-    s.file(2, in: id("d"), laidOut: true)
-    #expect(s.currentWorkspace == id("a"))
-    #expect(s.workspace(steppingBy: 1) == id("c"))  // b is empty
-    #expect(s.workspace(steppingBy: -1) == id("d"))  // wraps round
-    #expect(s.resolveWorkspace("next") == id("c"))
-    #expect(s.resolveWorkspace("prev") == id("d"))
-    #expect(s.workspace(steppingBy: 1, skipping: [id("c")]) == id("d"))
-}
-
-@Test func steppingWithNowhereToGoIsNil() {
-    var s = desktops([10], names: ["a", "b"])
-    s.file(1, in: s.id(forLabel: "a")!, laidOut: true)
-    // The only workspace with windows is the one already showing.
-    #expect(s.workspace(steppingBy: 1) == nil)
-    #expect(s.workspace(steppingBy: -1) == nil)
-}
-
-@Test func steppingPassesOverTheWorkspaceOnTheOtherDisplay() {
-    var s = desktops([10, 20], names: ["a", "b", "c"])
-    let id = { (label: String) in s.id(forLabel: label)! }
-    s.focusedDisplay = "D10"
-    s.file(1, in: id("b"), laidOut: true)
-    s.file(2, in: id("c"), laidOut: true)
-    #expect(s.showingDisplay(of: id("b")) == "D20")
-    // b has windows but is on screen over there: stepping lands on c.
-    #expect(s.workspace(steppingBy: 1) == id("c"))
-}

@@ -3,156 +3,27 @@ import Foundation
 import WeftCore
 import WeftPlatform
 
-// `weftctl doctor --selftest` — the hiding mechanism, end to end, on a window
-// of weftctl's own. Run on every macOS beta before a release ships
-// (docs/TESTING.md): it is the one thing weft's workspaces rest on, and the
-// one thing a macOS update could quietly change.
+// `weftctl doctor --selftest` — the native-desktop routes, end to end, on
+// this Mac. Run on every macOS beta before a release ships (docs/TESTING.md):
+// they are what weft's desktops rest on, and what a macOS update could
+// quietly change.
 //
-// A small window titled "weft self-test" appears for about a second. It
-// belongs to a second weftctl process, as every window weft hides belongs to
-// another app — and because Accessibility requests to a process are answered
-// on its main thread, which a process waiting on its own answer is blocking.
-// No other window is touched, and the ledger it writes is a temporary one.
+// The private-symbol self-test, then each route (NATIVE.md, "Self-tests and
+// degradation"): the symbol walk, a bridged move of a never-shown window of
+// weftctl's own, and the visible switch test — a display with two desktops
+// switches to its neighbour and back, once by the bridged switch and once by
+// Dock swipe. No window of the user's is moved.
 enum LiveSelfTest {
-    /// The child: show the window, say its number, wait to be told to go.
-    static func serveWindow() -> Never {
-        _ = NSApplication.shared
-        NSApp.setActivationPolicy(.accessory)
-        let window = NSWindow(
-            contentRect: NSRect(x: 240, y: 240, width: 360, height: 220),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.title = "weft self-test"
-        window.orderFrontRegardless()
-        print(window.windowNumber)
-        fflush(stdout)
-        // Exit when the parent closes our stdin, or kills us.
-        DispatchQueue.global().async {
-            _ = FileHandle.standardInput.readDataToEndOfFile()
-            exit(0)
-        }
-        NSApp.run()
-        exit(0)
-    }
-
-    /// Hiding one window must cost less than this on the WindowServer path
-    /// (S9 measured 0.2 ms) — generous, because a beta may be slower and that
-    /// is worth knowing without being a failure.
-    static let parkBudgetMs = 10.0
-
     static func run() -> Bool {
         print("=== weft self-test === \(WeftVersion.full)")
         let report = PrivateAPI.selfTest()
         print("[\(report.failed.isEmpty ? "\u{2713}" : "!")] \(report.macOS): \(report.summary)")
-
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-        child.arguments = ["__selftest-window"]
-        let out = Pipe(), input = Pipe()
-        child.standardOutput = out
-        child.standardInput = input
-        do { try child.run() } catch {
-            print("[\u{2717}] Could not start the test window: \(error)")
-            return false
-        }
-        defer { try? input.fileHandleForWriting.close(); child.waitUntilExit() }
-        let line = String(data: out.fileHandleForReading.availableData, encoding: .utf8) ?? ""
-        guard let number = Int(line.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            print("[\u{2717}] The test window did not appear")
-            return false
-        }
-        pump(0.4)
-        let wid = WindowID(number)
-        guard let before = WorldReader.frame(of: wid) else {
-            print("[\u{2717}] Could not read the test window's frame")
-            return false
-        }
-        let layout = SpaceControl.displayLayout()
-        let frames = layout.map(\.frame)
-        let display = layout.first { $0.frame.intersects(before) }?.frame ?? frames.first ?? before
-        let corner = freeCorner(of: display, among: frames) ?? .bottomRight
-
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("weft-selftest-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let parker = Parker(
-            ledger: ParkLedger(url: dir.appendingPathComponent("parked.json")),
-            fallback: AXParkMover(applier: AXApplier())
-        )
-        var path = PrivateAPI.canMoveOtherAppsWindows ? "WindowServer" : "Accessibility (public path)"
-        var ok = true
-
-        // Park.
-        let t0 = Date()
-        do {
-            let outcome = try parker.park([wid], on: display, corner: corner)
-            guard outcome.parked == [wid] else {
-                print("[\u{2717}] Hide: the window was not moved (\(path))")
-                return false
-            }
-        } catch {
-            print("[\u{2717}] Hide: \(error)")
-            return false
-        }
-        let parkMs = Date().timeIntervalSince(t0) * 1000
-        // The park itself can find the WindowServer move does not land on
-        // another app's window (macOS 27) and finish through Accessibility.
-        if path == "WindowServer", !PrivateAPI.canMoveOtherAppsWindows {
-            path = "Accessibility — the WindowServer move was accepted and did not land"
-        }
-        pump(0.2)
-        // Judged by the public window list, never by weft's own read. On
-        // macOS 27 a WindowServer move of another process's window is
-        // accepted, and the connection that made it reads the new position
-        // back, while the window stays exactly where it was. A self-test
-        // that checks its move with the same connection that made it passes
-        // on a Mac where nothing is ever hidden.
-        let parked = PublicPaths.frame(of: wid)
-        let onScreen = WorldReader.onScreenWindowIDs().contains(wid)
-        let visible = parked.map { display.intersects($0) } ?? false
-        // A sliver, not the window: the move has to have happened at all.
-        // Accessibility keeps a strip reachable, so "a sliver" is a share of
-        // the window rather than one point.
-        let moved = parked.map { f -> Bool in
-            let w = min(f.x + f.width, display.x + display.width) - max(f.x, display.x)
-            let h = min(f.y + f.height, display.y + display.height) - max(f.y, display.y)
-            return max(w, 0) * max(h, 0) < 0.05 * f.width * f.height
-        } ?? false
-        print("[\(moved && visible && onScreen ? "\u{2713}" : "\u{2717}")] Hide at the \(corner.rawValue) corner via \(path): "
-            + String(format: "%.2f ms", parkMs)
-            + (moved ? "" : ", the window DID NOT MOVE (accepted, but still at \(parked.map { "\(Int($0.x)),\(Int($0.y))" } ?? "?"))")
-            + (visible ? ", one point still on screen" : ", NOT on screen")
-            + (onScreen ? ", still in the on-screen list" : ", DROPPED from the on-screen list"))
-        ok = ok && moved && visible && onScreen
-        if PrivateAPI.canMoveOtherAppsWindows, parkMs > parkBudgetMs {
-            print("    slower than the \(Int(parkBudgetMs)) ms budget — worth a look on this macOS")
-        }
-
-        // Unpark.
-        let t1 = Date()
-        let back = parker.unpark([wid])
-        let unparkMs = Date().timeIntervalSince(t1) * 1000
-        pump(0.2)
-        let after = PublicPaths.frame(of: wid)
-        let home = after.map { abs($0.x - before.x) <= 1 && abs($0.y - before.y) <= 1 } ?? false
-        print("[\(home && back.restored == [wid] ? "\u{2713}" : "\u{2717}")] Show: "
-            + String(format: "%.2f ms", unparkMs)
-            + (home ? ", back exactly where it was" : ", NOT back where it was"))
-        ok = ok && home
-
-        // The native-desktop routes, the visible switch test included: one
-        // brief flicker on a display with two or more desktops.
-        print("Testing the native-desktop routes; a display may flicker once.")
+        print("Testing the native-desktop routes; a display may flicker twice.")
         let routes = NativeSelfTest.routes(allowVisible: true, force: true)
-        ok = NativeRoutesReport.print(routes) && ok
-
+        let ok = NativeRoutesReport.print(routes) && report.failed.isEmpty
         print(ok ? "---\nThis macOS does what weft relies on."
                  : "---\nSomething weft relies on has changed. Please report the lines above.")
         return ok
-    }
-
-    private static func pump(_ seconds: TimeInterval) {
-        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 }
 

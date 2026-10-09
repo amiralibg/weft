@@ -61,23 +61,16 @@ public enum Doctor {
             return nil
         }
 
-        print("    - Workspaces: \(live.workspaces), on one macOS desktop per display")
+        print("    - Desktops: \(live.workspaces), one workspace each")
         for d in live.displays {
-            let managed = d.managedDesktop.map { "desktop \($0) of \(d.desktops)" } ?? "no desktop"
             let name = d.name.map { " (\($0))" } ?? ""
-            var line = "      display \(d.index)\(name): weft manages \(managed)"
-            if let showing = d.showing { line += ", showing \(showing)" }
-            if d.paused { line += " — PAUSED (another desktop or a fullscreen app is showing)" }
-            print(line)
-            if d.parkCorner == nil, live.displays.count > 1 {
-                print("        every corner of this display touches another one, so its hidden")
-                print("        windows are parked at another display's corner instead")
+            var line = "      display \(d.index)\(name): \(d.desktops) desktop(s)"
+            if d.paused {
+                line += ", showing a fullscreen app"
+            } else if let n = d.managedDesktop {
+                line += ", showing desktop \(n)" + (d.showing.map { " (\($0))" } ?? "")
             }
-        }
-        if !live.displaysWithExtraDesktops.isEmpty {
-            print("    [○] Extra macOS desktops are fine: weft pauses while one is showing and")
-            print("        resumes when you come back. Remove them in Mission Control to keep")
-            print("        every window managed.")
+            print(line)
         }
         return live
     }
@@ -329,13 +322,9 @@ public enum Doctor {
         // and `doctor --selftest` re-runs it on screen.
         NativeRoutesReport.print(NativeSelfTest.routes(allowVisible: false))
 
-        // 3. What weft does not do, said once so nobody goes looking for it.
-        // Moving windows between macOS desktops and switching desktops needed
-        // SIP off or simulated input that broke on macOS updates; workspaces
-        // do both jobs now, on one desktop per display.
-        print("[\u{2713}] Workspaces: switching and moving windows need no SIP change and no")
-        print("    macOS shortcut. weft does not switch macOS desktops or move windows")
-        print("    between them; it pauses on a display showing another desktop.")
+        // 3. How weft's desktops relate to macOS's, said once.
+        print("[\u{2713}] Workspaces are your macOS desktops: add, remove and reorder them in")
+        print("    Mission Control, and weft follows. weft cannot create desktops.")
 
         // macOS's own tiling moves the same windows weft does.
         let tiling = SystemChecks.macOSTilingEnabled()

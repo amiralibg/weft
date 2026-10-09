@@ -33,6 +33,15 @@ import Testing
     #expect(v == .targetNotShown([11]))
 }
 
+// The daemon's view of a desktop can hold a window an app hid with ⌘H. One of
+// the target's windows on screen is a switch that painted.
+@Test func theDaemonNeedsOneTargetWindowOnScreen() {
+    let one = SwitchVerdict.judge(target: 5, currentAfter: 5, expectShown: [10, 11], expectHidden: [], onScreen: [11], quorum: .any)
+    #expect(one.landed)
+    let none = SwitchVerdict.judge(target: 5, currentAfter: 5, expectShown: [10, 11], expectHidden: [], onScreen: [], quorum: .any)
+    #expect(none == .targetNotShown([10, 11]))
+}
+
 // S12: an ordered-out popover on the target is never on screen. It is not a
 // managed window, so the caller does not pass it, and a good switch lands.
 @Test func anEmptyTargetLandsOnTheReadBackAlone() {
