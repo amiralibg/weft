@@ -10,7 +10,6 @@ func usage() -> Never {
           weftctl query <displays|spaces|windows|world|state|tree|trace|capability>
           weftctl <command>            # focus/move/resize/split/balance/sync/retile/...
           weftctl space <focus|move-window|label|layout>  # native spaces (M4+)
-          weftctl sticky [wid] [on|off]             # toggle sticky window
           weftctl focus display <next|prev|N>
           weftctl app toggle <bundle-id>            # launch/focus/hide
           weftctl exec '<shell command>'            # run it through /bin/sh

@@ -111,12 +111,11 @@ final class ConfigStore: ObservableObject {
     @Published var defaultLayout = "bsp"
     @Published var mouseModifier = "alt"
     @Published var mouseBorderResize = true
-    @Published var workspaceSwipeFingers = 0
     @Published var mouseFollowsFocus = true
     @Published var focusFollowsMouse = false
     /// Whether a rule's `space = "…"` also switches to that workspace. The
     /// window is placed either way; this is only whether the screen follows.
-    @Published var followSpaceRules = false
+    @Published var followSpaceRules = true
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
 
@@ -221,10 +220,9 @@ final class ConfigStore: ObservableObject {
         defaultLayout = g?.string("default-layout") ?? "bsp"
         mouseModifier = g?.string("mouse-modifier") ?? "alt"
         mouseBorderResize = g?.bool("mouse-border-resize") ?? true
-        workspaceSwipeFingers = g?.int("workspace-swipe-fingers") ?? 0
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
-        followSpaceRules = g?.bool("follow-space-rules") ?? false
+        followSpaceRules = g?.bool("follow-space-rules") ?? true
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
     }
@@ -418,14 +416,13 @@ final class ConfigStore: ObservableObject {
         s.set("default-layout", string: defaultLayout)
         s.set("mouse-modifier", string: mouseModifier, default: "alt")
         s.set("mouse-border-resize", bool: mouseBorderResize, default: true)
-        s.set("workspace-swipe-fingers", int: workspaceSwipeFingers, default: 0)
         s.set("mouse-follows-focus", bool: mouseFollowsFocus, default: true)
         s.set("focus-follows-mouse", bool: focusFollowsMouse, default: false)
         // Retired in 0.9.15: one workspace model, so these two only ever
         // produce a warning. Saving from Settings is a good moment to drop them.
         s.remove("workspaces")
         s.remove("workspace-anchor")
-        s.set("follow-space-rules", bool: followSpaceRules, default: false)
+        s.set("follow-space-rules", bool: followSpaceRules, default: true)
         s.set("manage-menubar-apps", bool: manageMenubarApps, default: false)
         s.set("check-for-updates", bool: checkForUpdates, default: true)
         s.setRaw("reserve", TomlValue.sidesLiteral(

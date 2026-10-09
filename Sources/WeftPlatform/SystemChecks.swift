@@ -45,34 +45,22 @@ public enum SystemChecks {
     /// Opens the pane holding both macOS tiling and Stage Manager.
     public static let desktopAndDockURL = "x-apple.systempreferences:com.apple.Desktop-Settings.extension"
 
+    /// "Automatically rearrange Spaces based on most recent use"
+    /// (`com.apple.dock mru-spaces`). On by default, so an absent key is on.
+    /// With it on, macOS reorders desktops as they are used, and weft's
+    /// numbers — Mission Control's order — move with them (NATIVE.md). weft
+    /// reports it and never changes it.
+    public static func rearrangesSpacesByUse() -> Bool {
+        (UserDefaults(suiteName: "com.apple.dock")?.object(forKey: "mru-spaces") as? Bool) ?? true
+    }
+
+    public static let rearrangeSpacesSetting =
+        "System Settings › Desktop & Dock › Mission Control › Automatically rearrange Spaces based on most recent use"
+
     /// "Displays have separate Spaces" (System Settings › Desktop & Dock).
     /// On by default. weft works either way; off, macOS has one desktop across
     /// every display, and weft still shows a workspace per display on it.
     public static func displaysHaveSeparateSpaces() -> Bool {
         !(UserDefaults(suiteName: "com.apple.spaces")?.bool(forKey: "spans-displays") ?? false)
     }
-
-    /// What macOS itself does with a horizontal swipe of `fingers` fingers,
-    /// when it does something — the swipe weft's workspace swipe would share.
-    ///
-    /// `…HorizSwipeGesture` is 2 for "Swipe between full-screen applications"
-    /// (desktops) and, for three fingers, 1 for "Swipe between pages". Both
-    /// trackpad domains, since a Magic Trackpad keeps its own. A key absent
-    /// from both is the stock setting: four fingers switch desktops, three do
-    /// nothing.
-    public static func systemSwipe(fingers: Int) -> String? {
-        let key = fingers == 3 ? "TrackpadThreeFingerHorizSwipeGesture"
-            : fingers == 4 ? "TrackpadFourFingerHorizSwipeGesture" : nil
-        guard let key else { return nil }
-        let values = ["com.apple.AppleMultitouchTrackpad", "com.apple.driver.AppleBluetoothMultitouch.trackpad"]
-            .compactMap { UserDefaults(suiteName: $0)?.object(forKey: key) as? Int }
-        let value = values.first { $0 != 0 } ?? (values.isEmpty && fingers == 4 ? 2 : 0)
-        switch value {
-        case 2: return "switches between desktops"
-        case 1 where fingers == 3: return "swipes between pages"
-        default: return nil
-        }
-    }
-
-    public static let trackpadGesturesSetting = "System Settings › Trackpad › More Gestures"
 }

@@ -51,22 +51,12 @@ public struct GeneralConfig: Sendable, Equatable {
     public var mouseBorderResize: Bool
     public var mouseFollowsFocus: Bool
     public var focusFollowsMouse: Bool
-    /// Fingers for a horizontal trackpad swipe that steps through workspaces
-    /// (`space focus next`/`prev`), or 0 for none. 3 or 4.
+    /// Whether a rule's `space = "…"` also switches to that desktop.
     ///
-    /// weft keeps one macOS desktop per display, so the system's own swipe
-    /// between desktops has nothing of weft's to go to — at best it bounces,
-    /// at worst it lands on a desktop weft does not manage and pauses it.
-    /// Off by default: it means reading every trackpad gesture, and the same
-    /// swipe in System Settings has to be moved off these fingers first.
-    public var workspaceSwipeFingers: Int
-    /// Whether a rule's `space = "…"` also switches to that workspace.
-    ///
-    /// A rule always places the window: the workspace it names is a park away,
-    /// with no animation and nothing for the user to watch. This decides only
-    /// whether the screen follows the window there, and it is off because a
-    /// rule fires when an app opens — often while you are typing in
-    /// something else, which a workspace switch would pull out from under you.
+    /// A rule always places the window, with a move nobody sees: the window
+    /// opens and is on its desktop. On by default (NATIVE.md, "Moving
+    /// windows"), so the app the user just opened is in front of them; off
+    /// leaves them where they were.
     public var followSpaceRules: Bool
     /// Bundle ids whose `AXEnhancedUserInterface` weft must leave alone.
     ///
@@ -89,8 +79,7 @@ public struct GeneralConfig: Sendable, Equatable {
         mouseBorderResize: Bool = true,
         mouseFollowsFocus: Bool = true,
         focusFollowsMouse: Bool = false,
-        workspaceSwipeFingers: Int = 0,
-        followSpaceRules: Bool = false,
+        followSpaceRules: Bool = true,
         enhancedUIExempt: [String] = [],
         reserve: ScreenReserve = ScreenReserve()
     ) {
@@ -104,7 +93,6 @@ public struct GeneralConfig: Sendable, Equatable {
         self.mouseBorderResize = mouseBorderResize
         self.mouseFollowsFocus = mouseFollowsFocus
         self.focusFollowsMouse = focusFollowsMouse
-        self.workspaceSwipeFingers = workspaceSwipeFingers
         self.followSpaceRules = followSpaceRules
         self.enhancedUIExempt = enhancedUIExempt
         self.reserve = reserve
@@ -376,6 +364,16 @@ public struct ConfigWarning: Sendable, Equatable, Codable {
 /// Load + validate weft.toml. Unknown sections/keys are errors — except
 /// [integrations.*], which parses now and activates in M6.5 (warned, kept so
 /// copy-pasted DESIGN examples don't break).
+/// "'sticky', which was removed (…)" for a command weft no longer has, else nil.
+func removedCommand(_ text: String) -> String? {
+    do {
+        _ = try Command.parse(text)
+    } catch CommandParseError.removed(let name, let instead) {
+        return "'\(name)', which was removed (\(instead))"
+    } catch {}
+    return nil
+}
+
 public func loadConfig(_ input: String) throws -> ValidatedConfig {
     // Retired settings land here rather than throwing. See `ConfigWarning`.
     var warnings: [ConfigWarning] = []
@@ -455,12 +453,13 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.focusFollowsMouse = b
             case "workspace-swipe-fingers":
-                // Two is scrolling; five is not a thing a trackpad reports
-                // reliably. Anything but 0, 3 or 4 is a typo.
-                guard case .int(let n) = v, [0, 3, 4].contains(n) else {
-                    throw err(path, "expected 0 (off), 3 or 4")
-                }
-                general.workspaceSwipeFingers = n
+                // weft's own swipe between virtual workspaces. Workspaces are
+                // macOS desktops now, and macOS's own swipe moves between them.
+                warnings.append(ConfigWarning(
+                    line: doc.lines[path] ?? 0,
+                    message: "workspace-swipe-fingers was removed — macOS's own swipe switches desktops; "
+                        + "`weftctl config tidy` removes it"
+                ))
             case "scroll-animation-ms":
                 warnings.append(ConfigWarning(
                     line: doc.lines[path] ?? 0,
@@ -496,6 +495,7 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
     // [[space]]
     var spaces: [SpaceDecl] = []
     var seenLabels = Set<String>()
+    var pinned: [(label: String, line: Int)] = []
     for (i, elem) in (doc.arrays["space"] ?? []).enumerated() {
         let at = { (k: String) in doc.lines["space#\(i).\(k)"] ?? 0 }
         guard case .string(let label) = elem["label"], !label.isEmpty else {
@@ -527,21 +527,24 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                 message: "space '\(label)': scroll settings were removed with the layout — ignored"
             ))
         }
-        var display: DisplayPin?
-        switch elem["display"] {
-        case nil: break
-        case .string(let s)? where !s.isEmpty: display = DisplayPin(s)
-        case .int(let n)? where n >= 1: display = .index(n)
-        default:
-            throw ConfigError(
-                line: at("display"),
-                message: "expected \"main\", \"secondary\", a display number, or part of a display's name"
-            )
+        // A desktop's display is macOS's to decide (NATIVE.md, "Numbering
+        // and labels"): read, ignored, warned about once for all of them.
+        let display: DisplayPin? = nil
+        if elem["display"] != nil {
+            pinned.append((label, at("display")))
         }
         for k in elem.keys where !["label", "layout", "scroll", "display"].contains(k) {
             throw ConfigError(line: at(k), message: "unknown space key '\(k)'")
         }
         spaces.append(SpaceDecl(label: label, layout: layout, display: display))
+    }
+    if let first = pinned.first {
+        let names = pinned.map { "'\($0.label)'" }.joined(separator: ", ")
+        warnings.append(ConfigWarning(
+            line: first.line,
+            message: "display is ignored on \(pinned.count == 1 ? "space" : "spaces") \(names) — macOS decides "
+                + "which display a desktop is on; `weftctl config tidy` removes it"
+        ))
     }
 
     // [[rule]]
@@ -641,6 +644,13 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
                     }
                     steps.append(.mode(parts[1]))
                     modeTargets.append((target: parts[1], chord: chordText, line: line))
+                } else if let removed = removedCommand(cmdText) {
+                    // weft dropped this command (NATIVE.md). As with scroll:
+                    // the bind goes, named, and the keymap keeps working.
+                    warnings.append(ConfigWarning(
+                        line: line, message: "'\(chordText)' is bound to \(removed) — unbound"
+                    ))
+                    retired = true
                 } else if cmdText.split(separator: " ").first == "scroll" {
                     // A binding for the retired scroll layout. Every other
                     // unparseable command is a typo and fails the load; this one

@@ -4,18 +4,20 @@ import WeftBarConfig
 // `weftctl config tidy` — take settings weft no longer reads out of the user's
 // weft.toml, leaving everything else byte for byte.
 //
-// 0.9.11–0.9.14 chose between two workspace models with `workspaces` and
-// `workspace-anchor`. There is one model now, and both keys only produce a
-// warning, so every installer runs this over a config it keeps. It is in Swift
-// rather than in the install scripts because `TomlDocument` preserves
-// comments, key order and everything it does not understand, and it has
-// tests; a `sed` editing a file someone hand-commented would not.
+// Each of these only produces a warning, so every installer runs this over a
+// config it keeps:
+// - `workspaces` and `workspace-anchor` (0.9.11–0.9.14 chose between two
+//   workspace models);
+// - `workspace-swipe-fingers` (weft's own swipe between virtual workspaces;
+//   macOS's swipe moves between its desktops now);
+// - `display` in a `[[space]]` (macOS decides which display a desktop is on).
+// It is in Swift rather than in the install scripts because `TomlDocument`
+// preserves comments, key order and everything it does not understand, and it
+// has tests; a `sed` editing a file someone hand-commented would not.
 //
 // `pin-workspaces` is the name older installers call. It does the same thing,
 // so an installer fetched from an older release still leaves a tidy config.
 enum ConfigCommand {
-    static let retiredGeneralKeys = ["workspaces", "workspace-anchor"]
-
     static func usage() -> Never {
         fputs("usage: weftctl config tidy\n", stderr)
         exit(2)
@@ -36,27 +38,19 @@ enum ConfigCommand {
             exit(0)
         }
 
-        var doc = TomlDocument(text)
-        guard let i = doc.firstIndex(ofHeader: "[general]") else {
+        let (tidied, removed) = ConfigTidy.tidy(text)
+        guard !removed.isEmpty else {
             print("nothing to tidy")
             exit(0)
         }
-        var section = doc.sections[i]
-        let present = retiredGeneralKeys.filter { section.rawValue($0) != nil }
-        guard !present.isEmpty else {
-            print("nothing to tidy")
-            exit(0)
-        }
-        for key in present { section.remove(key) }
-        doc.sections[i] = section
 
         do {
-            try doc.render().write(toFile: path, atomically: true, encoding: .utf8)
+            try tidied.write(toFile: path, atomically: true, encoding: .utf8)
         } catch {
             fputs("weftctl: could not write \(path): \(error)\n", stderr)
             exit(1)
         }
-        print("removed \(present.joined(separator: ", ")) from \(path) — weft keeps its workspaces on one desktop per display")
+        print("removed \(removed.joined(separator: ", ")) from \(path) — weft no longer reads them")
         exit(0)
     }
 }

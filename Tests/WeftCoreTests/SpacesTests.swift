@@ -87,11 +87,9 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
 @Test func spaceGrammar() throws {
     #expect(try Command.parse("space focus code") == .space(.focus("code")))
     #expect(try Command.parse("space focus 2") == .space(.focus("2")))
-    // Following is the default: the move is a visible desktop change either
-    // way, and coming back is an extra one to end up where the user who just
-    // sent a window somewhere usually did not want to be.
-    #expect(try Command.parse("space move-window web") == .space(.moveWindow("web", nil, follow: true)))
-    #expect(try Command.parse("space move-window 5 139") == .space(.moveWindow("5", 139, follow: true)))
+    // Staying put is the default: the bridged move is invisible (NATIVE.md).
+    #expect(try Command.parse("space move-window web") == .space(.moveWindow("web", nil, follow: false)))
+    #expect(try Command.parse("space move-window 5 139") == .space(.moveWindow("5", 139, follow: false)))
     #expect(
         try Command.parse("space move-window web --no-follow")
             == .space(.moveWindow("web", nil, follow: false)))
@@ -105,8 +103,9 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     // Two window ids is a typo, not a second argument.
     #expect(throws: CommandParseError.self) { try Command.parse("space move-window 5 139 140") }
     #expect(try Command.parse("space label code") == .space(.label("code")))
-    #expect(try Command.parse("sticky") == .sticky(nil, .toggle))
-    #expect(try Command.parse("sticky 139 off") == .sticky(139, .off))
+    // Removed, with the Dock's own option named in the error.
+    #expect(throws: CommandParseError.stickyRemoved) { try Command.parse("sticky") }
+    #expect(throws: CommandParseError.stickyRemoved) { try Command.parse("sticky 139 off") }
     #expect(try Command.parse("focus display next") == .focusDisplay(.next))
     #expect(try Command.parse("focus display 2") == .focusDisplay(.index(2)))
     #expect(try Command.parse("query capability") == .query(.capability))
@@ -271,13 +270,13 @@ private let external = Frame(x: -1063, y: -2160, width: 3840, height: 2135)
     // yabai needs `window --display east && display --focus east`; one bind here.
     #expect(try Command.parse("move display east --follow") == .moveWindowToDisplay(.east, follow: true))
     #expect(try Command.parse("move display east follow") == .moveWindowToDisplay(.east, follow: true))
-    #expect(try Command.parse("move space display next") == .moveSpaceToDisplay(.next))
+    #expect(throws: CommandParseError.moveSpaceDisplayRemoved) { try Command.parse("move space display next") }
     // `display` must not shadow the directional forms.
     #expect(try Command.parse("move east") == .move(.east))
     #expect(try Command.parse("focus east") == .focus(.east))
     #expect(throws: (any Error).self) { try Command.parse("move display sideways") }
     #expect(throws: (any Error).self) { try Command.parse("focus display 0") }
-    #expect(throws: (any Error).self) { try Command.parse("move space display") }
+    #expect(throws: (any Error).self) { try Command.parse("move space") }
 }
 
 @Test func displayGrammarDirections() throws {

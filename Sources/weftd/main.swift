@@ -55,9 +55,6 @@ final class Daemon: @unchecked Sendable {
     /// A bridged switch failed its per-call verify: the triple is off for the
     /// rest of this launch, and switches go by Dock swipe.
     private var bridgedSwitchOffLocked = false
-    /// Windows in no workspace at all, by `sticky`: never hidden, never laid
-    /// out. Core-owned.
-    private var sticky: Set<WindowID> = []
     /// Debounced handling of a display reconfiguration storm.
     private var pendingDisplaySettle: DispatchWorkItem?
     private let input = InputManager()
@@ -217,7 +214,6 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateMouseModifier(currentConfig().general.mouseModifier)
         input.setBorderDragEnabled(currentConfig().general.mouseBorderResize)
-        input.setWorkspaceSwipe(fingers: currentConfig().general.workspaceSwipeFingers)
         WorldReader.manageMenubarApps = currentConfig().general.manageMenubarApps
         input.onMouseGesture = { [weak self] gesture in
             self?.handleMouseGesture(gesture)
@@ -240,8 +236,6 @@ final class Daemon: @unchecked Sendable {
             self.input.updateKeymap(cfg.keymap)
             self.input.updateMouseModifier(cfg.general.mouseModifier)
             self.input.setBorderDragEnabled(cfg.general.mouseBorderResize)
-            // The swipe's tap was refused along with the keyboard one.
-            self.input.setWorkspaceSwipe(fingers: cfg.general.workspaceSwipeFingers)
             self.syncQueue.async { [weak self] in self?.refreshDividerZones() }
             fputs("weftd: input tap installed late — keybinds are live\n", stderr)
         }
@@ -334,6 +328,13 @@ final class Daemon: @unchecked Sendable {
             fputs(
                 "weftd: WARNING Stage Manager is on — macOS will move windows weft places. "
                     + "Turn it off: \(SystemChecks.stageManagerSetting)\n",
+                stderr
+            )
+        }
+        if SystemChecks.rearrangesSpacesByUse() {
+            fputs(
+                "weftd: WARNING macOS rearranges desktops by recent use, so desktop numbers change as you work. "
+                    + "Turn it off: \(SystemChecks.rearrangeSpacesSetting)\n",
                 stderr
             )
         }
@@ -1384,8 +1385,9 @@ final class Daemon: @unchecked Sendable {
                 // reason to leave a window alone — a rule, a quirk, a panel —
                 // already skips the membership line below, and this is the
                 // one that did not.
-                // Sticky: in no workspace, so neither laid out nor loose.
-                if self.sticky.contains(w.id) || everywhere.contains(w.id) {
+                // On every desktop: in no workspace, so neither laid out
+                // nor loose, and never moved.
+                if everywhere.contains(w.id) {
                     unmanagedNow.insert(w.id)
                     continue
                 }
@@ -1660,7 +1662,6 @@ final class Daemon: @unchecked Sendable {
             self.manualFloat.remove(wid)
             self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
-            self.sticky.remove(wid)
         }
         // The WindowServer recycles window ids, and `watchOnLoop` skips any wid
         // it already holds an element for — so a dead id left in the observer's
@@ -2401,17 +2402,11 @@ final class Daemon: @unchecked Sendable {
         if case .space(let sub) = command {
             return handleSpace(sub)
         }
-        if case .sticky(let widOpt, let mode) = command {
-            return handleSticky(widOpt, mode)
-        }
         if case .focusDisplay(let target) = command {
             return handleFocusDisplay(target)
         }
         if case .moveWindowToDisplay(let target, let follow) = command {
             return handleMoveWindowToDisplay(target, follow: follow)
-        }
-        if case .moveSpaceToDisplay(let target) = command {
-            return handleMoveSpaceToDisplay(target)
         }
         if case .appToggle(let bundleID) = command {
             return handleAppToggle(bundleID)
@@ -2551,31 +2546,20 @@ final class Daemon: @unchecked Sendable {
             // From the WindowServer, not the cache: a swipe or a fullscreen app
             // the notification has not reported yet would otherwise decide.
             let sp = refreshCurrentDesktops()
-            guard let id = sp.resolveWorkspace(target) else { return unknownDesktop(target, sp) }
-            let label = sp.label(of: id) ?? target
-            // Already on screen somewhere. On this display that is nothing to
-            // do. On another display it is a focus move, not a switch: nothing
-            // the user was not asking about changes (NATIVE.md, story 5).
-            if let display = sp.showingDisplay(of: id) {
-                if display == focusedDisplayUUID(sp) {
-                    return IPCResponse(ok: true, output: "already on \(label)")
-                }
-                let previous = sp.currentWorkspace
-                updateSpaces { s in if let previous, previous != id { s.recentWorkspace = previous } }
-                let took = takeFocus(display: display, showing: sp.desktop(of: id) ?? 0)
-                bus.emit(stateChangedEvent())
-                return IPCResponse(
-                    ok: true,
-                    output: took == nil
-                        ? "\(label) is showing on the other display — pointer moved there"
-                        : "focused \(label) on the other display"
-                )
+            guard let id = sp.resolveWorkspace(target) else {
+                return IPCResponse(ok: false, error: sp.refusal(for: target))
             }
-            if let failure = showWorkspace(id) { return failure }
-            return IPCResponse(ok: true, output: "switched to \(label)")
+            let plan = sp.planFocus(id)
+            let label = sp.label(of: id) ?? target
+            let elsewhere = plan.contains { if case .focusDisplay = $0 { true } else { false } }
+            return perform(
+                plan, done: elsewhere ? "\(label) is showing on the other display — focus moved there" : "switched to \(label)"
+            )
         case .moveWindow(let target, let widOpt, let follow):
             let sp = refreshCurrentDesktops()
-            guard let id = sp.resolveWorkspace(target) else { return unknownDesktop(target, sp) }
+            guard let id = sp.resolveWorkspace(target) else {
+                return IPCResponse(ok: false, error: sp.refusal(for: target))
+            }
             guard let wid = widOpt ?? activeWindowID() else {
                 return IPCResponse(ok: false, error: "nothing focused")
             }
@@ -2637,26 +2621,6 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// The answer for a target that names no desktop (NATIVE.md, "Desktop
-    /// count"): weft cannot create desktops, so it says how to add one.
-    private func unknownDesktop(_ target: String, _ sp: SpaceState) -> IPCResponse {
-        if target == "next" || target == "prev" {
-            return IPCResponse(ok: false, error: "no desktop \(target == "next" ? "after" : "before") this one on this display")
-        }
-        if target == "recent" {
-            return IPCResponse(ok: false, error: "no recent desktop yet")
-        }
-        if let n = sp.missingDesktop(target) {
-            let named = Int(target) == nil ? " ('\(target)')" : ""
-            return IPCResponse(
-                ok: false,
-                error: "desktop \(n)\(named) does not exist; add desktops in Mission Control (weft cannot create them)"
-            )
-        }
-        let known = sp.wsOrder.compactMap { sp.label(of: $0) }.joined(separator: ", ")
-        return IPCResponse(ok: false, error: "unknown desktop '\(target)' (desktops: \(known))")
-    }
-
     // MARK: - Showing and moving
 
     /// The display "here" means: the one keyboard focus is on, else the first.
@@ -2713,53 +2677,135 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// Show a workspace: switch its display to its desktop (NATIVE.md,
-    /// "Switching"), then focus the window last used there — or `focusWindow`
-    /// — or, on an empty desktop, the desktop itself. Nil when it is showing;
-    /// otherwise the answer to give.
+    /// Show a workspace (`space focus`, a click on a window elsewhere): plan
+    /// it and carry it out. Nil when it is showing; otherwise the answer.
     @discardableResult
-    private func showWorkspace(
-        _ id: WorkspaceID, focusWindow: WindowID? = nil, stealFocus: Bool = true
-    ) -> IPCResponse? {
+    private func showWorkspace(_ id: WorkspaceID, focusWindow: WindowID? = nil) -> IPCResponse? {
+        let sp = refreshCurrentDesktops()
+        let r = perform(sp.planFocus(id, window: focusWindow), done: "switched to \(sp.label(of: id) ?? "?")")
+        return r.ok ? nil : r
+    }
+
+    /// Carry out a plan (WeftCore/SpacePlans.swift), each effect verified on
+    /// the Mac. Stops at the first that fails, and answers with why.
+    private func perform(_ plan: [SpaceEffect], done: String) -> IPCResponse {
         visibility.lock()
         defer { visibility.unlock() }
-        let sp = refreshCurrentDesktops()
-        guard let desktop = sp.desktop(of: id), let display = sp.displayBySpace[desktop],
-              let from = sp.currentByDisplay[display]
-        else {
-            return IPCResponse(ok: false, error: "desktop \(sp.label(of: id) ?? "?") has no display")
-        }
-        let previous = sp.currentWorkspace
-        if from != desktop {
-            let t = Trace.start("switch")
-            if let failure = switchDesktop(display: display, from: from, to: desktop) { return failure }
-            t.end()
-        }
-        var target: WindowID?
-        updateSpaces { s in
-            s.currentByDisplay[display] = desktop
-            if let previous, previous != id { s.recentWorkspace = previous }
-            s.focusedDisplay = display
-            if let wid = focusWindow, s.workspaces[id]?.contains(wid) == true { s.noteFocus(wid) }
-            target = s.workspaces[id]?.focusTarget
-            if let w = target, let layout = s.workspaces[id]?.layout {
-                switch layout {
-                case .tiling(let t) where t.windows.contains(w): s.setLayout(.tiling(t.focusing(w)), of: id)
-                case .float(let f) where f.windows.contains(w): s.setLayout(.float(f.focusing(w)), of: id)
-                default: break
+        // Set when focus moved to another display: an empty desktop there
+        // still gets the pointer, so the next click agrees.
+        var movedToDisplay: String?
+        for effect in plan {
+            switch effect {
+            case .refuse(let why):
+                return IPCResponse(ok: false, error: why)
+            case .nothing(let why):
+                return IPCResponse(ok: true, output: why)
+            case .switchDisplay(let display, let from, let to):
+                let previous = readSpaces().currentWorkspace
+                let t = Trace.start("switch")
+                if let failure = switchDesktop(display: display, from: from, to: to) { return failure }
+                t.end()
+                updateSpaces { s in
+                    s.currentByDisplay[display] = to
+                    if let previous, previous != s.active[to] { s.recentWorkspace = previous }
+                    s.focusedDisplay = display
                 }
-            }
-        }
-        applySpaceLayout(desktop, raiseFocus: true)
-        if stealFocus {
-            if let target, let pid = pid(of: target) {
-                focusAndWarp(window: target, pid: pid)
-            } else {
-                focusNothing()
+                applySpaceLayout(to, raiseFocus: true)
+            case .focusDisplay(let display):
+                let previous = readSpaces().currentWorkspace
+                updateSpaces { s in
+                    let there = s.currentByDisplay[display].flatMap { s.active[$0] }
+                    if let previous, previous != there { s.recentWorkspace = previous }
+                    s.focusedDisplay = display
+                }
+                movedToDisplay = display
+            case .move(let wids, let to):
+                if let failure = moveWindows(wids, to: to) { return failure }
+            case .retile(let sid):
+                applySpaceLayout(sid, raiseFocus: false)
+            case .focus(let wid):
+                if let wid, let pid = pid(of: wid) {
+                    updateSpaces { s in
+                        s.noteFocus(wid)
+                        guard let id = s.workspace(holding: wid), let layout = s.workspaces[id]?.layout else { return }
+                        switch layout {
+                        case .tiling(let t) where t.windows.contains(wid): s.setLayout(.tiling(t.focusing(wid)), of: id)
+                        case .float(let f) where f.windows.contains(wid): s.setLayout(.float(f.focusing(wid)), of: id)
+                        default: break
+                        }
+                    }
+                    raiseFronts([wid])
+                    focusAndWarp(window: wid, pid: pid)
+                } else {
+                    if let display = movedToDisplay {
+                        let screen = usableScreen(onDisplay: display)
+                        CGWarpMouseCursorPosition(CGPoint(x: screen.x + screen.width / 2, y: screen.y + screen.height / 2))
+                    }
+                    focusNothing()
+                }
             }
         }
         scheduleLayoutSave()
         bus.emit(stateChangedEvent())
+        return IPCResponse(ok: true, output: done)
+    }
+
+    /// One bridged move of `wids` to desktop `to`, verified by reading every
+    /// window's desktop back (NATIVE.md, "Moving windows"); then the windows
+    /// are filed there. Nil on success; otherwise the answer.
+    private func moveWindows(_ wids: [WindowID], to target: SpaceID) -> IPCResponse? {
+        let sp = readSpaces()
+        guard let id = sp.active[target], let toDisplay = sp.displayBySpace[target] else {
+            return IPCResponse(ok: false, error: "that desktop no longer exists")
+        }
+        let label = sp.label(of: id) ?? "?"
+        guard let routes else {
+            return IPCResponse(ok: false, error: "weft is still checking how to move windows on this macOS — try again in a moment")
+        }
+        guard routes.canMove else {
+            return IPCResponse(
+                ok: false,
+                error: "weft cannot move windows between desktops on this macOS (\(routes[.move].detail)); "
+                    + "drag the window in Mission Control instead"
+            )
+        }
+        var fromDisplay: [WindowID: String] = [:]
+        var before: [WindowID: Frame] = [:]
+        for wid in wids {
+            fromDisplay[wid] = sp.workspace(holding: wid).flatMap { sp.display(of: $0) } ?? displayOf(window: wid)
+            before[wid] = WorldReader.frame(of: wid)
+        }
+        let moved = NativeBridge.move(wids, to: target)
+        Trace.record("move", ms: moved.milliseconds, detail: "\(wids.count) window(s)")
+        guard moved.verdict.complete else {
+            let where_ = moved.verdict.missing.map { w in
+                "\(w) on \(SpaceControl.spacesForWindow(w).map(String.init).joined(separator: ", "))"
+            }.joined(separator: "; ")
+            fputs("weftd: bridged move to \(target) did not land for \(where_)\n", stderr)
+            return IPCResponse(ok: false, error: "macOS did not move window \(where_) to \(label)")
+        }
+        let unmanaged = core.sync { self.unmanaged }
+        let tile = currentConfig().general.asTilingConfig()
+        let screen = usableScreen(for: target)
+        updateSpaces { s in
+            for wid in wids {
+                s.file(wid, in: id, laidOut: !unmanaged.contains(wid), screen: screen, config: tile, focus: true)
+            }
+        }
+        // Across displays the frame is whatever macOS remembers, which can be
+        // off screen (S12). A tile is placed by the re-tile that follows; a
+        // float keeps its size, centred on the display it arrived on.
+        var floats: [WindowID: Frame] = [:]
+        var crossed = false
+        for wid in wids where fromDisplay[wid] != toDisplay {
+            crossed = true
+            guard unmanaged.contains(wid), let f = before[wid] else { continue }
+            let area = usableScreen(onDisplay: toDisplay)
+            let w = min(f.width, area.width), h = min(f.height, area.height)
+            floats[wid] = Frame(x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h)
+        }
+        if !floats.isEmpty { applyFrames(floats, force: true) }
+        if crossed { scheduleMoveSettle([target]) }
         return nil
     }
 
@@ -2905,86 +2951,15 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// Move a window to a desktop (NATIVE.md, "Moving windows"): one bridged
-    /// move, verified by reading the window's desktop back. Without `follow`
-    /// the user stays where they are. The desktop it left is re-tiled, and
-    /// the one it went to is laid out — through held AX elements when it is
-    /// not showing, so it is in its tile on arrival.
+    /// Move a window to a desktop (NATIVE.md, "Moving windows"): planned
+    /// (`planMoveWindow`) and carried out by `perform`.
     private func moveWindow(_ wid: WindowID, toWorkspace id: WorkspaceID, follow: Bool) -> IPCResponse {
         let sp = refreshCurrentDesktops()
         let label = sp.label(of: id) ?? "?"
-        guard let target = sp.desktop(of: id), let toDisplay = sp.displayBySpace[target] else {
-            return IPCResponse(ok: false, error: "desktop \(label) does not exist")
-        }
-        let on = SpaceControl.spacesForWindow(wid)
-        if Set(on).filter({ sp.active[$0] != nil }).count > 1 {
-            return IPCResponse(
-                ok: false,
-                error: "window \(wid) is on every desktop (Dock › Options › All Desktops), so weft does not move it"
-            )
-        }
-        if on == [target] {
-            if follow, let failure = showWorkspace(id, focusWindow: wid) { return failure }
-            return IPCResponse(ok: true, output: "already on \(label)")
-        }
-        guard let routes else {
-            return IPCResponse(ok: false, error: "weft is still checking how to move windows on this macOS — try again in a moment")
-        }
-        guard routes.canMove else {
-            return IPCResponse(
-                ok: false,
-                error: "weft cannot move windows between desktops on this macOS (\(routes[.move].detail)); "
-                    + "drag the window in Mission Control instead"
-            )
-        }
-        let source = sp.workspace(holding: wid)
-        let sourceDesktop = source.flatMap { sp.desktop(of: $0) } ?? on.first
-        let fromDisplay = sourceDesktop.flatMap { sp.displayBySpace[$0] } ?? displayOf(window: wid)
-        let before = WorldReader.frame(of: wid)
-        let moved = NativeBridge.move([wid], to: target)
-        guard moved.verdict.complete else {
-            let now = SpaceControl.spacesForWindow(wid)
-            return IPCResponse(
-                ok: false,
-                error: "macOS did not move window \(wid) to \(label) — it is still on desktop \(now.map(String.init).joined(separator: ", "))"
-            )
-        }
-        Trace.record("move", ms: moved.milliseconds, detail: "1 window")
-        let laidOut = !core.sync { self.unmanaged.contains(wid) }
-        let tile = currentConfig().general.asTilingConfig()
-        updateSpaces { s in
-            s.file(wid, in: id, laidOut: laidOut, screen: self.usableScreen(for: target), config: tile, focus: true)
-        }
-        // Across displays the frame is whatever macOS remembers, which can be
-        // off screen (S12). A tile is placed by the layout below; a float
-        // keeps its size, centred on the display it arrived on.
-        if fromDisplay != toDisplay {
-            if !laidOut, let before {
-                let area = usableScreen(onDisplay: toDisplay)
-                let w = min(before.width, area.width), h = min(before.height, area.height)
-                applyFrames([wid: Frame(
-                    x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h
-                )], force: true)
-            }
-            scheduleMoveSettle([target])
-        }
-        if let sourceDesktop, sp.active[sourceDesktop] != nil {
-            applySpaceLayout(sourceDesktop, raiseFocus: false)
-        }
-        applySpaceLayout(target, raiseFocus: false)
-        if follow {
-            if let failure = showWorkspace(id, focusWindow: wid) { return failure }
-        } else if let source, sp.showingDisplay(of: source) != nil {
-            // Staying put: focus goes to what is left here, or to the desktop.
-            if let next = readSpaces().workspaces[source]?.focusTarget, let pid = pid(of: next) {
-                focusAndWarp(window: next, pid: pid)
-            } else {
-                focusNothing()
-            }
-        }
-        scheduleLayoutSave()
-        bus.emit(stateChangedEvent())
-        return IPCResponse(ok: true, output: "moved \(wid) to \(label)\(follow ? " and followed" : "")")
+        return perform(
+            sp.planMoveWindow(wid, on: SpaceControl.spacesForWindow(wid), to: id, follow: follow),
+            done: "moved \(wid) to \(label)\(follow ? " and followed" : "")"
+        )
     }
 
     /// Which display a window is physically on, by its centre.
@@ -3025,42 +3000,6 @@ final class Daemon: @unchecked Sendable {
         // the user's own setting says to — weft does not.
         app.activate()
         return IPCResponse(ok: true, output: "activating \(bundleID)")
-    }
-
-    /// A sticky window is in no workspace: never hidden by a switch, never
-    /// laid out, left where it is on its display. weft's own state, because
-    /// the WindowServer drops the sticky tag from an ordinary connection (S8)
-    /// — and because "stays put while workspaces change" is exactly what a
-    /// workspace model can offer without asking macOS for anything.
-    private func handleSticky(_ widOpt: WindowID?, _ mode: StickyMode) -> IPCResponse {
-        guard let wid = widOpt ?? activeWindowID() else {
-            return IPCResponse(ok: false, error: "nothing focused")
-        }
-        let on: Bool = core.sync {
-            switch mode {
-            case .on: return true
-            case .off: return false
-            case .toggle: return !self.sticky.contains(wid)
-            }
-        }
-        let home = readSpaces().workspace(holding: wid).flatMap { readSpaces().desktop(of: $0) }
-        core.sync {
-            if on {
-                self.sticky.insert(wid)
-                self.unmanaged.insert(wid)
-                self.updateSpaces { $0.removeWindow(wid) }
-            } else {
-                self.sticky.remove(wid)
-                self.unmanaged.remove(wid)
-            }
-        }
-        if let home { applySpaceLayout(home) }
-        // Turning it off files it into what is showing on its display, as a
-        // window that just arrived there.
-        if !on { syncFromSnapshot() }
-        bus.emit(stateChangedEvent())
-        scheduleLayoutSave()
-        return IPCResponse(ok: true, output: "sticky \(on ? "on" : "off") for \(wid)")
     }
 
     /// Resolve a display target against the display keyboard focus is on.
@@ -3236,17 +3175,6 @@ final class Daemon: @unchecked Sendable {
         return moveWindow(wid, toWorkspace: id, follow: follow)
     }
 
-    /// `move space display`: gone with the virtual engine. macOS decides which
-    /// display a desktop is on, and the bridge cannot move a real desktop
-    /// (NATIVE.md, "Out of Scope").
-    private func handleMoveSpaceToDisplay(_ target: DisplayTarget) -> IPCResponse {
-        IPCResponse(
-            ok: false,
-            error: "weft cannot move a desktop to another display; macOS decides that. "
-                + "Drag the desktop between displays in Mission Control"
-        )
-    }
-
     // MARK: - Config (M6)
 
     private let configLock = NSLock()
@@ -3390,12 +3318,6 @@ final class Daemon: @unchecked Sendable {
         applier.setEnhancedUIExempt(Set(next.general.enhancedUIExempt))
         input.updateMouseModifier(next.general.mouseModifier)
         input.setBorderDragEnabled(next.general.mouseBorderResize)
-        input.setWorkspaceSwipe(fingers: next.general.workspaceSwipeFingers)
-        if next.general.workspaceSwipeFingers != 0,
-           let clash = SystemChecks.systemSwipe(fingers: next.general.workspaceSwipeFingers) {
-            fputs("weftd: WARNING macOS's \(next.general.workspaceSwipeFingers)-finger swipe also \(clash) — "
-                + "change it in \(SystemChecks.trackpadGesturesSetting)\n", stderr)
-        }
         refreshDividerZones()
         WorldReader.manageMenubarApps = next.general.manageMenubarApps
         bordersBridge.applyConfig(next.integrations.borders, currentLayout: currentSpaceLayoutKind(), currentMode: input.currentMode)

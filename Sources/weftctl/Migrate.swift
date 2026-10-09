@@ -242,7 +242,6 @@ public enum Migrate {
                 // single window at all. weft centres a freshly floated window
                 // itself, so the grid needs no translation.
                 else if actionRaw.contains("window --toggle float") { weftCmd = "float toggle" }
-                else if actionRaw.contains("window --toggle sticky") { weftCmd = "sticky toggle" }
                 else if actionRaw.contains("space --layout") {
                     // The `if [ … = float ]; then bsp; else float; fi` shell
                     // one-liner names both layouts; matching "bsp" first turned

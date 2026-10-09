@@ -382,33 +382,6 @@ public final class InputManager: @unchecked Sendable {
 
     public var currentMode: String { box.lock.withLock { box.mode } }
 
-    /// Touched only on the tap thread.
-    private var gestureTap: GestureTap?
-    private var swipeFingers = 0
-
-    /// Turn the workspace swipe on for `fingers` fingers, or off with 0.
-    /// A swipe left sends `space focus next` and right `space focus prev`,
-    /// through the same path as a keybind — so one that cannot be done says
-    /// why, like a key would.
-    public func setWorkspaceSwipe(fingers: Int) {
-        loop.perform { [weak self] in
-            guard let self, fingers != self.swipeFingers || (fingers != 0 && self.gestureTap == nil) else { return }
-            self.gestureTap?.uninstall()
-            self.gestureTap = nil
-            self.swipeFingers = fingers
-            guard fingers > 0 else { return }
-            let tap = GestureTap(fingers: fingers) { [weak self] swipe in
-                self?.forwardCommand(swipe == .left ? "space focus next" : "space focus prev")
-            }
-            if tap.install() {
-                self.gestureTap = tap
-            } else {
-                fputs("weftd: could not listen to the trackpad for the workspace swipe — "
-                    + "is Input Monitoring on?\n", stderr)
-            }
-        }
-    }
-
     /// Called once each time secure input is found blocking the keybinds:
     /// the first time a bound modifier goes down while it is on, and not
     /// again until it has been seen off.

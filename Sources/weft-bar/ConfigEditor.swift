@@ -318,27 +318,6 @@ private struct GeneralPane: View {
                     Text("Shift ⇧").tag("shift")
                 }
             }
-
-            Section {
-                Picker("Swipe between \(WorkspaceVocabulary.noun)s", selection: store.bind(\.workspaceSwipeFingers)) {
-                    Text("Off").tag(0)
-                    Text("Three fingers").tag(3)
-                    Text("Four fingers").tag(4)
-                }
-            } header: {
-                Text("Trackpad")
-            } footer: {
-                if store.workspaceSwipeFingers != 0 {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Swipe left for the next \(WorkspaceVocabulary.noun) with windows in it, right for the previous.")
-                        if let clash = SystemChecks.systemSwipe(fingers: store.workspaceSwipeFingers) {
-                            Text("macOS’s own \(store.workspaceSwipeFingers)-finger swipe \(clash) too. "
-                                + "Move it to other fingers or turn it off in \(SystemChecks.trackpadGesturesSetting).")
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
     }
@@ -1499,16 +1478,16 @@ private struct AdvancedPane: View {
             }
 
             Section {
-                Toggle("Switch to a workspace when a rule sends a new window there", isOn: Binding(
+                Toggle("Switch to the desktop a rule sends a new window to", isOn: Binding(
                     get: { store.followSpaceRules },
                     set: { store.setFollowSpaceRules($0) }
                 ))
             } header: {
                 Text("Rules")
             } footer: {
-                Text("A rule with a workspace always places the window there — it is instant and "
-                    + "invisible. This only decides whether the screen follows it. Off by default: "
-                    + "a rule fires when an app opens, which may be while you are typing somewhere else.")
+                Text("A rule with a desktop always places the window there — it is instant and "
+                    + "invisible. This only decides whether the screen follows it, so the app you "
+                    + "just opened is in front of you. Turn it off to stay where you are.")
             }
 
             Section("JankyBorders") {

@@ -21,16 +21,15 @@
 
 # ---------------------------------------------------------------- workspaces
 #
-# A workspace is a named set of windows with a layout of its own — what
-# `alt-1`, `alt-2` and the [[space]] blocks below refer to. weft keeps them on
-# one macOS desktop per display: switching moves the windows you are not using
-# just off the edge of the screen and puts the others back. Instant, nothing
-# animates, and it works on every window, including one with no title bar.
+# A workspace is one of your macOS desktops, with a layout of its own — what
+# `alt-1`, `alt-2` and the [[space]] blocks below refer to. weft tiles every
+# desktop, switches between them instantly from the keyboard, and moves any
+# window to any desktop, including one with no title bar. Mission Control, the
+# trackpad swipe, ctrl-left/right and full-screen apps all work as macOS ships
+# them. No change to System Integrity Protection.
 #
-# Other macOS desktops and full-screen apps keep working. weft pauses on a
-# display while one of them is showing and picks up where it was when you come
-# back. It never switches desktops for you and needs no change to System
-# Integrity Protection.
+# Add, remove and reorder desktops in Mission Control; weft follows. weft
+# cannot create desktops, so make as many as you want workspaces.
 
 # Gap between neighbouring tiled windows, in pixels.
 inner-gap = 8
@@ -55,10 +54,10 @@ stack-offset = 8
 # app as an agent and want its windows tiled.
 manage-menubar-apps = false
 
-# Whether a rule's `space = "..."` also switches to that workspace. The window
-# is placed either way — it is instant and invisible. Off, because a rule fires
-# when an app opens, which may be while you are typing somewhere else.
-# follow-space-rules = true
+# Whether a rule's `space = "..."` also switches to that desktop. The window
+# is placed either way — it is instant and invisible. On, so the app you just
+# opened is in front of you; false leaves you where you are.
+# follow-space-rules = false
 
 # Ask GitHub once a day whether a newer weft has been released, and show a
 # menu-bar item when there is one. weft installs from a script or a clone, so
@@ -148,9 +147,8 @@ reserve = 0
 # Even out every split on this space.
 "alt-b" = "balance"
 
-# Keep the focused window on every workspace (a video, a chat), and again to
-# put it back in this one.
-"alt-shift-p" = "sticky"
+# To keep an app's windows on every desktop (a video, a chat), right-click its
+# Dock icon and choose Options › All Desktops. weft floats those windows.
 
 # Stacks: several windows sharing one slot, one visible at a time.
 # Toggle: stacks the focused window's neighbours, and takes it back out.
@@ -167,9 +165,9 @@ reserve = 0
 "alt-shift-b" = "space layout bsp"
 "alt-shift-f" = "space layout float"
 
-# Workspaces by number: 1–5 on the main display, 6–8 on a second one (see
-# [[space]] below). A number past 8 is created the first time you use it, so
-# add 9 the same way if you want it.
+# Desktops by number, in Mission Control's order: the main display's first,
+# then each other display west to east. A number with no desktop says so —
+# add desktops in Mission Control.
 "alt-1" = "space focus 1"
 "alt-2" = "space focus 2"
 "alt-3" = "space focus 3"
@@ -179,8 +177,8 @@ reserve = 0
 "alt-7" = "space focus 7"
 "alt-8" = "space focus 8"
 
-# Send the focused window to a workspace, and go with it. Add `--no-follow`
-# to a bind that should send the window and leave you where you are.
+# Send the focused window to a desktop and stay where you are. Add `--follow`
+# to a bind that should go with it.
 "alt-shift-1" = "space move-window 1"
 "alt-shift-2" = "space move-window 2"
 "alt-shift-3" = "space move-window 3"
@@ -267,8 +265,8 @@ reserve = 0
 # regular expressions, so "Foo|Bar" matches either.
 #
 #   manage = false   leave the window completely alone — never tiled, never moved
-#   space = "..."    put it in that workspace when it opens. The screen
-#                    stays where it is unless follow-space-rules = true.
+#   space = "..."    put it on that desktop when it opens. The screen goes
+#                    with it unless follow-space-rules = false.
 #
 # Weft already floats anything that is not a real window on its own: a dialog
 # or popover (its AX subrole is not a standard window), a window the app
@@ -295,8 +293,9 @@ manage = false
 title = "Picture.in.Picture"
 manage = false
 
-# Send an app to a workspace when it opens. `space` names a workspace from
-# the [[space]] list below; `weftctl doctor` says when it names none.
+# Send an app to a desktop when it opens. `space` is a label from the
+# [[space]] list below, or a desktop number; `weftctl doctor` says when it
+# names a desktop you do not have.
 #
 # [[rule]]
 # app = "Ghostty|Alacritty|kitty|WezTerm"
@@ -309,53 +308,35 @@ manage = false
 # ------------------------------------------------------------------------------
 # Spaces
 # ------------------------------------------------------------------------------
-# Workspaces are weft's, not macOS desktops, so declare as many as you like.
-# The order here is what `space focus 1`, `2`, … count in, and `label` is the
-# name rules and keybinds use.
-#
-# `display` keeps a workspace on one display:
-#   "main"       the display with the menu bar (System Settings › Displays)
-#   "secondary"  the first other display, counted west to east
-#   "built-in"   the Mac's own screen      "external"  the first other one
-#   2            a number, west to east    "LG"        part of the name
-# A workspace pinned to a display that is not connected shows on the main
-# one until it is back. With no `display`, a workspace shows on whichever
-# display you are on when you switch to it.
-#
-# On one display, all eight live on it. Plug in a second and 6–8 move there.
-# Settings › Workspaces edits these by dragging workspaces onto displays.
+# Labels for your desktops, by number: the first [[space]] names desktop 1,
+# the second desktop 2, and so on, in Mission Control's order. `label` is the
+# name rules and keybinds can use instead of the number, and `layout` gives a
+# desktop its own layout. A label with no desktop yet waits for one; Settings ›
+# Workspaces shows it with a button that opens Mission Control.
 
 [[space]]
 label = "1"
-display = "main"
 
 [[space]]
 label = "2"
-display = "main"
 
 [[space]]
 label = "3"
-display = "main"
 
 [[space]]
 label = "4"
-display = "main"
 
 [[space]]
 label = "5"
-display = "main"
 
 [[space]]
 label = "6"
-display = "secondary"
 
 [[space]]
 label = "7"
-display = "secondary"
 
 [[space]]
 label = "8"
-display = "secondary"
 
 # ------------------------------------------------------------------------------
 # Integrations

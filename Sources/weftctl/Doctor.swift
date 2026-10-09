@@ -89,27 +89,23 @@ public enum Doctor {
             print("    - Workspaces: weftd is not running, cannot check the space labels")
             return
         }
-        let noun = "workspace"
-        let nouns = "workspaces"
-
-        // Ask the daemon which labels actually landed rather than re-deriving
-        // the ordinal assignment here. It is the same answer for a fresh
-        // launch, and the right one after a runtime rename or a display change
-        // — both of which move labels around in ways this cannot predict.
+        // Ask the daemon which labels landed on a desktop rather than
+        // re-deriving it here: labels attach by number, and the desktops are
+        // whatever Mission Control has right now.
         let declared = validated.spaces.map(\.label)
         let liveLabels = Set(live.map(\.label))
-        let unassignedLabels = declared.filter { !liveLabels.contains($0) }
+        let waiting = declared.filter { !liveLabels.contains($0) }
 
-        // A NAME with no workspace behind it is unreachable. A number is not:
-        // `space focus 4` creates workspaces up to 4 the first time, up to 99.
-        func unreachable(_ target: String) -> Bool {
-            if let n = Int(target) { return n < 1 || n > 99 }
-            if target == "recent" { return false }
+        // A label or a number with no desktop behind it does nothing until
+        // the desktop exists; weft cannot create one.
+        func missing(_ target: String) -> Bool {
+            if ["recent", "next", "prev"].contains(target) { return false }
+            if let n = Int(target) { return n < 1 || (n > live.count && n <= 99) }
             return !liveLabels.contains(target)
         }
 
         let orphanedRules = validated.rules.compactMap { rule -> String? in
-            guard let space = rule.space, unreachable(space) else { return nil }
+            guard let space = rule.space, missing(space) else { return nil }
             return "\(rule.app ?? rule.bundleID ?? rule.title ?? "rule") -> \(space)"
         }
         let orphanedKeys = Set(
@@ -120,31 +116,27 @@ public enum Doctor {
                     let parts = command.split(separator: " ").map(String.init)
                     guard parts.count >= 3, parts[0] == "space",
                           parts[1] == "focus" || parts[1] == "move-window",
-                          unreachable(parts[2])
+                          missing(parts[2])
                     else { return nil }
                     return command
                 }
         ).sorted()
 
-        guard !unassignedLabels.isEmpty || !orphanedRules.isEmpty || !orphanedKeys.isEmpty else {
-            print("    - \(nouns.capitalized): \(live.count) live; every space reference resolves")
+        guard !waiting.isEmpty || !orphanedRules.isEmpty || !orphanedKeys.isEmpty else {
+            print("    - Desktops: \(live.count); every label, rule and keybind names one")
             return
         }
-
-        if unassignedLabels.isEmpty {
-            print("[\u{25CB}] Spaces: \(live.count) \(noun)(s) exist; some binds point past that.")
-        } else {
-            print("[\u{25CB}] Spaces: \(declared.count) declared but only \(live.count) \(noun)(s) exist.")
-            print("    Unassigned labels: \(summarise(unassignedLabels, limit: 10))")
+        print("[\u{25CB}] Desktops: \(live.count). Some labels, rules or keybinds name a desktop you do not have yet.")
+        if !waiting.isEmpty {
+            print("    Labels waiting for a desktop: \(summarise(waiting, limit: 10))")
         }
-        print("    These resolve to nothing, and fail silently when used:")
         if !orphanedRules.isEmpty {
             print("      rules:    \(summarise(orphanedRules))")
         }
         if !orphanedKeys.isEmpty {
             print("      keybinds: \(summarise(orphanedKeys))")
         }
-        print("    Add a [[space]] to weft.toml, or drop the references.")
+        print("    Add desktops in Mission Control (weft cannot create them); these start working then.")
     }
 
     /// The commit `scripts/dev.sh` installed, from the marker it leaves next
@@ -338,6 +330,15 @@ public enum Doctor {
         if !SystemChecks.displaysHaveSeparateSpaces(), NSScreen.screens.count > 1 {
             print("[\u{25CB}] Displays have separate Spaces: off — weft still shows a workspace per")
             print("    display, but a fullscreen app on one display pauses weft on all of them.")
+        }
+
+        // Desktop numbers are Mission Control's order; this setting reorders it.
+        if SystemChecks.rearrangesSpacesByUse() {
+            print("[!] macOS rearranges desktops by most recent use, so desktop numbers (and ⌥N)")
+            print("    change as you work. Turn it off: \(SystemChecks.rearrangeSpacesSetting)")
+            print("    open \"\(SystemChecks.desktopAndDockURL)\"")
+        } else {
+            print("[\u{2713}] Desktop order: fixed (rearrange by recent use is off)")
         }
 
         // Stage Manager arranges windows too. With it on, macOS and weft move

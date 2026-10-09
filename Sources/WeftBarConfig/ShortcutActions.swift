@@ -238,8 +238,6 @@ public enum ActionCatalog {
               "Take it out of the tiling, or put it back.", command: "float toggle", also: ["float", "window toggle float"], phrase: "float or tile the window"),
         fixed("zoom", .windows, "arrow.up.left.and.arrow.down.right.square", "Fill the screen with the window",
               "Again to put it back.", command: "window toggle zoom-fullscreen", also: ["window toggle fullscreen", "fullscreen", "zoom-fullscreen"], phrase: "fill the screen with the window"),
-        fixed("sticky", .windows, "pin", "Show the window on every workspace",
-              "For a video or a chat you always want. Again to undo.", command: "sticky", also: ["sticky toggle"], phrase: "keep the window on every workspace"),
 
         // Workspaces
         one("space.focus", .workspaces, "square.grid.2x2", "Go to a workspace",
@@ -302,10 +300,6 @@ public enum ActionCatalog {
             },
             phrase: { "send the window to \(ActionWords.display($0[0]))" + ($0[1] == "follow" ? " and go with it" : "") }
         ),
-        one("display.space", .displays, "arrow.left.arrow.right.square", "Swap workspaces with a display",
-            "This workspace goes there, and that one comes here.", prefix: "move space display", .display) {
-            "swap this workspace with \(ActionWords.display($0))"
-        },
 
         // Stacks
         fixed("stack.toggle", .stacks, "square.stack", "Stack the windows here",

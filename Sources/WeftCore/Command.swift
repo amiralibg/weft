@@ -32,15 +32,12 @@ public enum Command: Sendable, Equatable {
     case stack(StackCommand)
     // Native spaces (M4).
     case space(SpaceCommand)
-    case sticky(WindowID?, StickyMode)
     case focusDisplay(DisplayTarget)
     /// Send the focused window to another display's current space.
     /// `follow` makes focus go with it — yabai needs two chained commands
     /// (`window --display east && display --focus east`) for that, and a
     /// weft keybind is a single command.
     case moveWindowToDisplay(DisplayTarget, follow: Bool)
-    /// Send the whole current space to another display.
-    case moveSpaceToDisplay(DisplayTarget)
     // App launcher/focus/hide (M6): not running → open; running, not
     // frontmost → focus it (space switch + raise); frontmost → hide.
     case appToggle(String)
@@ -91,17 +88,9 @@ public enum QueryKind: String, Sendable, Equatable {
 public enum SpaceCommand: Sendable, Equatable {
     /// Focus a space by label, sid, or 1-based ordinal.
     case focus(String)
-    /// Move a window (default: focused) to a space, and by default go with it.
-    ///
-    /// Verified by re-reading membership. The move works by holding the window
-    /// and pressing the bound "move a space" shortcut — the only route macOS 27
-    /// leaves open from an ordinary process (spikes/RESULTS.md §S8) — so the
-    /// screen visibly changes desktop on the way. **That is why following is
-    /// the default.** Not following means changing desktop and changing back,
-    /// which costs an extra switch to end up where a user who just sent a
-    /// window somewhere usually did not want to be, and reads as a bug rather
-    /// than as the deliberate "do not follow" it is. `--no-follow` is still
-    /// there for scripts and for anyone who means it.
+    /// Move a window (default: focused) to a desktop. It does not follow by
+    /// default: the bridged move is invisible, so staying put costs nothing,
+    /// and `--follow` goes with it (NATIVE.md, "Moving windows").
     case moveWindow(String, WindowID?, follow: Bool)
     /// Rename the current space (persists by ordinal).
     case label(String)
@@ -142,10 +131,35 @@ extension DisplayTarget {
     }
 }
 
-public enum CommandParseError: Error, Sendable, Equatable {
+public enum CommandParseError: Error, Sendable, Equatable, CustomStringConvertible {
     case empty
     case unknown(String)
     case badArgs(String)
+    /// A command weft had and no longer has, with what replaces it. A
+    /// keybind naming one is dropped with a warning rather than failing the
+    /// config.
+    case removed(String, instead: String)
+
+    public var description: String {
+        switch self {
+        case .empty: "empty command"
+        case .unknown(let s): "unknown command '\(s)'"
+        case .badArgs(let s): "bad arguments: '\(s)'"
+        case .removed(let s, let instead): "'\(s)' was removed — \(instead)"
+        }
+    }
+}
+
+extension CommandParseError {
+    static let stickyRemoved = CommandParseError.removed(
+        "sticky",
+        instead: "to keep an app's windows on every desktop, right-click its Dock icon and choose "
+            + "Options › All Desktops (weft floats those windows)"
+    )
+    static let moveSpaceDisplayRemoved = CommandParseError.removed(
+        "move space display",
+        instead: "macOS decides which display a desktop is on; drag the desktop in Mission Control"
+    )
 }
 
 extension Command {
@@ -220,11 +234,8 @@ extension Command {
                 default: throw CommandParseError.badArgs(input)
                 }
             }
-            if parts.count == 4, parts[1] == "space", parts[2] == "display" {
-                guard let target = DisplayTarget.parse(parts[3]) else {
-                    throw CommandParseError.badArgs(input)
-                }
-                return .moveSpaceToDisplay(target)
+            if parts.count >= 3, parts[1] == "space", parts[2] == "display" {
+                throw CommandParseError.moveSpaceDisplayRemoved
             }
             guard parts.count == 2, let dir = Direction(rawValue: parts[1]) else {
                 throw CommandParseError.badArgs(input)
@@ -266,9 +277,10 @@ extension Command {
             case "move-window":
                 // `space move-window <target> [wid] [--follow|--no-follow]`,
                 // flags in any trailing position so neither ordering surprises
-                // anyone.
+                // anyone. Not following is the default: the move is invisible
+                // now (NATIVE.md, "Moving windows").
                 var wid: WindowID?
-                var follow = true
+                var follow = false
                 for token in parts.dropFirst(3) {
                     switch token {
                     case "--follow", "follow": follow = true
@@ -295,15 +307,9 @@ extension Command {
             default: throw CommandParseError.badArgs(input)
             }
         case "sticky":
-            // sticky | sticky <wid> | sticky <wid> <on|off|toggle> | sticky <on|off|toggle>
-            var wid: WindowID?
-            var mode = StickyMode.toggle
-            for token in parts.dropFirst() {
-                if let id = UInt32(token) { wid = id }
-                else if let m = StickyMode(rawValue: token) { mode = m }
-                else { throw CommandParseError.badArgs(input) }
-            }
-            return .sticky(wid, mode)
+            // The bridged per-window route is refused (S11), and driving the
+            // Dock's menu was rejected (S8). The Dock's own option does it.
+            throw CommandParseError.stickyRemoved
         case "app":
             guard parts.count >= 3, parts[1] == "toggle" else {
                 throw CommandParseError.badArgs(input)

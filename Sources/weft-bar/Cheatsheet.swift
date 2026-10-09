@@ -180,8 +180,6 @@ final class CheatsheetModel: ObservableObject {
             return ("Run", String(command.dropFirst("exec".count)).trimmingCharacters(in: .whitespaces))
         case "float":
             return ("Layout", "Float the window, or put it back in the tiling")
-        case "sticky":
-            return ("Layout", "Keep the window on every space, or put it back in one")
         case "split":
             return ("Layout", "Next window opens \(words.count > 1 ? words[1] : "split")")
         case "balance":

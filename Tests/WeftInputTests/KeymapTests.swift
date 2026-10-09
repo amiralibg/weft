@@ -100,45 +100,6 @@ import WeftCore
     #expect(received == .up(button: .left, location: CGPoint(x: 120, y: 170)))
 }
 
-// MARK: - Workspace swipe
-
-private func touches(_ n: Int, x: Double, y: Double = 0.5) -> [CGPoint] {
-    (0..<n).map { CGPoint(x: x + Double($0) * 0.05, y: y) }
-}
-
-@Test func threeFingerSwipeLeftFiresOnceAsNext() {
-    var t = SwipeTracker(fingers: 3)
-    #expect(t.update(touches(3, x: 0.6)) == nil)  // fingers down: the start
-    #expect(t.update(touches(3, x: 0.55)) == nil)  // not far enough yet
-    #expect(t.update(touches(3, x: 0.45)) == .left)
-    #expect(t.update(touches(3, x: 0.2)) == nil)  // once per gesture
-    #expect(t.update([]) == nil)  // lifted
-    #expect(t.update(touches(3, x: 0.2)) == nil)
-    #expect(t.update(touches(3, x: 0.4)) == .right)  // the next one counts
-}
-
-@Test func swipeIgnoresOtherFingerCountsAndVerticalTravel() {
-    var t = SwipeTracker(fingers: 3)
-    // Two fingers is scrolling.
-    #expect(t.update(touches(2, x: 0.8)) == nil)
-    #expect(t.update(touches(2, x: 0.2)) == nil)
-    // Four fingers is someone else's gesture.
-    #expect(t.update(touches(4, x: 0.8)) == nil)
-    #expect(t.update(touches(4, x: 0.2)) == nil)
-    // Up, with some drift sideways: Mission Control, not a swipe.
-    #expect(t.update(touches(3, x: 0.5, y: 0.2)) == nil)
-    #expect(t.update(touches(3, x: 0.63, y: 0.8)) == nil)
-}
-
-@Test func liftingAFingerEndsTheGesture() {
-    var t = SwipeTracker(fingers: 3)
-    #expect(t.update(touches(3, x: 0.6)) == nil)
-    #expect(t.update(touches(2, x: 0.3)) == nil)  // one came up
-    // Back to three far from where the first began: a new start, no swipe.
-    #expect(t.update(touches(3, x: 0.3)) == nil)
-    #expect(t.update(touches(3, x: 0.35)) == nil)
-}
-
 @Test func nextAndPrevParseAsWorkspaces() throws {
     #expect(try Command.parse("space focus next") == .space(.focus("next")))
     #expect(try Command.parse("space focus prev") == .space(.focus("prev")))

@@ -325,27 +325,15 @@ import Testing
     #expect(throws: ConfigError.self) { try loadConfig("[integrations.borders]\nbackend = \"quartz\"") }
 }
 
-/// The one option whose default follows another option.
-///
-/// Under `native`, honouring a rule's `space = "…"` means holding the window
-/// and switching desktops, which takes the screen over while the user is doing
-/// something else — so it is off unless asked for. Under `virtual` the same
-/// move is a park, costing nothing visible, so it is on unless refused.
-@Test func followSpaceRulesFollowsTheWorkspacesMode() throws {
-    #expect(
-        try loadConfig("[general]\nworkspaces = \"native\"").general.followSpaceRules == false
-    )
-    #expect(try loadConfig("[general]\nfollow-space-rules = true").general.followSpaceRules)
+/// A rule places its window either way, with an invisible move; following is
+/// on unless refused (NATIVE.md, "Moving windows").
+@Test func followSpaceRulesIsOnUnlessRefused() throws {
+    #expect(try loadConfig("[keys]\n\"alt-h\" = \"focus west\"\n").general.followSpaceRules)
+    #expect(try loadConfig("").general.followSpaceRules)
+    #expect(try loadConfig("[general]\nfollow-space-rules = false").general.followSpaceRules == false)
     #expect(throws: ConfigError.self) {
         try loadConfig("[general]\nfollow-space-rules = \"yes\"")
     }
-}
-
-/// A rule places its window either way; following is off unless asked for,
-/// with or without a `[general]` table.
-@Test func followSpaceRulesIsOffUnlessAskedFor() throws {
-    #expect(try loadConfig("[keys]\n\"alt-h\" = \"focus west\"\n").general.followSpaceRules == false)
-    #expect(try loadConfig("").general.followSpaceRules == false)
 }
 
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
@@ -410,15 +398,13 @@ import Testing
     #expect(validated.integrations.sketchybar.enabled == false)
 }
 
-/// Workspaces are weft's own, so the shipped file can declare some: numbered,
-/// so ⌥N and the label agree, and pinned by role rather than by name, so they
-/// mean the same thing on any Mac. "secondary" names nothing on one display,
-/// and those workspaces then live on the main one.
-@Test func exampleDeclaresNumberedWorkspacesPinnedByRole() throws {
+/// The shipped file labels desktops 1–8 by number, so ⌥N and the label agree,
+/// and pins none of them: macOS decides a desktop's display.
+@Test func exampleLabelsDesktopsByNumber() throws {
     let validated = try loadConfig(try exampleText())
     #expect(validated.spaces.map(\.label) == (1...8).map(String.init))
-    #expect(validated.spaces.prefix(5).allSatisfy { $0.display == .main })
-    #expect(validated.spaces.suffix(3).allSatisfy { $0.display == .secondary })
+    #expect(validated.spaces.allSatisfy { $0.display == nil })
+    #expect(validated.warnings.isEmpty)
 
     let declared = Set(validated.spaces.map(\.label))
     for binds in validated.keymap.modes.values {
@@ -593,27 +579,24 @@ private func exampleText() throws -> String {
     #expect(try loadConfig("[general]\nworkspaces = \"magic\"\n").warnings.count == 1)
 }
 
-@Test func aSpaceCanBePinnedToADisplay() throws {
+/// `[[space]] display` meant something only for virtual workspaces. It is read,
+/// ignored and warned about, never an error: a config valid in 0.9.21 loads.
+@Test func aSpaceDisplayIsIgnoredWithAWarning() throws {
     let cfg = try loadConfig("""
         [[space]]
         label = "code"
         display = "secondary"
 
         [[space]]
-        label = "web"
-        display = 2
-
-        [[space]]
-        label = "chat"
-        display = "Studio"
-
-        [[space]]
         label = "term"
         """)
-    #expect(cfg.spaces.map(\.display) == [.secondary, .index(2), .named("Studio"), nil])
-    #expect(throws: ConfigError.self) {
-        try loadConfig("[[space]]\nlabel = \"x\"\ndisplay = 0\n")
-    }
+    #expect(cfg.spaces.map(\.display) == [nil, nil])
+    #expect(cfg.warnings.count == 1)
+    let two = try loadConfig("[[space]]\nlabel = \"a\"\ndisplay = 1\n\n[[space]]\nlabel = \"b\"\ndisplay = 2\n")
+    #expect(two.warnings.count == 1, "one warning for every pinned space")
+    #expect(two.warnings.first?.message.contains("'a', 'b'") == true)
+    #expect(cfg.warnings.first?.message.contains("macOS decides") == true)
+    #expect(try loadConfig("[[space]]\nlabel = \"x\"\ndisplay = 0\n").warnings.count == 1)
 }
 
 // MARK: - Several commands on one key
@@ -659,13 +642,26 @@ private func exampleText() throws -> String {
     }
 }
 
-@Test func workspaceSwipeFingers() throws {
-    #expect(try loadConfig("").general.workspaceSwipeFingers == 0)  // off unless asked
-    #expect(try loadConfig("[general]\nworkspace-swipe-fingers = 3\n").general.workspaceSwipeFingers == 3)
-    #expect(try loadConfig("[general]\nworkspace-swipe-fingers = 4\n").general.workspaceSwipeFingers == 4)
-    // Two fingers is scrolling; anything else is a typo.
-    #expect(throws: ConfigError.self) { try loadConfig("[general]\nworkspace-swipe-fingers = 2\n") }
-    #expect(throws: ConfigError.self) { try loadConfig("[general]\nworkspace-swipe-fingers = true\n") }
+/// weft's own workspace swipe is gone; macOS's swipe moves between desktops.
+@Test func workspaceSwipeFingersIsIgnoredWithAWarning() throws {
+    let cfg = try loadConfig("[general]\nworkspace-swipe-fingers = 3\n")
+    #expect(cfg.warnings.count == 1)
+    #expect(try loadConfig("[general]\nworkspace-swipe-fingers = true\n").warnings.count == 1)
+}
+
+/// A keybind for a removed command is dropped and named; the rest of the
+/// keymap loads.
+@Test func aKeybindForARemovedCommandIsDropped() throws {
+    let cfg = try loadConfig("""
+        [keys]
+        "alt-shift-p" = "sticky"
+        "alt-x" = "move space display next"
+        "alt-h" = "focus west"
+        """)
+    #expect(cfg.warnings.count == 2)
+    #expect(cfg.warnings.contains { $0.message.contains("All Desktops") })
+    let binds = cfg.keymap.modes.values.flatMap(\.values).flatMap(\.commands)
+    #expect(binds == ["focus west"])
 }
 
 @Test func stackSideIsAValidKeybind() throws {
