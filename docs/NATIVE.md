@@ -220,7 +220,10 @@ Settings and bar
   windows that are never on screen, such as a menu-bar app's ordered-out
   popover or the borders overlay (S12), and counting those would fail a good
   switch. A failed verify disables the triple for the rest of the session and
-  falls back.
+  falls back. The read-back is on the keystroke's path; the on-screen check
+  finishes after it, off that path, because a target's windows reach the
+  on-screen list 70–100 ms after the desktop changes (`doctor --selftest`,
+  2026-10-09), well after the user sees them.
 - **Fallback:** the synthetic Dock swipe, restored from history (it was
   deleted in phase 3 of `REDESIGN.md`), one step per desktop, each step
   verified. If that is unavailable too, `space focus` answers "weft cannot
@@ -353,7 +356,8 @@ is **not** restored.
 
 | | budget |
 | --- | --- |
-| switch, any distance, including verify | < 40 ms (S12: 14–32 ms to land) |
+| switch, any distance, to the read-back | < 40 ms (S12: 14–32 ms to land) |
+| on-screen verify of a switch, off the keystroke path | < 150 ms |
 | move to a desktop, including verify | < 20 ms (same display), < 40 ms (other display, including the tile write) |
 | move of many windows (spread, migration) | ~4 ms + 0.65 ms per window (S12: 30 windows in ~24 ms) |
 | idle CPU | 0.0%, no timers armed |
