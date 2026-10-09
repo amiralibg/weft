@@ -38,6 +38,11 @@ public enum Command: Sendable, Equatable {
     /// (`window --display east && display --focus east`) for that, and a
     /// weft keybind is a single command.
     case moveWindowToDisplay(DisplayTarget, follow: Bool)
+    /// `weftctl spread`: put 0.9.21's workspaces' windows on the desktops
+    /// with their numbers, and every window a rule names on its desktop
+    /// (NATIVE.md, "Migration from 0.9.21"). `dryRun` only says what it would
+    /// move.
+    case spread(dryRun: Bool)
     // App launcher/focus/hide (M6): not running → open; running, not
     // frontmost → focus it (space switch + raise); frontmost → hide.
     case appToggle(String)
@@ -310,6 +315,12 @@ extension Command {
             // The bridged per-window route is refused (S11), and driving the
             // Dock's menu was rejected (S8). The Dock's own option does it.
             throw CommandParseError.stickyRemoved
+        case "spread":
+            switch parts.dropFirst() {
+            case []: return .spread(dryRun: false)
+            case ["--dry-run"]: return .spread(dryRun: true)
+            default: throw CommandParseError.badArgs(input)
+            }
         case "app":
             guard parts.count >= 3, parts[1] == "toggle" else {
                 throw CommandParseError.badArgs(input)

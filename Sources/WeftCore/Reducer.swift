@@ -113,7 +113,7 @@ public enum Reducer {
             // Daemon-level: floating a window is a membership change across
             // every layout kind, not a tree edit.
             return (state, [])
-        case .space, .focusDisplay, .moveWindowToDisplay,
+        case .space, .focusDisplay, .moveWindowToDisplay, .spread,
              .appToggle, .exec:
             // Daemon-level verbs: multi-space topology and privileged calls.
             // The daemon intercepts them before reduce; reaching here is a
@@ -201,7 +201,7 @@ public enum Reducer {
             guard let id else { return (fl, []) }
             next = fl.focusing(id)
         case .move, .swap, .resize, .split, .insertion, .balance,
-             .stack, .space, .focusDisplay, .moveWindowToDisplay,
+             .stack, .space, .focusDisplay, .moveWindowToDisplay, .spread,
              .appToggle, .exec, .query,
              .toggleFullscreen, .toggleSplit, .float:
             return (fl, [])

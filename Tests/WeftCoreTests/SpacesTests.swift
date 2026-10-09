@@ -103,6 +103,9 @@ private func ws(_ s: SpaceState, _ sid: SpaceID) -> WorkspaceID { s.active[sid]!
     // Two window ids is a typo, not a second argument.
     #expect(throws: CommandParseError.self) { try Command.parse("space move-window 5 139 140") }
     #expect(try Command.parse("space label code") == .space(.label("code")))
+    #expect(try Command.parse("spread") == .spread(dryRun: false))
+    #expect(try Command.parse("spread --dry-run") == .spread(dryRun: true))
+    #expect(throws: CommandParseError.self) { try Command.parse("spread now") }
     // Removed, with the Dock's own option named in the error.
     #expect(throws: CommandParseError.stickyRemoved) { try Command.parse("sticky") }
     #expect(throws: CommandParseError.stickyRemoved) { try Command.parse("sticky 139 off") }

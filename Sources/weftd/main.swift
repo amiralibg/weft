@@ -362,6 +362,13 @@ final class Daemon: @unchecked Sendable {
             self.testRoutes(visible: false)
             self.syncFromSnapshot(initial: true)
             if self.routes?[.switchDesktop].state == .untested { self.testRoutes(visible: true) }
+            // The first launch after 0.9.21: its workspaces become desktops.
+            // After the first sweep, so every window is bound and a move
+            // across displays can set its frame.
+            if FileManager.default.fileExists(atPath: Daemon.membershipFile().path) {
+                let r = self.spread(rules: false, dryRun: false)
+                fputs("weftd: spread from 0.9.21: \(r.ok ? r.output ?? "done" : r.error ?? "failed")\n", stderr)
+            }
         }
     }
 
@@ -2457,6 +2464,9 @@ final class Daemon: @unchecked Sendable {
         if case .focusDisplay(let target) = command {
             return handleFocusDisplay(target)
         }
+        if case .spread(let dryRun) = command {
+            return spread(rules: true, dryRun: dryRun)
+        }
         if case .moveWindowToDisplay(let target, let follow) = command {
             return handleMoveWindowToDisplay(target, follow: follow)
         }
@@ -3012,6 +3022,71 @@ final class Daemon: @unchecked Sendable {
             sp.planMoveWindow(wid, on: SpaceControl.spacesForWindow(wid), to: id, follow: follow),
             done: "moved \(wid) to \(label)\(follow ? " and followed" : "")"
         )
+    }
+
+    // MARK: - Spread (NATIVE.md, "Migration from 0.9.21")
+
+    /// Put 0.9.21's workspaces' windows on the desktops with their numbers
+    /// (`planSpread`), and — with `rules` — every open window a `[[rule]]`
+    /// names on its desktop. One verified bridged move per desktop.
+    /// `membership.json` is deleted once every old workspace with a window
+    /// left has its desktop, or when it is from an earlier boot (its window
+    /// ids name other windows now). Re-runnable: a second run moves nothing.
+    private func spread(rules: Bool, dryRun: Bool) -> IPCResponse {
+        let sp = refreshCurrentDesktops()
+        let world = WorldReader.snapshot()
+        let windowDesktops = Dictionary(world.windows.map { ($0.id, $0.spaces) }, uniquingKeysWith: { a, _ in a })
+        let file = Daemon.membershipFile()
+        var old: [[WindowID]] = []
+        var stale = false
+        if let data = try? Data(contentsOf: file),
+           let saved = try? JSONDecoder().decode(SavedMembership.self, from: data) {
+            if saved.boot == Daemon.bootTime() { old = saved.workspaces } else { stale = true }
+        }
+        let plan = planSpread(old: old, desktops: sp.order, windowDesktops: windowDesktops)
+        var byDesktop: [SpaceID: [WindowID]] = [:]
+        for b in plan.batches { byDesktop[b.desktop, default: []] += b.windows }
+        if rules {
+            // A rule wins over the old membership for a window both name.
+            let cfg = currentConfig()
+            let standard = core.sync { self.standardWindow }
+            for w in world.windows where standard[w.id] == true {
+                guard let target = matchRules(cfg.rules, app: w.app, bundleID: bundleID(for: w.pid), title: w.title)?.space,
+                      let id = sp.resolveWorkspace(target), let desktop = sp.desktop(of: id),
+                      w.spaces.count == 1, sp.active[w.spaces[0]] != nil, w.spaces != [desktop]
+                else { continue }
+                for k in byDesktop.keys { byDesktop[k]?.removeAll { $0 == w.id } }
+                byDesktop[desktop, default: []].append(w.id)
+            }
+        }
+        let batches = sp.order.compactMap { d in byDesktop[d].flatMap { $0.isEmpty ? nil : (d, $0) } }
+        func number(_ d: SpaceID) -> String { sp.active[d].flatMap { sp.number(of: $0) }.map(String.init) ?? "\(d)" }
+        var lines = batches.map { "desktop \(number($0.0)): \($0.1.count) window(s)" }
+        if !plan.waiting.isEmpty {
+            lines.append("old workspace(s) \(plan.waiting.map(String.init).joined(separator: ", ")): no desktop with "
+                + "that number yet — their windows stay where they are")
+        }
+        if stale { lines.append("membership.json is from an earlier login; its windows are gone") }
+        if lines.isEmpty { lines = ["nothing to move"] }
+        if dryRun { return IPCResponse(ok: true, output: (["would move:"] + lines).joined(separator: "\n")) }
+
+        var failed: [String] = []
+        for (desktop, wids) in batches {
+            if let failure = moveWindows(wids, to: desktop) { failed.append(failure.error ?? "move to \(number(desktop)) failed") }
+        }
+        syncFromSnapshot()
+        if failed.isEmpty, stale || (plan.complete && !old.isEmpty) {
+            try? FileManager.default.removeItem(at: file)
+        }
+        if !plan.waiting.isEmpty {
+            bus.emit(DaemonEvent(
+                kind: .commandFailed, title: "spread",
+                message: "Old workspaces \(plan.waiting.map(String.init).joined(separator: ", ")) have no desktop yet, "
+                    + "so their windows stayed where they are. Add desktops in Mission Control, then run weftctl spread."
+            ))
+        }
+        guard failed.isEmpty else { return IPCResponse(ok: false, error: (lines + failed).joined(separator: "\n")) }
+        return IPCResponse(ok: true, output: (["moved:"] + lines).joined(separator: "\n"))
     }
 
     /// Which display a window is physically on, by its centre.

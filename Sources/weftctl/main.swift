@@ -9,7 +9,8 @@ func usage() -> Never {
         usage:
           weftctl query <displays|spaces|windows|world|state|tree|trace|capability>
           weftctl <command>            # focus/move/resize/split/balance/sync/retile/...
-          weftctl space <focus|move-window|label|layout>  # native spaces (M4+)
+          weftctl space <focus|move-window|label|layout>  # desktops: focus, move a window, name, layout
+          weftctl spread [--dry-run]            # 0.9.21 workspaces and [[rule]] windows onto their desktops
           weftctl focus display <next|prev|N>
           weftctl app toggle <bundle-id>            # launch/focus/hide
           weftctl exec '<shell command>'            # run it through /bin/sh
