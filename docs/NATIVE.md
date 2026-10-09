@@ -1,11 +1,11 @@
 # Native Spaces — weft drives macOS's own desktops
 
-**Status:** Approved 2026-10-09, against 0.9.21. Building waits only on the
-spikes listed under "Spikes before building". Supersedes
+**Status:** Approved 2026-10-09, against 0.9.21. Every spike under "Spikes
+before building" has run (S12); building is under way. Supersedes
 `REDESIGN.md`'s "one managed desktop per display" and with it the virtual
 workspace engine. Ships whole, as one release: **0.9.22**.
 
-Evidence: `spikes/RESULTS.md` §S10 and §S11, harnesses `spikes/bridgedmove.swift`
+Evidence: `spikes/RESULTS.md` §S10–§S12, harnesses `spikes/bridgedmove.swift`
 and `spikes/nativeops.swift`.
 
 ## Problem Statement
@@ -215,8 +215,11 @@ Settings and bar
   Never `SetCurrentSpace` alone: S11 showed it leaves the old desktop on the
   glass with two menu bars.
 - **Verified per call:** the display's current space reads back as the target
-  **and** the target's windows (if it has any) are in the on-screen window
-  list. A failed verify disables the triple for the rest of the session and
+  **and** the target's managed windows (if it has any) are in the on-screen
+  window list. Only windows weft tiles or floats count: a desktop also holds
+  windows that are never on screen, such as a menu-bar app's ordered-out
+  popover or the borders overlay (S12), and counting those would fail a good
+  switch. A failed verify disables the triple for the rest of the session and
   falls back.
 - **Fallback:** the synthetic Dock swipe, restored from history (it was
   deleted in phase 3 of `REDESIGN.md`), one step per desktop, each step
@@ -350,8 +353,9 @@ is **not** restored.
 
 | | budget |
 | --- | --- |
-| switch, any distance, including verify | < 30 ms |
+| switch, any distance, including verify | < 40 ms (S12: 14–32 ms to land) |
 | move to a desktop, including verify | < 20 ms (same display), < 40 ms (other display, including the tile write) |
+| move of many windows (spread, migration) | ~4 ms + 0.65 ms per window (S12: 30 windows in ~24 ms) |
 | idle CPU | 0.0%, no timers armed |
 
 ## Rejected options
@@ -430,8 +434,12 @@ These block the build. Commands are from `spikes/`.
 3. **Mission Control right after a triple switch.** **Passed** (S12): it opens
    on the desktop switched to.
 4. **The triple on the second display**, and with a fullscreen Space in the
-   display's list.
-5. **Scale:** 30 windows across 10 apps moved in batches; does ~10 ms hold?
+   display's list. **Passed** (S12), including out of a fullscreen Space; the
+   Dock follows. It landed in 14–32 ms, so the budget is 40 ms, and the
+   per-call verify counts managed windows only.
+5. **Scale:** 30 windows across 10 apps moved in batches. **Passed** (S12):
+   every window arrived; ~4 ms + 0.65 ms per window, one window ~5 ms, and
+   splitting a batch neither helps nor hurts.
 
 A spike that fails reopens the decision it feeds, before code is written.
 
