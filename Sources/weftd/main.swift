@@ -1130,6 +1130,8 @@ final class Daemon: @unchecked Sendable {
     func syncFromSnapshot(initial: Bool = false) {
         // ── Phase 1 (off-core): read the world. No lock, no queue held. ──
         dispatchPrecondition(condition: .notOnQueue(core))
+        // Closing Mission Control sweeps everything again.
+        if missionControlOpen { return }
         let t0 = Date()
         var world = WorldReader.snapshot()
         let tRead = Date()
@@ -1777,6 +1779,13 @@ final class Daemon: @unchecked Sendable {
     /// carries its own lock rather than belonging to either.
     private var actedSpacesLocked: [String: SpaceID] = [:]
     private let actedSpacesLock = NSLock()
+    /// Mission Control is open (the Dock's AX notifications). The windows are
+    /// its to arrange then, and a desktop or a window's desktop can change
+    /// under it, so sweeps and frame writes wait; closing it re-reads every
+    /// display and every window's desktop (NATIVE.md).
+    private var missionControlOpenLocked = false
+    private let missionControlLock = NSLock()
+    private var missionControlOpen: Bool { missionControlLock.withLock { missionControlOpenLocked } }
     /// Trailing re-apply after `space move-window`, for the size write an app
     /// drops while it is still changing spaces.
     private var pendingMoveSettle: DispatchWorkItem?
@@ -2077,6 +2086,14 @@ final class Daemon: @unchecked Sendable {
             // is the one event that must not wait out a debounce.
             handleSpaceChange()
             scheduleSpaceRechecks()
+        case .missionControl(let open):
+            let was = missionControlLock.withLock { () -> Bool in
+                defer { missionControlOpenLocked = open }
+                return missionControlOpenLocked
+            }
+            guard was != open else { return }
+            fputs("weftd: Mission Control \(open ? "opened: tiling waits" : "closed: re-reading every desktop")\n", stderr)
+            if !open { handleSpaceChange() }
         case .displayChanged:
             // One plug, unplug, wake or arrangement change is a storm of
             // callbacks, and displays can come back one at a time after sleep.
@@ -4242,7 +4259,7 @@ final class Daemon: @unchecked Sendable {
     /// completion, off the caller's thread.
     private func applyFrames(_ frames: [WindowID: Frame], force: Bool = false) {
         dispatchPrecondition(condition: .notOnQueue(core))
-        guard !frames.isEmpty else { return }
+        guard !frames.isEmpty, !missionControlOpen else { return }
         applier.apply(frames: frames, pids: allPids(), force: force) { [weak self] result in
             self?.noteApplyFailures(result)
         }

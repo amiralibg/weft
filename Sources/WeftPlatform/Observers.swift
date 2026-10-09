@@ -77,10 +77,22 @@ private func axCallback(
         sinkHolder.fire(.windowCreated(pid: pid, wid: PublicPaths.windowID(of: element, pid: pid)))
     case focusedChanged:
         sinkHolder.fire(.windowFocused(PublicPaths.windowID(of: element)))
+    case _ where missionControlOpened.contains(name):
+        sinkHolder.fire(.missionControl(open: true))
+    case missionControlClosed:
+        sinkHolder.fire(.missionControl(open: false))
     default:
         break
     }
 }
+
+/// The Dock's notifications for Mission Control (NATIVE.md, "Which desktop is
+/// showing"), the ones Glide and yabai observe: one per way it opens — all
+/// windows, the front app's windows, show desktop — and one for closing.
+private let missionControlOpened: Set<String> = [
+    "AXExposeShowAllWindows", "AXExposeShowFrontWindows", "AXExposeShowDesktop",
+]
+private let missionControlClosed = "AXExposeExit"
 
 private func displayReconfigCallback(
     _ display: CGDirectDisplayID,
@@ -174,6 +186,9 @@ public final class ObserverSet: @unchecked Sendable {
     private var ncTokens: [NSObjectProtocol] = []
     private var axFailedPids: Set<Int32> = []
     private var started = false
+    /// The Dock's observer, for Mission Control. Replaced when the Dock
+    /// restarts. Observer-thread only.
+    private var dockObserver: (pid: Int32, observer: AXObserver)?
 
     public var onEvent: ((ObserverEvent) -> Void)? {
         get { lock.withLock { _onEvent } }
@@ -227,6 +242,7 @@ public final class ObserverSet: @unchecked Sendable {
             },
         ]
         CGDisplayRegisterReconfigurationCallback(displayReconfigCallback, nil)
+        loop.perform { [weak self] in self?.watchDockOnLoop() }
     }
 
     /// Watch the given apps + windows. Idempotent: only new pids/wids are
@@ -283,6 +299,12 @@ public final class ObserverSet: @unchecked Sendable {
             self.appObservers = [:]
             self.appElements = [:]
             self.windowElements = [:]
+            if let dock = self.dockObserver {
+                CFRunLoopRemoveSource(
+                    CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(dock.observer), CFRunLoopMode.defaultMode!
+                )
+                self.dockObserver = nil
+            }
         }
         loop.stop()
     }
@@ -299,7 +321,35 @@ public final class ObserverSet: @unchecked Sendable {
         }
         let pid = app.processIdentifier
         let bundle = app.bundleIdentifier ?? "unknown"
+        // A restarted Dock is a new process with nothing observing it.
+        if launched, bundle == Self.dockBundleID { loop.perform { [weak self] in self?.watchDockOnLoop() } }
         forward(launched ? .appLaunched(pid: pid, bundleID: bundle) : .appTerminated(pid: pid, bundleID: bundle))
+    }
+
+    private static let dockBundleID = "com.apple.dock"
+
+    /// Observe the running Dock's Mission Control notifications. Without
+    /// Accessibility this fails quietly: Mission Control then goes unseen, and
+    /// the space-change notification still re-reads every desktop after it.
+    private func watchDockOnLoop() {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockBundleID).first
+        else { return }
+        let pid = dock.processIdentifier
+        if dockObserver?.pid == pid { return }
+        if let old = dockObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(old.observer), CFRunLoopMode.defaultMode!)
+            dockObserver = nil
+        }
+        var observer: AXObserver?
+        guard AXObserverCreate(pid, axCallback, &observer) == .success, let observer else { return }
+        let element = AXUIElementCreateApplication(pid)
+        var added = 0
+        for note in missionControlOpened.union([missionControlClosed]) {
+            if AXObserverAddNotification(observer, element, note as CFString, nil) == .success { added += 1 }
+        }
+        guard added > 0 else { return }
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), CFRunLoopMode.defaultMode!)
+        dockObserver = (pid, observer)
     }
 
     private func watchOnLoop(pids: [Int32], windows: [(WindowID, Int32)]) {

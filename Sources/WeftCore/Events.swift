@@ -31,6 +31,10 @@ public enum ObserverEvent: Sendable, Equatable {
     case appTerminated(pid: Int32, bundleID: String)
     case spaceChanged
     case displayChanged
+    /// Mission Control opened or closed, from the Dock's own AX
+    /// notifications. While it is open the windows are Mission Control's to
+    /// arrange, and a desktop or window may change under it.
+    case missionControl(open: Bool)
 }
 
 public struct DaemonEvent: Codable, Sendable, Equatable {
