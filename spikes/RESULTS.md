@@ -557,9 +557,10 @@ Zen, an Electron app); `ProcessAssignToAllSpaces` with a bundled helper.
 
 ## S12 — real applications, a finger swipe: **moves hold; the cross-display frame is not weft's to trust**
 
-Measured 2026-10-09 by the maintainer, macOS 27.0.1, same two displays, weftd
-not running. Harness: `nativeops.swift` (`windows`, `moveto`, `watch`,
-`switch … showhide stay`).
+Measured 2026-10-09, macOS 27.0.1, same two displays, weftd not running;
+spikes 4 and 5 by the agent, the rest by the maintainer. Harness:
+`nativeops.swift` (`windows`, `moveto`, `watch`, `switch … showhide stay`,
+`scale`, `tri`).
 
 | Window | Move | Result | Frame |
 | --- | --- | --- | --- |
@@ -592,8 +593,76 @@ Control opened on desktop 1 and agreed with the switch. macOS 27 marks no
 **Rendering and input after a move:** Ghostty and Zen both drew normally and
 took typing on the desktop they were moved to (confirmed by eye).
 
-Not yet run: spike 4 (triple on the second display, fullscreen Space in the
-list), spike 5 (30 windows, 10 processes).
+**Spike 5, scale: 30 windows in 10 processes** (`./nativeops scale 10`, helper
+windows only, 3 per process). Every move judged by reading back each window's
+desktop; 10 rounds per row, there and back.
+
+| Batch | Lands (median / max) | Failed |
+| --- | --- | --- |
+| 1 operation, 30 windows, same display | 20–23 / 29 ms | 0 of 20 |
+| 3 operations × 10, three desktops | 22–24 / 27 ms | 0 of 20 |
+| 10 operations × 3, one per process | 22–23 / 29 ms | 0 of 20 |
+| 1 operation, 30 windows, other display's hidden desktop | 20–22 / 24 ms | 0 of 20 |
+| 2 operations × 15, one per display | 22–24 / 32 ms | 0 of 20 |
+
+One operation, same display, against batch size (median, all arrived):
+
+| Windows | 1 | 3 | 5 | 10 | 20 | 30 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ms | 4.9 | 5.2 | 8.6 | 13.2 | 18.6 | 23.9 |
+
+- **Every window arrived, every time** (200 batched moves). Windows from ten
+  processes in one operation move as well as one process's windows.
+- **~10 ms holds up to about ten windows, not thirty.** The cost is about
+  4 ms plus 0.65 ms per window, and the windows of one batch arrive together
+  (the first lands about 2 ms before the last). How the windows are split into
+  operations makes no difference: one, three or ten operations for 30 windows
+  all take ~22 ms.
+- After a cross-display batch all 30 frames were inside the target display,
+  and back on the main display after the return (helper windows have no
+  remembered position there; S12's T3 Code row still applies).
+- A read-back pass over 30 windows costs 1.5 ms, so a per-window verify is
+  affordable.
+- The user's desktop did not change in any row.
+
+For the design: a single `move-window` stays at ~5 ms, inside its budget.
+Only batches of many windows (spread, migration, rules at login) go past
+10 ms, and those are not per-keystroke. "One operation per destination
+desktop" stands; nothing is gained or lost by splitting.
+
+**Spike 4, the triple on the second display and past a fullscreen Space**
+(`./nativeops tri <display> <n|s<sid>> [docksync]`). The 4K now has two
+desktops (344, 417); TextEdit was put in native fullscreen on the built-in,
+whose list became `3 76 78 81 425(fullscreen)`. Each row is judged by the
+current-space read-back, the on-screen window list, the other display's
+current space, and a screenshot of both displays taken 0.6 s after landing.
+
+| Display | Switch | Read-back | Screen | Dock |
+| --- | --- | --- | --- | --- |
+| 4K | 344 → 417 (empty) | 30.6 ms | empty desktop, Finder's menu bar, nothing left of 344 | a swipe left afterwards lands on 344: **in sync** |
+| 4K | 344 → 417 | 22.4 ms | empty desktop | — |
+| 4K | 417 → 344 | 31.8 ms | Ghostty, T3 Code, Linear back; Ghostty's menu bar | — |
+| built-in | **fullscreen 425 → desktop 1 (3)**, four positions | 31.5 ms | desktop 1's app, its menu bar, nothing of TextEdit | a swipe right afterwards lands on 76: **in sync** |
+| built-in | 76 → 81, fullscreen Space in the list | 28.0 ms | empty desktop, Finder's menu bar | — |
+| built-in | 81 → fullscreen 425 (restoring) | 13.7 ms | TextEdit fullscreen as before | — |
+
+- **The triple works on the second display and with a fullscreen Space in the
+  list**, including out of a fullscreen Space, which is what ⌥N does when
+  pressed in a fullscreen app. The other display's current space never
+  changed, and nothing from the old space was left on screen in any row.
+- **Timing is slower than S11's 16–21 ms.** Three of six landed at
+  30.6–31.8 ms, just over NATIVE.md's 30 ms switch budget, before any verify.
+  Six samples; not enough to say whether the second display or the
+  fullscreen Space costs time, or whether S11 was simply a quiet moment.
+- **"The target's windows are on screen" needs a narrower definition.** Each
+  of three rows had a window on the target desktop that was not on screen
+  after a correct switch: Stats' ordered-out popovers and JankyBorders'
+  overlay. They are not on screen when that desktop is shown by any means.
+  A verify over every window on the desktop would have failed a good switch
+  and turned the triple off. The verify must count only windows weft manages
+  (tiled or floating, ordinary layer, not ordered out).
+
+Both displays were back on their starting spaces after the probe.
 
 ---
 

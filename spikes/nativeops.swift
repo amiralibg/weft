@@ -20,6 +20,12 @@
 //   ./nativeops windows               real windows: id, app, desktops
 //   ./nativeops moveto <wid> <sid>    a real window to a space id, any display
 //   ./nativeops sticky                bridged AddWindowsToSpaces over every desktop
+//   ./nativeops scale [rounds]        30 windows in 10 processes, moved in batches
+//   ./nativeops tri <d> <n|s<sid>> [docksync]
+//                                     Show+Hide+SetCurrent on display d (1-based)
+//                                     to its desktop n or any space id (fullscreen
+//                                     too); on-screen check, screenshot of every
+//                                     display; docksync then swipes one step
 //
 // Same rules as S8/S10: judged by read-back only, helper windows only (its own
 // process, regular policy), the user's desktop restored when a probe changes it.
@@ -237,9 +243,11 @@ final class Helper {
     let wids: [UInt32]
     var pid: pid_t { process.processIdentifier }
     private let widFile: String
+    private static var made = 0
 
     init(count: Int = 1) {
-        widFile = NSTemporaryDirectory() + "weft-nativeops-\(getpid())"
+        Helper.made += 1
+        widFile = NSTemporaryDirectory() + "weft-nativeops-\(getpid())-\(Helper.made)"
         try? FileManager.default.removeItem(atPath: widFile)
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         process.arguments = ["helper", widFile, "\(count)"]
@@ -520,6 +528,172 @@ func sticky() {
     print("  bridged RemoveWindowsFromSpaces: \(back != nil ? "back to one in \(ms(back))" : "now on \(spaces(of: wid))")")
 }
 
+/// Spike 5: 30 windows across 10 processes, moved the way weft will move them
+/// (one operation per destination desktop), each round judged by read-back.
+func scale(rounds: Int) {
+    let helpers = (0..<10).map { _ in Helper(count: 3) }
+    defer { helpers.forEach { $0.stop() } }
+    let wids = helpers.flatMap(\.wids)
+    let ds = displays()
+    guard let home = spaces(of: wids[0]).first, let main = ds.first(where: { $0.current == home }),
+          let other = ds.first(where: { $0.uuid != main.uuid })
+    else { print("need two displays, helper windows on a showing desktop"); exit(1) }
+    let away = main.desktops.filter { $0 != home }
+    guard away.count >= 3, let otherHidden = other.desktops.first(where: { $0 != other.current })
+    else { print("need 4 desktops on the main display and 2 on the other"); exit(1) }
+    print("\(wids.count) windows in \(helpers.count) processes on \(home); main away \(away); other display \(other.desktops) (showing \(other.current))")
+
+    let t0 = Date()
+    for w in wids { _ = spaces(of: w) }
+    print(String(format: "one read-back pass over 30 windows: %.2f ms", Date().timeIntervalSince(t0) * 1000))
+
+    /// Every batch issued back to back; done when every window reads back
+    /// exactly its target. Returns ms from the first perform, or nil.
+    func move(_ batches: [([UInt32], UInt64)]) -> Double? {
+        let t = Date()
+        for (ws, sid) in batches { performAsync(opWindowsSpace("SLSBridgedMoveWindowsToManagedSpaceOperation", ws, sid)) }
+        while Date().timeIntervalSince(t) < 2 {
+            if batches.allSatisfy({ ws, sid in ws.allSatisfy { spaces(of: $0) == [sid] } }) {
+                return Date().timeIntervalSince(t) * 1000
+            }
+            usleep(500)
+        }
+        let missing = batches.flatMap { ws, sid in ws.filter { spaces(of: $0) != [sid] }.map { "\($0)->\(sid) on \(spaces(of: $0))" } }
+        print("    !! \(missing.count) windows did not arrive: \(missing.prefix(6))")
+        return nil
+    }
+    func slices(_ n: Int) -> [[UInt32]] {
+        // Interleaved, so every batch carries windows from several processes.
+        (0..<n).map { k in wids.enumerated().filter { $0.offset % n == k }.map(\.element) }
+    }
+    func onDisplay(_ d: Display) -> Int {
+        let f = cgDisplays().first { $0.uuid.caseInsensitiveCompare(d.uuid) == .orderedSame }!.frame
+        return wids.filter { f.intersects(bounds($0)) }.count
+    }
+
+    let scenarios: [(String, [([UInt32], UInt64)])] = [
+        ("1 op, 30 windows, same display", [(wids, away[0])]),
+        ("3 ops x 10, three desktops, same display", zip(slices(3), away.prefix(3)).map { ($0, $1) }),
+        ("10 ops x 3, one per process, same display", helpers.enumerated().map { ($1.wids, away[$0 % 3]) }),
+        ("1 op, 30 windows, other display (hidden desktop)", [(wids, otherHidden)]),
+        ("2 ops x 15, one per display", zip(slices(2), [away[0], otherHidden]).map { ($0, $1) }),
+    ]
+    let start = currents()
+    // Cost against batch size: one operation, same display, first and last arrival.
+    for n in [1, 3, 5, 10, 20, 30] {
+        var last: [Double] = [], first: [Double] = []
+        let ws = Array(slices(10).flatMap { $0 }.prefix(n))
+        for _ in 0..<rounds {
+            let t = Date()
+            performAsync(opWindowsSpace("SLSBridgedMoveWindowsToManagedSpaceOperation", ws, away[0]))
+            var f: Double?
+            while Date().timeIntervalSince(t) < 2 {
+                let arrived = ws.filter { spaces(of: $0) == [away[0]] }.count
+                if arrived > 0, f == nil { f = Date().timeIntervalSince(t) * 1000 }
+                if arrived == ws.count { last.append(Date().timeIntervalSince(t) * 1000); break }
+                usleep(250)
+            }
+            if let f { first.append(f) }
+            _ = move([(ws, home)])
+            usleep(100_000)
+        }
+        let s = last.sorted(), fs = first.sorted()
+        print(String(format: "  %2d windows, 1 op: all arrived median %.1f ms (first window %.1f ms); %d/%d rounds complete",
+                     n, s.isEmpty ? -1 : s[s.count / 2], fs.isEmpty ? -1 : fs[fs.count / 2], s.count, rounds))
+    }
+    for (name, batches) in scenarios {
+        var there: [Double] = [], back: [Double] = []
+        var fails = 0
+        for _ in 0..<rounds {
+            if let t = move(batches) { there.append(t) } else { fails += 1 }
+            if name.contains("other display") && name.hasPrefix("1 op") && there.count == 1 {
+                print("    on the other display after the move: \(onDisplay(other))/30 frames inside it")
+            }
+            if let t = move([(wids, home)]) { back.append(t) } else { fails += 1 }
+            usleep(150_000)
+        }
+        func stat(_ v: [Double]) -> String {
+            guard !v.isEmpty else { return "-" }
+            let s = v.sorted()
+            return String(format: "median %.1f, max %.1f ms", s[s.count / 2], s.last!)
+        }
+        print("  \(name): there \(stat(there)); back \(stat(back)); \(fails) failed of \(rounds * 2)")
+        if currents() != start { print("  !! your desktop changed: \(start) -> \(currents())") }
+    }
+    print("all home: \(wids.allSatisfy { spaces(of: $0) == [home] }); \(onDisplay(main))/30 frames on the main display")
+}
+
+/// Spike 4: the triple on any display, to any of its spaces, judged by
+/// read-back, the on-screen window list, and a screenshot of every display.
+func tri(_ dn: Int, _ spec: String) {
+    let ds = displays()
+    guard (1...ds.count).contains(dn) else { print("no display \(dn)"); exit(1) }
+    let d = ds[dn - 1]
+    let target = spec.hasPrefix("s") ? UInt64(spec.dropFirst())! : d.desktops[Int(spec)! - 1]
+    guard d.spaces.contains(target), target != d.current else { print("\(target) is not another space of display \(dn)"); exit(1) }
+    let start = d.current
+    let tag = { (sid: UInt64) in "\(sid)\(SLSSpaceGetType(cid, sid) == 0 ? "" : "(type \(SLSSpaceGetType(cid, sid)))")" }
+    let othersBefore = currents().filter { $0.key != d.uuid }
+    print("display \(dn) \(d.uuid.prefix(8)): [\(d.spaces.map(tag).joined(separator: " "))]  \(tag(start)) -> \(tag(target))")
+
+    func layer0(_ opts: CGWindowListOption) -> [(UInt32, String)] {
+        (CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { w in
+            guard (w[kCGWindowLayer as String] as? Int) == 0,
+                  let b = w[kCGWindowBounds as String] as? [String: Double], (b["Width"] ?? 0) > 50, (b["Height"] ?? 0) > 50,
+                  let wid = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return nil }
+            return (wid, w[kCGWindowOwnerName as String] as? String ?? "?")
+        }
+    }
+    let onTargetAll = layer0([.optionAll, .excludeDesktopElements]).filter { spaces(of: $0.0) == [target] }
+
+    typealias F = @convention(c) (UnsafeMutableRawPointer, Selector, CFArray) -> UnsafeMutableRawPointer?
+    let mk = { (cls: String, sids: [UInt64]) in
+        unsafeBitCast(msgSend, to: F.self)(alloc(cls), sel_registerName("initWithSpaces:"), sids.map { NSNumber(value: $0) } as CFArray)
+    }
+    let t = Date()
+    performAsync(mk("SLSBridgedShowSpacesOperation", [target]))
+    performAsync(mk("SLSBridgedHideSpacesOperation", [start]))
+    performAsync(opDisplaySpace("SLSBridgedManagedDisplaySetCurrentSpaceOperation", d.uuid, target))
+    let landed = wait(2) { SLSManagedDisplayGetCurrentSpace(cid, d.uuid as CFString) == target }
+    print("  read-back: \(landed != nil ? "landed in \(ms(landed))" : "NO SWITCH after \(String(format: "%.1f", Date().timeIntervalSince(t)))s")")
+    usleep(600_000)
+    let onscreen = layer0([.optionOnScreenOnly, .excludeDesktopElements])
+    let shown = Set(onscreen.map(\.0))
+    let leftOver = onscreen.filter { spaces(of: $0.0).contains(start) && !spaces(of: $0.0).contains(target) }
+    let missing = onTargetAll.filter { !shown.contains($0.0) }
+    print("  target's windows on screen: \(onTargetAll.count - missing.count)/\(onTargetAll.count)"
+          + (missing.isEmpty ? "" : "  missing: \(missing.map { "\($0.0) \($0.1)" })"))
+    print("  old space's windows still on screen: \(leftOver.count)" + (leftOver.isEmpty ? "" : " \(leftOver.map { "\($0.0) \($0.1)" })"))
+    print("  managed-spaces dict agrees: \(displays().first { $0.uuid == d.uuid }?.current == target)"
+          + "; other displays unchanged: \(currents().filter { $0.key != d.uuid } == othersBefore)")
+    let dir = NSTemporaryDirectory() + "weft-tri-\(Int(Date().timeIntervalSince1970))"
+    let files = cgDisplays().indices.map { "\(dir)-\($0 + 1).png" }
+    let sc = Process()
+    sc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    sc.arguments = ["-x"] + files
+    try? sc.run()
+    sc.waitUntilExit()
+    print("  screenshots: \(files.joined(separator: " "))")
+
+    guard CommandLine.arguments.contains("docksync"), let i = d.spaces.firstIndex(of: target) else { return }
+    // A Dock swipe steps from the Dock's idea of the current space; if the Dock
+    // followed the triple, one step lands next to the target.
+    let step = i > 0 ? "left" : "right"
+    let expect = d.spaces[step == "left" ? i - 1 : i + 1]
+    if let f = cgDisplays().first(where: { $0.uuid.caseInsensitiveCompare(d.uuid) == .orderedSame })?.frame {
+        let loc = CGEvent(source: nil)?.location ?? .zero
+        if !f.contains(loc) {
+            savedPointer = loc
+            atexit { if let p = savedPointer { CGWarpMouseCursorPosition(p) } }
+            CGWarpMouseCursorPosition(CGPoint(x: f.midX, y: f.midY))
+        }
+    }
+    let out = runSibling([step])
+    usleep(800_000)
+    let now = SLSManagedDisplayGetCurrentSpace(cid, d.uuid as CFString)
+    print("  dock swipe \(step): now \(tag(now)), expected \(tag(expect)) -> Dock \(now == expect ? "IN SYNC" : "OUT OF SYNC")  [\(out.replacingOccurrences(of: "\n", with: " | "))]")
+}
+
 // MARK: - Main
 
 let args = CommandLine.arguments
@@ -575,11 +749,13 @@ case "axhidden": axHidden()
 case "cross": cross()
 case "batch": batch()
 case "sticky": sticky()
+case "tri" where args.count > 3: tri(Int(args[2])!, args[3])
+case "scale": scale(rounds: args.count > 2 ? Int(args[2])! : 10)
 case "helper" where args.count > 3: runHelper(widFile: args[2], count: Int(args[3])!)
 default:
-    print("usage: nativeops list | create [keep] | destroy <sid> | switch <n> | animating | axhidden | cross | batch | sticky | windows | moveto <wid> <sid> | watch | switch <n> showhide [stay]")
+    print("usage: nativeops list | create [keep] | destroy <sid> | switch <n> | animating | axhidden | cross | batch | sticky | scale [rounds] | windows | moveto <wid> <sid> | watch | switch <n> showhide [stay]")
     exit(2)
 }
-if !["switch", "animating", "helper"].contains(args.count > 1 ? args[1] : ""), currents() != before {
+if !["switch", "tri", "animating", "helper"].contains(args.count > 1 ? args[1] : ""), currents() != before {
     print("!! your desktop changed during this probe: \(before) -> \(currents())")
 }
