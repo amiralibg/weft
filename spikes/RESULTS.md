@@ -462,6 +462,99 @@ windows is 6 ms — against the ~500 ms of animation a native Space switch costs
 
 ---
 
+## S10 — the bridged move operation: **another process's window moves, SIP on, ~10 ms**
+
+Measured 2026-10-09, macOS 27.0.1 (26A434), arm64. Two displays: four desktops on the
+first, one on the second. Harness: `bridgedmove.swift`.
+
+S8 did not try this route. yabai 7.1.25 (asmvik/yabai#2788) moves windows with it:
+
+```
+op = [[SLSBridgedMoveWindowsToManagedSpaceOperation alloc] initWithWindows:wids spaceID:sid]
+SLSPerformAsynchronousBridgedWindowManagementOperation(op)
+```
+
+The perform function is a C++ static, `__ZL54SLSPerformAsynchronousBridgedWindowManagementOperationP47SLSAsynchronousBridgedWindowManagementOperation`.
+`dlsym` does not see it. Walking SkyLight's `LC_SYMTAB` in memory does, the way yabai's
+`macho_find_symbol` does.
+
+Same rules as S8: a helper window in its own process with `.regular` policy, judged only by
+re-reading `SLSCopySpacesForWindows`, the user's desktop checked before and after.
+
+| Move | Result |
+| --- | --- |
+| Same display, desktop 78 → 81 | `[78] → [81]`, **10.2 ms** |
+| Back, 81 → 78 | `[81] → [78]`, **6.3 ms** |
+| Cross-display, 78 → 344 (the other display's current desktop) | `[78] → [344]`, **15.4 ms** |
+| Back, 344 → 78 | `[344] → [78]`, **10.4 ms** |
+
+The user's current desktop did not change in any row. The perform call's return value is
+a pointer-shaped number (`503770022048`) and means nothing, the same lesson as S8 finding 3.
+
+What this changes: the first of WORKSPACES.md's two reasons for leaving native desktops,
+"it will not move another app's window between desktops", is false on 27.0.1. A move is
+one call, asynchronous, landing in ~10 ms, with no title bar, no held mouse and no
+desktop animation, so the Ghostty case is no longer special.
+
+What it does not settle:
+- **Fragility.** A non-exported C++ static found by symbol-table walk is the most fragile
+  dependency weft would have. It has to be resolved at launch, self-tested once by a
+  read-back like this one, and fall back to `DragMove` when absent.
+- **The window's frame on a cross-display move.** Only membership was read. Whether the
+  frame follows to the other display or must be set afterwards is untested.
+- **Real applications.** One helper window. Electron, a browser, a title-bar-less
+  terminal and a fullscreen-adjacent window still need a row each:
+  `./bridgedmove move <wid> <n>`.
+- **The second reason**, knowing which desktop is showing, is untouched by this.
+
+---
+
+## S11 — the rest of the bridged family: **switch yes, create no, frames follow**
+
+Measured 2026-10-09, macOS 27.0.1 (26A434), arm64, same two displays as S10
+(display 1: desktops 3, 76, 78, 81; display 2: 344). weftd not running.
+Harness: `nativeops.swift`. Helper windows only; judged by read-back, and the
+switch rows by a screenshot taken mid-probe as well.
+
+SkyLight has ~90 `SLSBridged*Operation` classes. Asynchronous ones go through
+S10's perform function; synchronous ones (those returning a result) through
+`__ZL54_SLSPerformSynchronousBridgedWindowManagementOperationP46SLSSynchronousBridgedWindowManagementOperation`,
+also a non-exported static found by the same symbol-table walk.
+
+| Probe | Result |
+| --- | --- |
+| Batch move, 5 windows in one operation | all on the target desktop in **7.1 ms**, back in 3.6 ms |
+| Cross-display move | **the frame follows**: (200,580) on the built-in → (544,−2130) inside the 4K display; back restores (200,580) exactly |
+| AX write to a window on a desktop not showing, through an element captured while it was visible | **applied** in 2.5 ms, window **stays** on the hidden desktop, user's desktop unchanged. The app's `kAXWindows` is empty meanwhile (S0 again) |
+| `SpaceCreate` (sync) | returns a `SpaceIDResult` with an id, but no display gains a desktop, Dock's `com.apple.spaces` never lists it, and `SLSSpaceGetType` on it is 3 — which it also returns for id 99999. **Nothing observable is created** |
+| `MoveManagedSpaceToDisplayIndex` on that id | nothing |
+| `SpaceDestroy` | unjudgeable (nothing to destroy); not tried on a real desktop |
+| `AddWindowsToSpaces` over every desktop (sticky) | **refused** — window stays on one desktop. The bridge is not a blanket pass |
+| `ManagedDisplaySetCurrentSpace` alone | WindowServer reports the new desktop in 14–29 ms, **but the screen does not change**: the old desktop's windows stay on glass and two apps' menus draw over each other. A desync, not a switch |
+| `ShowSpaces([to])` + `HideSpaces([from])` + `SetCurrentSpace` | **a clean switch** in 16–21 ms, two desktops away in one step, no animation; target's windows paint, its app takes the menu bar, nothing of the old desktop left on screen |
+| Dock agreement after either switch | a Dock swipe afterwards steps from the *new* desktop, so the Dock's notion of current follows |
+| `SLSManagedDisplayIsAnimating` | **never true**, polled at 1 ms through a Dock swipe and a bridged switch. Useless for those; a finger swipe is untested |
+
+What this changes:
+- Moving windows is no longer the hard part; S10 plus the batch and the
+  cross-display rows close it. weft still writes the tile frame afterwards,
+  but the window lands on the right display on its own.
+- **A desktop can be laid out before it is shown**, provided weft holds an AX
+  element for each window on it — so a switch can be paint-only.
+- Switching has a route that is neither a synthetic gesture nor a keystroke:
+  the show/hide/set-current triple, which is the sequence yabai's scripting
+  addition used to run inside Dock. It must be run as a triple; set-current
+  alone corrupts the screen.
+- **Desktops cannot be created or destroyed.** The user owns the desktop
+  count.
+
+Still open: the triple on the second display and with a fullscreen space in
+the list; Mission Control opened right after a triple; a finger swipe against
+`IsAnimating`; real applications for the move (Ghostty without a title bar,
+Zen, an Electron app); `ProcessAssignToAllSpaces` with a bundled helper.
+
+---
+
 ## Design changes this forces
 
 1. **Discovery moves off AX entirely** (S0). WindowServer for enumeration, AX captured at
