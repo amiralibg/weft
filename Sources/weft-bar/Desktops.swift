@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WeftCore
+import WeftIPC
 import WeftPlatform
 
 // Your macOS desktops, as Settings and Setup draw them: read straight from the
@@ -61,29 +62,48 @@ enum Desktops {
     }
 }
 
-/// The apps with windows open on a desktop, for its card: one icon per app.
+/// The apps with windows open on each desktop, for the cards: one icon per app.
 enum LiveApps {
-    struct App: Identifiable {
+    struct App: Identifiable, Equatable {
         var id: pid_t
         var name: String
         var icon: NSImage
     }
 
-    @MainActor static func icons(for windows: [WindowID]) -> [App] {
-        guard !windows.isEmpty,
+    @MainActor private static var known: [pid_t: App] = [:]
+
+    /// Every desktop's apps from one read of the window list. Called when the
+    /// engine reports a change, never while drawing: the list costs a few
+    /// milliseconds, and once per card per redraw made the pane stutter.
+    @MainActor static func byDesktop(_ statuses: [SpaceStatus]) -> [SpaceID: [App]] {
+        let wanted = Set(statuses.flatMap(\.windows))
+        guard !wanted.isEmpty,
               let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
-        else { return [] }
-        let wanted = Set(windows)
-        var seen = Set<pid_t>()
-        var out: [App] = []
+        else { return [:] }
+        var owner: [WindowID: pid_t] = [:]
         for w in info {
             guard let n = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value, wanted.contains(n),
-                  let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, seen.insert(pid).inserted,
-                  let app = NSRunningApplication(processIdentifier: pid), let icon = app.icon
+                  let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
             else { continue }
-            out.append(App(id: pid, name: app.localizedName ?? "App", icon: icon))
+            owner[n] = pid
+        }
+        var out: [SpaceID: [App]] = [:]
+        for status in statuses {
+            var seen = Set<pid_t>()
+            out[status.id] = status.windows.compactMap { wid in
+                guard let pid = owner[wid], seen.insert(pid).inserted else { return nil }
+                return app(pid)
+            }
         }
         return out
+    }
+
+    @MainActor private static func app(_ pid: pid_t) -> App? {
+        if let hit = known[pid] { return hit }
+        guard let running = NSRunningApplication(processIdentifier: pid), let icon = running.icon else { return nil }
+        let app = App(id: pid, name: running.localizedName ?? "App", icon: icon)
+        known[pid] = app
+        return app
     }
 }
 
@@ -91,8 +111,8 @@ enum LiveApps {
 /// and whether macOS will reorder them (NATIVE.md, "Settings, Setup, bar").
 /// Never blocks: weft cannot create desktops, so it only says how to add them.
 struct DesktopCountCard: View {
-    @SwiftUI.State private var count = Desktops.count
-    @SwiftUI.State private var rearranges = SystemChecks.rearrangesSpacesByUse()
+    @SwiftUI.State private var count = 0
+    @SwiftUI.State private var rearranges = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -138,12 +158,17 @@ struct DesktopCountCard: View {
         }
         .padding(16)
         .weftGlass(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onAppear(perform: read)
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)) { _ in
             count = Desktops.count
         }
-        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
-            count = Desktops.count
-            rearranges = SystemChecks.rearrangesSpacesByUse()
-        }
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in read() }
+    }
+
+    /// Read on appearing, not in the property initialisers: SwiftUI evaluates
+    /// those every time the parent redraws.
+    private func read() {
+        count = Desktops.count
+        rearranges = SystemChecks.rearrangesSpacesByUse()
     }
 }

@@ -36,6 +36,14 @@ enum SnapshotRenderer {
                 appearance: appearance,
                 to: dir.appendingPathComponent("settings-workspaces-tall-\(tag).png")
             )
+            // The narrowest the window goes: the inspector once made the pane
+            // wider than this and cut the cards off at both edges.
+            render(
+                SettingsView(store: store, health: health, section: .workspaces),
+                size: CGSize(width: 840, height: 1500),
+                appearance: appearance,
+                to: dir.appendingPathComponent("settings-workspaces-narrow-\(tag).png")
+            )
             // The shortcut builder: a new shortcut, which opens on the list of
             // everything a shortcut can do, and one with two steps.
             let context = ShortcutContext(

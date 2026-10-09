@@ -162,14 +162,21 @@ struct SettingsView: View {
                 EngineCard(health: health).padding(12)
             }
         } detail: {
-            detail(section ?? .general)
-                // A soft crossfade with a small rise between panes, rather than
-                // a hard cut. Keyed by section, so nothing inside a pane
-                // re-animates while you work in it.
-                .id(section ?? .general)
-                .transition(.opacity.combined(with: .offset(y: 10)))
-                .animation(.stage, value: section)
-                .navigationTitle((section ?? .general).title)
+            // A quick crossfade with a small rise between panes, rather than a
+            // hard cut. Keyed by section, so nothing inside a pane re-animates
+            // while you work in it. The animation sits on the container: on
+            // the pane itself the outgoing one never animated, and a slow
+            // spring kept two panes drawing for half a second.
+            ZStack {
+                detail(section ?? .general)
+                    .id(section ?? .general)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: 6)),
+                        removal: .opacity
+                    ))
+            }
+            .animation(.chrome, value: section)
+            .navigationTitle((section ?? .general).title)
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) { SaveStateBadge(store: store) }
                 }
@@ -2102,15 +2109,22 @@ final class EngineHealth: ObservableObject {
             // The cached answer only — a file read, no network. The window
             // polls every five seconds and must not turn that into traffic.
             let cachedUpdate = UpdateCheck.cached()
+            // Each assignment only when the value changed: a @Published
+            // property announces every write, equal or not, and every
+            // announcement redraws the whole window — every five seconds,
+            // whether anything had changed or not.
             await MainActor.run {
-                self.running = perms != nil
-                self.accessibility = perms?.accessibility ?? false
-                self.keybindsLive = perms?.tapLive ?? false
-                self.needsRestart = perms?.mustRestart ?? false
-                self.liveSpaces = spaces
-                if self.liveWorkspaces != statuses { self.liveWorkspaces = statuses }
-                self.workspaces = workspaces
-                if !self.checkingForUpdate { self.update = cachedUpdate }
+                func set<T: Equatable>(_ path: ReferenceWritableKeyPath<EngineHealth, T>, _ value: T) {
+                    if self[keyPath: path] != value { self[keyPath: path] = value }
+                }
+                set(\.running, perms != nil)
+                set(\.accessibility, perms?.accessibility ?? false)
+                set(\.keybindsLive, perms?.tapLive ?? false)
+                set(\.needsRestart, perms?.mustRestart ?? false)
+                set(\.liveSpaces, spaces)
+                set(\.liveWorkspaces, statuses)
+                set(\.workspaces, workspaces)
+                if !self.checkingForUpdate { set(\.update, cachedUpdate) }
             }
         }
     }
