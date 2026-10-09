@@ -1014,6 +1014,7 @@ final class Daemon: @unchecked Sendable {
     /// Records what it acted on so the watcher below does not do it again for
     /// the same switch.
     private func handleSpaceChange() {
+        lazyLock.withLock { lookAgainTries = 4 }
         let now = SpaceControl.currentSpaceByDisplay()
         actedSpacesLock.withLock { actedSpacesLocked = now }
         bus.emit(DaemonEvent(kind: .spaceChanged))
@@ -1616,9 +1617,8 @@ final class Daemon: @unchecked Sendable {
         // nobody touching the machine. It is in the log as an unbroken
         // alternation of `windowFocused` between the same two window ids.
         let focusedSID = readSpaces().currentSpace
-        for sid in currentSids.sorted() {
-            applySpaceLayout(sid, raiseFocus: sid == focusedSID)
-        }
+        layOutDesktops(showing: currentSids, focused: focusedSID)
+        lookAgainIfUnbound(showing: currentSids)
         watchCurrent()
         scheduleLayoutSave()
         bus.emit(stateChangedEvent())
@@ -1641,6 +1641,48 @@ final class Daemon: @unchecked Sendable {
                 stderr
             )
         }
+    }
+
+    /// Lay out every showing desktop, and every hidden one whose layout has
+    /// changed and whose windows weft holds elements for — so a desktop is in
+    /// its tiles before it shows (`desktopsToLayOut`, NATIVE.md "Cold
+    /// start"). Sync queue only.
+    private func layOutDesktops(showing: Set<SpaceID>, focused: SpaceID?) {
+        let sp = readSpaces()
+        let config = currentConfig().general.asTilingConfig()
+        var computed: [SpaceID: [WindowID: Frame]] = [:]
+        for sid in sp.order {
+            guard case .tiling(let tree)? = sp.layout(on: sid) else { continue }
+            computed[sid] = layout(tree, in: usableScreen(for: sid), config: config)
+        }
+        let written = lazyLock.withLock { () -> [SpaceID: [WindowID: Frame]] in
+            lastWrittenLayouts = lastWrittenLayouts.filter { computed[$0.key] != nil }
+            return lastWrittenLayouts
+        }
+        let todo = desktopsToLayOut(showing: showing, computed: computed, lastWritten: written, bound: applier.isBound)
+        for sid in todo {
+            applySpaceLayout(sid, raiseFocus: sid == focused && showing.contains(sid))
+            lazyLock.withLock { lastWrittenLayouts[sid] = computed[sid] }
+        }
+    }
+
+    /// A desktop just shown may hold windows its app had not listed yet (S0):
+    /// sweep again shortly, a few times at most after each desktop change, so
+    /// they are tiled once the app answers. No standing timer.
+    private func lookAgainIfUnbound(showing: Set<SpaceID>) {
+        let sp = readSpaces()
+        let windows = showing.flatMap { sp.layout(on: $0)?.windows ?? [] }
+        let work = DispatchWorkItem { [weak self] in self?.syncFromSnapshot() }
+        let go = lazyLock.withLock { () -> Bool in
+            guard needsAnotherLook(showingWindows: windows, bound: applier.isBound, triesLeft: lookAgainTries) else {
+                return false
+            }
+            lookAgainTries -= 1
+            pendingLookAgain?.cancel()
+            pendingLookAgain = work
+            return true
+        }
+        if go { syncQueue.asyncAfter(deadline: .now() + 0.25, execute: work) }
     }
 
     private func writeSpaces(_ next: SpaceState) {
@@ -1727,6 +1769,16 @@ final class Daemon: @unchecked Sendable {
     private var pendingMoveSettle: DispatchWorkItem?
     /// Debounced write of `layouts.json`.
     private var pendingLayoutSave: DispatchWorkItem?
+    /// The frames last written to each tiling desktop, showing or not, so a
+    /// hidden one is written again only when its layout changes. Sweeps run
+    /// on the sync queue and, for some commands, on the command queue, so
+    /// these three are under `lazyLock`.
+    private var lastWrittenLayouts: [SpaceID: [WindowID: Frame]] = [:]
+    /// Further sweeps allowed for a desktop just shown whose windows are not
+    /// all bound yet; reset on every desktop change.
+    private var lookAgainTries = 4
+    private var pendingLookAgain: DispatchWorkItem?
+    private let lazyLock = NSLock()
 
     /// Request a world resync. `fast` collapses the current burst into a single
     /// sweep ~20 ms out; the 0.3 s trailing sweep always follows, because a
