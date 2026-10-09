@@ -92,8 +92,9 @@ public final class AXApplier: @unchecked Sendable {
         // each, taken synchronously on the queue that also applies frames —
         // so re-binding fifteen already-bound apps was, on every event, the
         // single most expensive thing weft did, for nothing. A window's AX
-        // element does not change under us; the only ones worth asking about
-        // are the ones we have never resolved.
+        // element does not change under us while the window lives; the only
+        // ones worth asking about are the ones we have never resolved, and
+        // the ones `forgetElement` dropped because the app replaced them.
         let unbound: [(wid: WindowID, pid: Int32)] = lock.withLock {
             windows.filter { windowElements[$0.wid] == nil }
         }
@@ -200,6 +201,7 @@ public final class AXApplier: @unchecked Sendable {
     /// expected to cache the answer for the window's lifetime. Never call
     /// this from the core queue.
     public func classify(wid: WindowID, pid: Int32) -> Result<Void, NotTileable>? {
+        if deadElement(wid) { forgetElement(wid) }
         var element: AXUIElement? = lock.withLock { windowElements[wid] }
         if element == nil {
             bind(windows: [(wid: wid, pid: pid)])
@@ -302,6 +304,28 @@ public final class AXApplier: @unchecked Sendable {
             expectedAt = expectedAt.filter { live.contains($0.key) }
             epoch = epoch.filter { live.contains($0.key) }
         }
+    }
+
+    /// Drop what is held for one window whose AX element went away while
+    /// its window number lives on. An app that keeps a closed window to show
+    /// again — Linear, closed with the red button — hands the reopened
+    /// window a new element; writes to the old one fail, and two failures
+    /// floated the window for good.
+    public func forgetElement(_ wid: WindowID) {
+        lock.withLock {
+            windowElements.removeValue(forKey: wid)
+            lastApplied.removeValue(forKey: wid)
+            lastTarget.removeValue(forKey: wid)
+            expectedFrame.removeValue(forKey: wid)
+            expectedAt.removeValue(forKey: wid)
+        }
+    }
+
+    /// The held element for `wid`, if its app has since destroyed it.
+    private func deadElement(_ wid: WindowID) -> Bool {
+        guard let el = lock.withLock({ windowElements[wid] }) else { return false }
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &value) == .invalidUIElement
     }
 
     /// Drop the frame writes still waiting on an app's queue for these
@@ -489,6 +513,10 @@ public final class AXApplier: @unchecked Sendable {
                         // dead apps — the 0.15s messaging timeout bounds both.
                         var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
                         if reason != nil {
+                            // The app may have replaced the window's element
+                            // (closed and reopened it): the retry resolves the
+                            // new one instead of writing to the dead one again.
+                            if self.deadElement(item.wid) { self.forgetElement(item.wid) }
                             reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
                         }
                         counter.add(reason: reason, wid: item.wid)

@@ -1711,7 +1711,12 @@ final class Daemon: @unchecked Sendable {
             self.manualFloat.remove(wid)
             self.floatFrames.removeValue(forKey: wid)
             self.unmanaged.remove(wid)
+            self.negativeVerdict.removeValue(forKey: wid)
+            self.recheckedNegatives.remove(wid)
         }
+        // An app that keeps a closed window to show again gives it a new AX
+        // element when it does; the old one is dead.
+        applier.forgetElement(wid)
         // The WindowServer recycles window ids, and `watchOnLoop` skips any wid
         // it already holds an element for — so a dead id left in the observer's
         // table means the next window handed that number never gets a move or
