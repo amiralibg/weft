@@ -1994,24 +1994,54 @@ final class Daemon: @unchecked Sendable {
     /// when each was announced. Touched only from `syncQueue`, like the other
     /// sweep timers.
     private var awaitedWindows: [WindowID: DispatchTime] = [:]
+    /// Apps that have told us they launched but hold no window weft can
+    /// settle on yet. Sibling of `awaitedWindows`: the pin for the case where
+    /// the creation notification never came — see `.appLaunched`.
+    private var awaitedApps: [Int32: DispatchTime] = [:]
     private var pendingLadder: DispatchWorkItem?
-    /// When the ladder sweeps, in ms after the newest creation.
+    /// When the ladder sweeps, in ms after the newest creation or launch.
     ///
     /// This replaces a fixed pair — one sweep at 20 ms and one at 300 ms — for
-    /// the case where the notification names the window. A newborn window
-    /// usually has no space membership and no AX element at 20 ms, so in
-    /// practice it landed on the 300 ms sweep every time: the visible beat
-    /// before a new window takes its slot. Sweeping on a doubling schedule and
-    /// stopping the moment the window is tiled and bound lands a native app
-    /// in one or two rungs; a slow Electron launch walks further up and ends
-    /// no worse than before. The last rung is past the old 300 ms on purpose
-    /// — it is the heal for a window that took its time.
-    private static let creationLadderMs: [Int] = [16, 32, 64, 128, 256, 512]
+    /// the case where something newborn (a window, a launch) is outstanding. A
+    /// newborn window usually has no space membership and no AX element at
+    /// 20 ms, so in practice it landed on the 300 ms sweep every time: the
+    /// visible beat before a new window takes its slot. Sweeping on a doubling
+    /// schedule and stopping the moment each waiter is tiled and bound lands a
+    /// native app in one or two rungs; a slow Electron launch walks further up
+    /// and ends no worse than before. The last rungs are past the old 300 ms
+    /// on purpose — they are the heal for a window or an app that took its
+    /// time, which a fixed pair used to strand until the next event of
+    /// any kind.
+    private static let creationLadderMs: [Int] = [16, 32, 64, 128, 256, 512, 1024, 2048]
 
     private func awaitWindow(_ wid: WindowID) {
         if awaitedWindows[wid] == nil { awaitedWindows[wid] = .now() }
-        // Restart from the fastest rung: the newest window deserves the quick
+        // Restart from the fastest rung: the newest waiter deserves the quick
         // sweeps, and anything older still waiting is checked on each of them.
+        runLadder(rung: 0, origin: .now())
+    }
+
+    /// Wait for an app's first window by sweeping until one of it is landable.
+    ///
+    /// The pin that made launches look inconsistent: `watchCurrent()` gives an
+    /// app-level observer only to pids weft already holds windows for, so the
+    /// `AXWindowCreated` for an app's *first* window could not fire — the
+    /// observer did not exist yet — and the ladder never started. OS state did
+    /// the only other thing, two sweeps (20 ms + 300 ms) off `appLaunched`, and
+    /// an app that was slower than those sat at macOS's size and spot until
+    /// the next event of any kind: sometimes the next launch, sometimes a
+    /// click this new window stole focus despite never being tiled.
+    ///
+    /// Two halves: attaching the app's observer right here, before the window
+    /// exists — so the creation notification for that first window *can* fire,
+    /// and this app's windows wait the fine-grained escalation it brings —
+    /// and this pid-keyed ladder as the backstop for when AX observe fails
+    /// (`watch` is denied without the Accessibility grant) or the notification
+    /// is lost. Settles the moment the app holds one window that is in a
+    /// layout with a bound element.
+    private func awaitApp(_ pid: Int32) {
+        observers.watch(pids: [pid], windows: [])
+        if awaitedApps[pid] == nil { awaitedApps[pid] = .now() }
         runLadder(rung: 0, origin: .now())
     }
 
@@ -2023,14 +2053,18 @@ final class Daemon: @unchecked Sendable {
             for (wid, t0) in awaitedWindows {
                 Trace.record("create.settle", ms: Self.ms(since: t0), detail: "\(wid) did not settle")
             }
+            for (pid, t0) in awaitedApps {
+                Trace.record("create.settle", ms: Self.ms(since: t0), detail: "pid \(pid) did not settle")
+            }
             awaitedWindows.removeAll()
+            awaitedApps.removeAll()
             return
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.syncFromSnapshot()
             self.settleAwaited(rung: rung)
-            if !self.awaitedWindows.isEmpty {
+            if !self.awaitedWindows.isEmpty || !self.awaitedApps.isEmpty {
                 self.runLadder(rung: rung + 1, origin: origin)
             }
         }
@@ -2040,13 +2074,39 @@ final class Daemon: @unchecked Sendable {
         )
     }
 
-    /// Drop every awaited window that has landed: in a layout with an AX
-    /// element bound (so its frame write is real), or judged unmanaged (a
-    /// rule, a dialog, a panel — landed, just not tiled).
+    /// Drop every awaited thing that has landed: a window in a layout with an
+    /// AX element bound (so its frame write is real), a window judged
+    /// unmanaged (a rule, a dialog, a panel — landed, just not tiled), or an
+    /// app holding one window that is.
     private func settleAwaited(rung: Int) {
-        guard !awaitedWindows.isEmpty else { return }
+        guard !awaitedWindows.isEmpty || !awaitedApps.isEmpty else { return }
         let sp = readSpaces()
-        let unmanaged = core.sync { self.unmanaged }
+        let (unmanaged, windowsByApp) = core.sync {
+            var byApp: [Int32: [WindowID]] = [:]
+            for (wid, pid) in self.pids { byApp[pid, default: []].append(wid) }
+            return (self.unmanaged, byApp)
+        }
+        for (pid, t0) in awaitedApps {
+            guard let own = windowsByApp[pid],
+                  let landable = own.first(where: { wid in
+                      applier.isBound(wid) && sp.workspaces.values.contains { ws in
+                          ws.layout.windows.contains(wid)
+                      }
+                  })
+            else { continue }
+            awaitedApps.removeValue(forKey: pid)
+            // "Bound in a layout" is the same bar the window half of this
+            // settle applies to a window a creation notification named — but
+            // this window never got one (the observer may not even exist, the
+            // access grant may be missing), so there is no fine-grained
+            // escalation to hand it back to. The ordinary sweeps carry it
+            // from here: the tile has landed, what is left is verification,
+            // and the frame-write check owns that.
+            Trace.record(
+                "create.settle", ms: Self.ms(since: t0),
+                detail: "pid \(pid) after \(rung + 1) sweep(s) — window \(landable) landed"
+            )
+        }
         for (wid, t0) in awaitedWindows {
             let tiled = applier.isBound(wid)
                 && sp.workspaces.values.contains { $0.layout.windows.contains(wid) }
@@ -2228,9 +2288,11 @@ final class Daemon: @unchecked Sendable {
             focusChanged(to: front)
         case .appLaunched(let pid, let bundleID):
             bus.emit(DaemonEvent(kind: .appLaunched, app: "\(bundleID) pid=\(pid)"))
+            awaitApp(pid)
             scheduleSync()
         case .appTerminated(let pid, let bundleID):
             bus.emit(DaemonEvent(kind: .appTerminated, app: "\(bundleID) pid=\(pid)"))
+            awaitedApps.removeValue(forKey: pid)
             applier.forgetApp(pid: pid)
             observers.forgetApp(pid: pid)
             WorldReader.forgetOwner(pid: pid)
