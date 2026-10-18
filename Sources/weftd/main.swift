@@ -1274,6 +1274,9 @@ final class Daemon: @unchecked Sendable {
             let label: String
         }
         var pendingMoves: [RuleMove] = []
+        // Windows whose fullscreen memo says "not home yet": one bridged move
+        // each, carried out in phase 3 like the rule moves.
+        var pendingFullscreen: [FullscreenRestore] = []
         // For telling a borderless-fullscreen game or player from a window,
         // and for numbering the displays west to east.
         let screenFrames = SpaceControl.displayLayout()
@@ -1331,7 +1334,7 @@ final class Daemon: @unchecked Sendable {
             // just current — unvisited spaces compute layouts blind). Rules +
             // quirks filter unmanaged windows out of every layout (M6).
             self.strikes = self.strikes.filter { worldWids.contains($0.key) }
-            self.appNames = self.appNames.filter { worldWids.contains($0.key) }
+            self.appNames = self.appNames.filter { worldWids.contains($0.key) || world.fullscreen.contains($0.key) }
             self.windowTitles = self.windowTitles.filter { worldWids.contains($0.key) }
             self.bundleLock.withLock {
                 self.bundleCache = self.bundleCache.filter { worldPids.contains($0.key) }
@@ -1360,7 +1363,27 @@ final class Daemon: @unchecked Sendable {
                 self.unbindableSince[wid] = first
             }
             self.spaceMoveAttempts = self.spaceMoveAttempts.intersection(worldWids)
+            self.spaceMoveUnknown = self.spaceMoveUnknown.filter { worldWids.contains($0.key) }
             self.spaceMoveDeferredLogged = self.spaceMoveDeferredLogged.intersection(worldWids)
+            self.fullscreenMoveTries = self.fullscreenMoveTries.filter { self.fullscreenMemos[$0.key] != nil }
+            // Fullscreen lifecycle (REDESIGN.md). A window that first shows up
+            // on a fullscreen space was last sweep whatever `sp` still says it
+            // was — that state is about to be replaced by a world without it —
+            // so the memo is written before the membership sync files it out.
+            // Windows believed fullscreen that are neither fullscreen nor on
+            // screen any more closed while they were: their memories go too.
+            self.fullscreenMemos = self.fullscreenMemos.filter {
+                world.fullscreen.contains($0.key) || worldWids.contains($0.key)
+            }
+            let fullscreenEntering = world.fullscreen.subtracting(self.inFullscreenSpace).sorted()
+            for wid in fullscreenEntering where self.fullscreenMemos[wid] == nil {
+                if let memo = fullscreenMemo(sp, of: wid) {
+                    self.fullscreenMemos[wid] = memo
+                    let app = self.appNames[wid] ?? "window \(wid)"
+                    fputs("weftd: \(app) (\(wid)) went fullscreen from \(sp.label(of: memo.workspace) ?? "?") — remembered\n", stderr)
+                }
+            }
+            self.inFullscreenSpace = world.fullscreen
             var windowDesktops: [WindowID: [SpaceID]] = [:]
             var unmanagedNow: Set<WindowID> = []
             // Unmanaged windows that still belong to a workspace: out of the
@@ -1404,6 +1427,11 @@ final class Daemon: @unchecked Sendable {
                     fileLoose(w)
                     continue
                 }
+                // A window coming out of native fullscreen is still whatever
+                // it was when it went in, whatever its frame says this sweep:
+                // the exit animation runs at fullscreen size, and the memo
+                // below decides the space it returns to.
+                let exitingFullscreen = self.fullscreenMemos[w.id] != nil
                 // Closed but kept: on a showing desktop, not on screen. Not
                 // a tile (`isTileable`), and not unmanaged either — if the
                 // app shows it again, the next sweep gives it a slot.
@@ -1429,7 +1457,8 @@ final class Daemon: @unchecked Sendable {
                 // sized again. Judged only where the menu bar is showing, which
                 // is what makes "covers the menu bar" unambiguous, and never for
                 // a window weft already lays out.
-                if Daemon.isBorderlessFullscreen(w.frame, among: screenFrames),
+                if !exitingFullscreen,
+                   Daemon.isBorderlessFullscreen(w.frame, among: screenFrames),
                    !sp.workspaces.values.contains(where: { $0.layout.windows.contains(w.id) }) {
                     unmanagedNow.insert(w.id)
                     fileLoose(w)
@@ -1454,44 +1483,72 @@ final class Daemon: @unchecked Sendable {
                     // window out of `spaceMoveAttempts` lets that sweep do the
                     // move once the answer is in. Tiling can afford to guess
                     // (§S0); this cannot.
-                    switch spaceMoveDecision(
-                        outcome: outcome,
-                        isStandardWindow: self.standardWindow[w.id],
-                        alreadyAttempted: self.spaceMoveAttempts.contains(w.id)
-                    ) {
-                    case .move(let target):
-                        self.spaceMoveAttempts.insert(w.id)
-                        // Resolve against the in-progress labels (just seeded
-                        // above), not the still-unwritten global — otherwise
-                        // first-sync moves always miss with "unknown space".
-                        if let targetWsID = sp.resolveWorkspace(target) {
-                            pendingMoves.append(RuleMove(wid: w.id, app: w.app, targetWsID: targetWsID, label: target))
-                        } else {
-                            fputs("weftd: rule wants '\(w.app)' (\(w.id)) on unknown space '\(target)'\n", stderr)
-                        }
-                    case .wait:
-                        // The change that stopped app sheets and popovers
-                        // being carried to other desktops. Logged once per
-                        // window so a report can show it firing — and show
-                        // whether the window it held back was a real one.
-                        if self.spaceMoveDeferredLogged.insert(w.id).inserted {
-                            fputs(
-                                "weftd: holding '\(w.app)' (\(w.id)) — rule wants space "
-                                    + "'\(outcome.space ?? "?")', waiting for AX to say what it is\n",
-                                stderr
-                            )
-                        }
-                    case .skip:
-                        // Closes the story on a window that was held: AX has
-                        // answered, and the answer was "a panel, not a
-                        // window". Left where it is, deliberately.
-                        if self.standardWindow[w.id] == false,
-                           self.spaceMoveDeferredLogged.remove(w.id) != nil {
-                            fputs(
-                                "weftd: '\(w.app)' (\(w.id)) is a panel, not a window — "
-                                    + "left on this desktop\n",
-                                stderr
-                            )
+                    //
+                    // While a fullscreen memo is open the space half is not
+                    // the rule's to make at all: an exit restores the memo,
+                    // not the app's assignment. The attempt is not spent
+                    // either — the memo settle consumes it when the window is
+                    // home, and when the memo dies the rule still gets its one
+                    // move afterwards.
+                    if !exitingFullscreen {
+                        switch spaceMoveDecision(
+                            outcome: outcome,
+                            isStandardWindow: self.standardWindow[w.id],
+                            alreadyAttempted: self.spaceMoveAttempts.contains(w.id)
+                        ) {
+                        case .move(let target):
+                            // An unknown label does not spend the attempt: the
+                            // rule retires it and asks again for a few sweeps, so
+                            // a rule naming a desktop the window could reach (a
+                            // config edit mid-launch, labels still seeding) does
+                            // its job, and one nobody can satisfy stops trying.
+                            if let targetWsID = sp.resolveWorkspace(target) {
+                                self.spaceMoveAttempts.insert(w.id)
+                                self.spaceMoveUnknown.removeValue(forKey: w.id)
+                                pendingMoves.append(RuleMove(wid: w.id, app: w.app, targetWsID: targetWsID, label: target))
+                            } else {
+                                let tries = self.spaceMoveUnknown[w.id]?.tries ?? 0
+                                self.spaceMoveUnknown[w.id] = (label: target, tries: tries + 1)
+                                if tries == 0 {
+                                    fputs(
+                                        "weftd: rule wants '\(w.app)' (\(w.id)) on '\(target)' "
+                                            + "but no desktop has that label yet — the move waits a few sweeps\n",
+                                        stderr
+                                    )
+                                } else if tries >= Self.spaceMoveUnknownBudget - 1 {
+                                    self.spaceMoveAttempts.insert(w.id)
+                                    self.spaceMoveUnknown.removeValue(forKey: w.id)
+                                    fputs(
+                                        "weftd: rule cannot place '\(w.app)' (\(w.id)) on '\(target)' "
+                                            + "— no desktop with that label\n",
+                                        stderr
+                                    )
+                                }
+                            }
+                        case .wait:
+                            // The change that stopped app sheets and popovers
+                            // being carried to other desktops. Logged once per
+                            // window so a report can show it firing — and show
+                            // whether the window it held back was a real one.
+                            if self.spaceMoveDeferredLogged.insert(w.id).inserted {
+                                fputs(
+                                    "weftd: holding '\(w.app)' (\(w.id)) — rule wants space "
+                                        + "'\(outcome.space ?? "?")', waiting for AX to say what it is\n",
+                                    stderr
+                                )
+                            }
+                        case .skip:
+                            // Closes the story on a window that was held: AX has
+                            // answered, and the answer was "a panel, not a
+                            // window". Left where it is, deliberately.
+                            if self.standardWindow[w.id] == false,
+                               self.spaceMoveDeferredLogged.remove(w.id) != nil {
+                                fputs(
+                                    "weftd: '\(w.app)' (\(w.id)) is a panel, not a window — "
+                                        + "left on this desktop\n",
+                                    stderr
+                                )
+                            }
                         }
                     }
                     if !outcome.manage {
@@ -1547,6 +1604,62 @@ final class Daemon: @unchecked Sendable {
                     ?? cfg.general.defaultLayout
                 self.convertLayout(&sp, workspace: id, to: kind)
             }
+            // Fullscreen exit: put every window coming out of native
+            // fullscreen back where the memo says it was (REDESIGN.md).
+            // macOS files it on the space it fullscreened from, so most are
+            // home after this sweep's membership sync and need only their old
+            // tree slot rebuilt — one neighbour insert. A window that exited
+            // to some other desktop (auto-arrange, a drag in Mission Control)
+            // gets one bridged move in phase 3 instead. Home settles the
+            // memo, and takes the rule's one space decision with it: the
+            // `[[rule]] space` assignment wins when the window opens, not
+            // when it leaves fullscreen. A memo whose workspace is gone drops
+            // through to the old behavior.
+            for wid in self.fullscreenMemos.keys.sorted() {
+                guard let memo = self.fullscreenMemos[wid] else { continue }
+                switch fullscreenSettle(
+                    stillFullscreen: world.fullscreen.contains(wid),
+                    memo: memo,
+                    state: sp,
+                    of: wid
+                ) {
+                case .fullscreen:
+                    continue
+                case .forget:
+                    self.fullscreenMemos.removeValue(forKey: wid)
+                    self.fullscreenMoveTries.removeValue(forKey: wid)
+                    fputs("weftd: \(wid) left fullscreen but its memo workspace is gone — left where it is\n", stderr)
+                case .home(let tree):
+                    // The workspace is back to being theirs. The remembered
+                    // subtree replaces the reflowed one wholesale — the
+                    // paused workspace cannot be commanded or dragged on
+                    // while anything is fullscreen, so the members still
+                    // match and the arrangement returns exactly — and the
+                    // rule's one space decision retires unspent: it applies
+                    // when the window opens, not when it exits.
+                    if let tree, case .tiling = sp.workspaces[memo.workspace]?.layout {
+                        sp.setLayout(.tiling(tree), of: memo.workspace)
+                    }
+                    self.fullscreenMemos.removeValue(forKey: wid)
+                    self.fullscreenMoveTries.removeValue(forKey: wid)
+                    self.spaceMoveAttempts.insert(wid)
+                    let app = self.appNames[wid] ?? "window \(wid)"
+                    fputs("weftd: returned \(app) (\(wid)) from fullscreen to \(sp.label(of: memo.workspace) ?? "?")\n", stderr)
+                case .move(let follow):
+                    // A memo decision for a window NOT yet on its workspace:
+                    // one bridged move, then the next sweep's home settle
+                    // restores the remembered slot work. Follow only when the
+                    // workspace shows nowhere: the exit was the user's own
+                    // act, so a hidden workspace comes into view.
+                    pendingFullscreen.append(FullscreenRestore(
+                        wid: wid,
+                        app: self.appNames[wid] ?? "window \(wid)",
+                        targetWsID: memo.workspace,
+                        label: sp.label(of: memo.workspace) ?? "?",
+                        follow: follow
+                    ))
+                }
+            }
             self.spaces = sp
             let currentSids = Set(sp.currentByDisplay.values)
             let visible = world.windows.filter { !Set($0.spaces).isDisjoint(with: currentSids) }
@@ -1596,6 +1709,32 @@ final class Daemon: @unchecked Sendable {
         // each window at one move for its lifetime, so the extra pass cannot
         // move anything again and cannot feed itself.
         var moved = false
+        // Fullscreen restores first, ahead of any rule move the same window
+        // could have collected: the memo decides where an exiting window
+        // belongs, and once home the sweep settles it and retires the rule's
+        // own attempt.
+        for m in pendingFullscreen {
+            let placed = moveWindow(m.wid, toWorkspace: m.targetWsID, follow: m.follow)
+            if placed.ok {
+                fputs("weftd: returned \(m.app) (\(m.wid)) from fullscreen to \(m.label)\n", stderr)
+                moved = true
+            } else {
+                let gaveUp: Bool = core.sync {
+                    let tries = self.fullscreenMoveTries[m.wid, default: 0] + 1
+                    self.fullscreenMoveTries[m.wid] = tries
+                    guard tries >= 3 else { return false }
+                    self.fullscreenMemos.removeValue(forKey: m.wid)
+                    self.fullscreenMoveTries.removeValue(forKey: m.wid)
+                    self.spaceMoveAttempts.insert(m.wid)
+                    return true
+                }
+                fputs(
+                    "weftd: \(m.app) (\(m.wid)) is not where it fullscreened from — "
+                        + "\(gaveUp ? "cannot" : "will retry to") move it back to \(m.label): \(placed.error ?? "?")\n",
+                    stderr
+                )
+            }
+        }
         for m in pendingMoves {
             moved = attemptRuleMove(
                 wid: m.wid, app: m.app, targetWsID: m.targetWsID, label: m.label
@@ -3400,6 +3539,38 @@ final class Daemon: @unchecked Sendable {
     private var unbindableSince: [WindowID: Date] = [:]
     /// Space-rule move attempts (tried once per window lifetime; SA-gated).
     private var spaceMoveAttempts: Set<WindowID> = []
+    /// Windows whose rule move could not resolve its target label yet.
+    /// Unresolvable labels used to spend the attempt: a rule that named a
+    /// desktop that did not exist at that moment never moved the window again,
+    /// bad label or timing blip alike. These retry for a few sweeps, then the
+    /// attempt is spent and the verdict is final.
+    private var spaceMoveUnknown: [WindowID: (label: String, tries: Int)] = [:]
+    private static let spaceMoveUnknownBudget = 5
+
+    /// Windows the last snapshot held on a native-fullscreen or Split View
+    /// space. The world drops those, so a window disappearing from it means
+    /// "went fullscreen" only when this set says nothing else.
+    private var inFullscreenSpace: Set<WindowID> = []
+
+    /// Open fullscreen memos (`WeftCore/Fullscreen.swift`), per window: where
+    /// it fullscreened from, so leaving fullscreen can put it back there
+    /// instead of letting a rule or a reflow decide. Memo-less fullscreen
+    /// (weft launched while the window was already in it) exits the old way.
+    private var fullscreenMemos: [WindowID: FullscreenMemo] = [:]
+    /// Restore-by-bridge attempts per window, so a macOS that cannot move
+    /// windows cannot be hammered once per sweep by the retry this needs.
+    private var fullscreenMoveTries: [WindowID: Int] = [:]
+
+    /// What a window whose memo says "still not home" needs: one bridged move
+    /// to the workspace it fullscreened from. Mirrors `RuleMove`, whose
+    /// execution path this reuses, with the follow choice the memo makes.
+    private struct FullscreenRestore {
+        let wid: WindowID
+        let app: String
+        let targetWsID: WorkspaceID
+        let label: String
+        let follow: Bool
+    }
     /// Windows already logged as waiting on a classification. The wait is
     /// re-evaluated on every sweep, so without this the log would carry one
     /// line per window per sweep and be useless for exactly the slow, rare

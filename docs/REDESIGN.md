@@ -231,17 +231,27 @@ Extra desktops are allowed and never cause errors. weft pauses on them.
 
 - **Entering:** weft sees `kAXFullScreen` become true on the window, from AX
   observers on `AXResized`/`AXMoved` plus a read of the attribute (public). The
-  window **stays a member** of its workspace, but leaves the layout. The
-  remaining windows re-tile. weft stores a `FullscreenMemo`: its workspace
-  and its place in the tree.
+  remaining windows re-tile. Before the reflow, weft stores a `FullscreenMemo`
+  (`WeftCore/Fullscreen.swift`): the workspace it was a member of and — when it
+  was laid out there — the workspace's whole tiling tree with the window still
+  in it. That tree is the only memory that can put every other window of the
+  workspace back in its exact slot at exit, not only near it.
 - **The fullscreen Space** is "another desktop" to weft, so that display
   pauses. Other displays are not affected.
 - **Never park a fullscreen window.** Switching away from a workspace whose
   member is fullscreen leaves that window in its own Space.
-- **Exiting:** the window returns to the managed desktop. weft puts it back
-  into its old workspace, in its old slot if the tree still has that
-  neighbour, or appends it otherwise. If that workspace is hidden, the exit
-  was the user's own action on that window, so weft shows the workspace.
+- **Exiting:** the window returns to the managed desktop. The exit sweep puts
+  it back into its old workspace, and between exiting and fullscreen macOS
+  files the window there itself; the sweep's space half of any matching rule
+  is suspended while the memo is open, because a rule places a window when it
+  *opens*, not when the user leaves fullscreen. When the workspace's members
+  still match the remembered tree — the common case, since the paused
+  workspace could not be touched — the whole remembered tree replaces the
+  reflowed one, so the arrangement restarts exactly; a member that left or
+  joined keeps the slot the sweep just gave it. If that workspace is hidden,
+  the exit was the user's own action on that window, so weft shows the
+  workspace. The exit to a deleted desktop (display unplugged) drops the
+  memo and leaves macOS's answer standing.
 - **Split View** (two apps in one fullscreen Space) is two fullscreen windows,
   handled by the same rules.
 
@@ -514,16 +524,18 @@ Each phase can ship on its own as the next 0.9.x release.
      the new arrangement leaves free. A float whose saved frame is on no
      display comes to the middle of the display showing it.
    - Native fullscreen: a window that goes fullscreen is remembered with its
-     workspace (`fullscreenMemo`) and goes back into it when it returns; a
-     hidden workspace is shown. Borderless fullscreen — a window covering its
-     display and the showing menu bar — floats until it is window-sized.
+      workspace (`FullscreenMemo`, with the whole tiling tree) and goes back
+      into it, arrangement and all, when it returns; a hidden workspace is
+      shown; the exit sweep keeps any matching rule's space half from
+      carrying it to the app's own desktop. Borderless fullscreen — a window
+      covering its display and the showing menu bar — floats until it is
+      window-sized.
    - `weftctl doctor` reports each display's name, corner, and paused state,
-     macOS's own edge tiling when it is on, and "Displays have separate
-     Spaces" when it is off. `query workspaces` carries names and corners for
-     the Settings canvas.
-   - Not done: returning a fullscreen window to its exact old slot (it is
-     re-inserted like a new window), and measuring corners on real
-     two- and three-display arrangements — still first in "Still to measure".
+      macOS's own edge tiling when it is on, and "Displays have separate
+      Spaces" when it is off. `query workspaces` carries names and corners for
+      the Settings canvas.
+   - Not done: measuring corners on real two- and three-display arrangements
+      — still first in "Still to measure".
 5. **The Workspaces canvas.** The merged pane, drag to pin and reorder, the
    inspector, app rules by drag, live mode, and the warnings in place. It
    needs phase 4's `display =` key and nothing else, so it can be built in

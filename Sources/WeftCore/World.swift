@@ -117,11 +117,23 @@ public struct World: Codable, Sendable, Equatable {
     public var displays: [Display]
     public var spaces: [Space]
     public var windows: [WindowInfo]
+    /// Windows the WindowServer currently holds on a native-fullscreen or
+    /// Split View space. `snapshot()` keeps those out of `windows` (§11 risk
+    /// 6 — leaving them in shifted every ordinal), but a fullscreen window
+    /// that drops out of the world must not look like a closed one, so who
+    /// is in there is reported alongside.
+    public var fullscreen: Set<WindowID>
 
-    public init(displays: [Display], spaces: [Space], windows: [WindowInfo]) {
+    public init(
+        displays: [Display],
+        spaces: [Space],
+        windows: [WindowInfo],
+        fullscreen: Set<WindowID> = []
+    ) {
         self.displays = displays
         self.spaces = spaces
         self.windows = windows
+        self.fullscreen = fullscreen
     }
 }
 

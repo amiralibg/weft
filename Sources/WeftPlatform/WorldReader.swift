@@ -28,13 +28,23 @@ public enum WorldReader {
         // desktop as soon as anything was full-screened.
         let usableSpaces = baseSpaces.filter { !$0.isFullscreen }
         let usableSids = Set(usableSpaces.map { $0.id })
-        let windows = readWindows(cid: cid, includeAXBinding: includeAXBinding)
-            .map { w -> WindowInfo in
-                var copy = w
-                copy.spaces = w.spaces.filter { usableSids.contains($0) }
-                return copy
+        // The other side of the §11 risk 6 filter: a window that dropped out
+        // of `windows` because every space it is on is a native-fullscreen or
+        // Split View one. Noted so a sweep can tell "went fullscreen" from
+        // "closed" without reading anything else.
+        let fullscreenSids = baseSpaces.filter { $0.isFullscreen }.map { $0.id }
+        var fullscreenWindows: Set<WindowID> = []
+        var windows: [WindowInfo] = []
+        for w in readWindows(cid: cid, includeAXBinding: includeAXBinding) {
+            if !fullscreenSids.isEmpty, w.spaces.contains(where: fullscreenSids.contains) {
+                fullscreenWindows.insert(w.id)
             }
-            .filter { !$0.spaces.isEmpty }
+            let usable = w.spaces.filter { usableSids.contains($0) }
+            guard !usable.isEmpty else { continue }
+            var copy = w
+            copy.spaces = usable
+            windows.append(copy)
+        }
         // SLSCopyManagedDisplaySpaces space dicts carry no window list
         // (keys are ManagedSpaceID/id64/type/uuid). Invert window→spaces.
         var bySpace: [SpaceID: [WindowID]] = [:]
@@ -51,7 +61,7 @@ public enum WorldReader {
             copy.spaces = d.spaces.filter { usableSids.contains($0) }
             return copy
         }
-        return World(displays: usableDisplays, spaces: spaces, windows: windows)
+        return World(displays: usableDisplays, spaces: spaces, windows: windows, fullscreen: fullscreenWindows)
     }
 
     // MARK: - Displays + spaces
