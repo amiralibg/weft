@@ -58,6 +58,11 @@ public struct GeneralConfig: Sendable, Equatable {
     /// windows"), so the app the user just opened is in front of them; off
     /// leaves them where they were.
     public var followSpaceRules: Bool
+    /// Where an exiting fullscreen window goes (`FullscreenReturnPolicy`):
+    /// back to the desktop it was a member of — the user's own act, the
+    /// workspace they were on, arrangement restored — or handed to the
+    /// matching `[[rule]] space` half as if the window were opening now.
+    public var fullscreenReturn: FullscreenReturnPolicy
     /// Bundle ids whose `AXEnhancedUserInterface` weft must leave alone.
     ///
     /// Chromium and Electron apps switch that attribute on the moment any
@@ -81,6 +86,7 @@ public struct GeneralConfig: Sendable, Equatable {
         focusFollowsMouse: Bool = false,
         followSpaceRules: Bool = true,
         enhancedUIExempt: [String] = [],
+        fullscreenReturn: FullscreenReturnPolicy = .last,
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
@@ -95,6 +101,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.focusFollowsMouse = focusFollowsMouse
         self.followSpaceRules = followSpaceRules
         self.enhancedUIExempt = enhancedUIExempt
+        self.fullscreenReturn = fullscreenReturn
         self.reserve = reserve
     }
 
@@ -446,6 +453,12 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "follow-space-rules":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.followSpaceRules = b
+            case "fullscreen-return":
+                guard case .string(let s) = v else { throw err(path, "expected last|rule") }
+                guard let policy = FullscreenReturnPolicy(rawValue: s) else {
+                    throw err(path, "expected last|rule")
+                }
+                general.fullscreenReturn = policy
             case "mouse-follows-focus":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.mouseFollowsFocus = b

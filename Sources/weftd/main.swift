@@ -1432,6 +1432,11 @@ final class Daemon: @unchecked Sendable {
                 // the exit animation runs at fullscreen size, and the memo
                 // below decides the space it returns to.
                 let exitingFullscreen = self.fullscreenMemos[w.id] != nil
+                // `fullscreen-return = "rule"` hands even the exit to the
+                // rule: the memo's restore is muted this sweep, and the
+                // window is filed like any first sighting.
+                let ruleOwnsExit = exitingFullscreen
+                    && cfg.general.fullscreenReturn == .rule
                 // Closed but kept: on a showing desktop, not on screen. Not
                 // a tile (`isTileable`), and not unmanaged either — if the
                 // app shows it again, the next sweep gives it a slot.
@@ -1489,8 +1494,10 @@ final class Daemon: @unchecked Sendable {
                     // not the app's assignment. The attempt is not spent
                     // either — the memo settle consumes it when the window is
                     // home, and when the memo dies the rule still gets its one
-                    // move afterwards.
-                    if !exitingFullscreen {
+                    // move afterwards. `fullscreen-return = "rule"` lifts the
+                    // silence: the exit is the rule's assignment to make too,
+                    // and the restore never runs.
+                    if ruleOwnsExit || !exitingFullscreen {
                         switch spaceMoveDecision(
                             outcome: outcome,
                             isStandardWindow: self.standardWindow[w.id],
@@ -1614,21 +1621,28 @@ final class Daemon: @unchecked Sendable {
             // memo, and takes the rule's one space decision with it: the
             // `[[rule]] space` assignment wins when the window opens, not
             // when it leaves fullscreen. A memo whose workspace is gone drops
-            // through to the old behavior.
+            // through to the old behavior. The user's `fullscreen-return =
+            // "rule"` mutes the memo outright — the loop's answer is always
+            // `.forget`, so the rule and the sweep alone place the window.
             for wid in self.fullscreenMemos.keys.sorted() {
                 guard let memo = self.fullscreenMemos[wid] else { continue }
                 switch fullscreenSettle(
                     stillFullscreen: world.fullscreen.contains(wid),
                     memo: memo,
                     state: sp,
-                    of: wid
+                    of: wid,
+                    policy: cfg.general.fullscreenReturn
                 ) {
                 case .fullscreen:
                     continue
                 case .forget:
                     self.fullscreenMemos.removeValue(forKey: wid)
                     self.fullscreenMoveTries.removeValue(forKey: wid)
-                    fputs("weftd: \(wid) left fullscreen but its memo workspace is gone — left where it is\n", stderr)
+                    if cfg.general.fullscreenReturn == .rule {
+                        fputs("weftd: \(wid) left fullscreen under fullscreen-return = \"rule\" — placed like a fresh window\n", stderr)
+                    } else {
+                        fputs("weftd: \(wid) left fullscreen but its memo workspace is gone — left where it is\n", stderr)
+                    }
                 case .home(let tree):
                     // The workspace is back to being theirs. The remembered
                     // subtree replaces the reflowed one wholesale — the

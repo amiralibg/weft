@@ -336,6 +336,18 @@ import Testing
     }
 }
 
+/// A fullscreen exit goes home unless the user handed it to the rule
+/// (NATIVE.md, "Fullscreen"): the sweep restores the desktop the window was
+/// a member of, by default.
+@Test func fullscreenReturnIsLastUnlessAskedForTheRule() throws {
+    #expect(try loadConfig("").general.fullscreenReturn == .last)
+    #expect(try loadConfig("[general]\nfullscreen-return = \"rule\"").general.fullscreenReturn == .rule)
+    #expect(try loadConfig("[general]\nfullscreen-return = \"last\"").general.fullscreenReturn == .last)
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nfullscreen-return = \"home\"")
+    }
+}
+
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
 /// a fully transparent inactive colour rather than silently ignored.
 @Test func hidingInactiveBordersMakesThemTransparent() throws {

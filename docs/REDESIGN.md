@@ -251,7 +251,9 @@ Extra desktops are allowed and never cause errors. weft pauses on them.
   joined keeps the slot the sweep just gave it. If that workspace is hidden,
   the exit was the user's own action on that window, so weft shows the
   workspace. The exit to a deleted desktop (display unplugged) drops the
-  memo and leaves macOS's answer standing.
+  memo and leaves macOS's answer standing. The `fullscreen-return = "rule"`
+  setting hands even the exit to the rule: the memo is dropped and the
+  window is filed like any window a rule has just met.
 - **Split View** (two apps in one fullscreen Space) is two fullscreen windows,
   handled by the same rules.
 

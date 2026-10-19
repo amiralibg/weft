@@ -113,6 +113,10 @@ final class ConfigStore: ObservableObject {
     /// Whether a rule's `space = "…"` also switches to that workspace. The
     /// window is placed either way; this is only whether the screen follows.
     @Published var followSpaceRules = true
+    /// Where an exiting fullscreen window goes: back to the space it was a
+    /// member of ("last"), or handed to the rule that would place it on
+    /// first sight ("rule").
+    @Published var fullscreenReturn = "last"
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
 
@@ -220,6 +224,7 @@ final class ConfigStore: ObservableObject {
         mouseFollowsFocus = g?.bool("mouse-follows-focus") ?? true
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
         followSpaceRules = g?.bool("follow-space-rules") ?? true
+        fullscreenReturn = g?.string("fullscreen-return") ?? "last"
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
     }
@@ -419,6 +424,7 @@ final class ConfigStore: ObservableObject {
         s.remove("workspaces")
         s.remove("workspace-anchor")
         s.set("follow-space-rules", bool: followSpaceRules, default: true)
+        s.set("fullscreen-return", string: fullscreenReturn, default: "last")
         s.set("manage-menubar-apps", bool: manageMenubarApps, default: false)
         s.set("check-for-updates", bool: checkForUpdates, default: true)
         s.setRaw("reserve", TomlValue.sidesLiteral(
@@ -608,6 +614,11 @@ final class ConfigStore: ObservableObject {
 
     func setFollowSpaceRules(_ on: Bool) {
         followSpaceRules = on
+        markDirty()
+    }
+
+    func setFullscreenReturn(_ value: String) {
+        fullscreenReturn = value
         markDirty()
     }
 

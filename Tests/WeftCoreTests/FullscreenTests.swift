@@ -103,3 +103,19 @@ private func tiled(_ s: inout SpaceState, _ wsid: WorkspaceID, _ wids: [WindowID
     #expect(s.workspaces[wsid] == nil)
     #expect(fullscreenSettle(stillFullscreen: false, memo: memo, state: s, of: 10) == .forget)
 }
+
+@Test func rulePolicyDropsTheMemoWheresVisibleItWas() {
+    var s = SpaceState()
+    s.adoptDisplays([DisplayDesktops(uuid: "A", desktops: [7, 8], current: 7)], names: ["a", "b"])
+    let wsid = s.wsOrder[1]
+    tiled(&s, wsid, [10])
+    let memo = fullscreenMemo(s, of: 10)!
+    // The user chose the rule: the exit is the rule's desktop decision to
+    // make, so the memo never gets to decide — even when everything looks
+    // exactly like the restore-ready case above.
+    s.file(10, in: s.wsOrder[0], laidOut: false)
+    #expect(fullscreenSettle(
+        stillFullscreen: false, memo: memo, state: s, of: 10, policy: .rule) == .forget)
+    #expect(fullscreenSettle(
+        stillFullscreen: false, memo: memo, state: s, of: 10, policy: .last) != .forget)
+}

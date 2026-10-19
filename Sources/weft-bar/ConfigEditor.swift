@@ -1489,12 +1489,22 @@ private struct AdvancedPane: View {
                     get: { store.followSpaceRules },
                     set: { store.setFollowSpaceRules($0) }
                 ))
+                Picker("When a fullscreen window exits", selection: Binding(
+                    get: { store.fullscreenReturn },
+                    set: { store.setFullscreenReturn($0) }
+                )) {
+                    Text("go back to where it was").tag("last")
+                    Text("place it like a new window").tag("rule")
+                }
             } header: {
                 Text("Rules")
             } footer: {
                 Text("A rule with a desktop always places the window there — it is instant and "
                     + "invisible. This only decides whether the screen follows it, so the app you "
-                    + "just opened is in front of you. Turn it off to stay where you are.")
+                    + "just opened is in front of you. Turn it off to stay where you were.\n\n"
+                    + "Leaving fullscreen normally returns the window to the desktop it fullscreened "
+                    + "from, arrangement restored. Choose the rule when a rule's \"go to this "
+                    + "desktop\" should win instead — the exit gets filed like any window just seen.")
             }
 
             Section("JankyBorders") {

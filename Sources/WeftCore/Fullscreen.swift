@@ -15,6 +15,17 @@
 //   workspace again. When that workspace is hidden, the exit brought the
 //   user there, so the plan says to show it.
 
+/// What a fullscreen exit belongs to. A `[[rule]] space` assignment says
+/// where a window goes when it *opens*; a fullscreen exit is the user's own
+/// act on a window they already have, and the exit sweep restores the memo
+/// instead. That is the default (`last`). `rule` hands the exit to the rule:
+/// the same window that exits fullscreen now goes to its assigned desktop on
+/// first sight, as the exit sweep's space half would for any new window.
+public enum FullscreenReturnPolicy: String, Sendable, Equatable {
+    case last
+    case rule
+}
+
 /// Where a window was before it went native fullscreen. Daemon state; this
 /// type only carries it between the sweep and the decision.
 public struct FullscreenMemo: Sendable, Equatable {
@@ -39,9 +50,10 @@ public enum FullscreenSettle: Sendable, Equatable {
     /// Still on a fullscreen space: nothing yet, the memo keeps.
     case fullscreen
     /// The memo's workspace is gone (its desktop was deleted, its display
-    /// unplugged while it was fullscreen): the memo drops and the sweep
-    /// treats the window like any first sighting — a rule still owes it its
-    /// one move.
+    /// unplugged while it was fullscreen) — or the user chose `rule` as the
+    /// fullscreen-return policy, which is not the memo's exit to decide.
+    /// Either way the memo drops and the sweep treats the window like any
+    /// first sighting — a rule still owes it its one move.
     case forget
     /// The window is a member of its old workspace again. The tree, when
     /// carried, didn't change its members while the window was away, so the
@@ -67,15 +79,20 @@ public func fullscreenMemo(_ state: SpaceState, of wid: WindowID) -> FullscreenM
 }
 
 /// The settle for a window with an open memo, against `state` as this sweep
-/// left it (the membership sync has already run).
+/// left it (the membership sync has already run). `policy` is the user's
+/// fullscreen-return setting: `.rule` drops the memo outright — the exit is
+/// not the memo's to decide, and the sweep files the window like any first
+/// sighting, a matching rule owing it its one move.
 public func fullscreenSettle(
     stillFullscreen: Bool,
     memo: FullscreenMemo,
     state: SpaceState,
-    of wid: WindowID
+    of wid: WindowID,
+    policy: FullscreenReturnPolicy = .last
 ) -> FullscreenSettle {
     if stillFullscreen { return .fullscreen }
     guard let ws = state.workspaces[memo.workspace] else { return .forget }
+    if policy == .rule { return .forget }
     if !ws.contains(wid) {
         return .move(follow: state.showingDisplay(of: memo.workspace) == nil)
     }
