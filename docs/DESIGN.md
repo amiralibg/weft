@@ -2220,3 +2220,61 @@ off screen, so weft always sets it (S12); and a desktop holds windows that are
 never on screen (a menu-bar app's popover), so a switch's window check counts
 only windows weft manages, and runs just after the read-back rather than on the
 keystroke's path.
+
+---
+
+## 30. `move <dir>` into another tile joins it instead of lifting — 2026-10-19
+
+The climb from §25 answered "nowhere to trade inside my own container" by
+hoisting the window out of the subtree it lives in and standing it beside that
+subtree, wherever in the tree the axis matched. For the layout people actually
+run — `[1, [2, 3]]`, one wide window and a two-pane column — that turned one
+step into a redesign:
+
+```
+  +-------+-------+            +-------+-------+
+  |       |   2   |            |   2   |       |      moving 2 west
+  |   1   +-------+   ====>    +-------+   3   |      lifted it out
+  |       |   3   |            |   1   |       |      as a third column
+  +-------+-------+            +-------+-------+
+```
+
+A user saw it plainly: the right-hand window, `move west`, and instead of
+joining the window on the left it became a third side-by-side column — the
+left half it was told to go into had never been touched. The lift answers "one
+step at the level whose axis matches", but the *tile* it lands beside is a
+thing the user can see and it had a window in it; a step is about position and
+position is what the tree stores. i3 and AeroSpace both read it as "insert
+into that tile", and §25 already quoted yabai's `--warp` as the model — this is
+what `--warp` does.
+
+`Tree.moving(_:towards:frames:)` now takes the layout frames of the tree the
+move starts from. The trade reading is unchanged and is decided first — the
+immediate container running along the direction's axis with a sibling that way
+trades, ratios carried, so `{ move }` down a row is still nobody-resized. The
+stack walk-out is unchanged. What replaced the lift is **joining**: the
+geometric neighbour (`neighbour(of:in:towards:)`, the same one `focus` and
+`swap` use) is the tile to join; the window is removed, and `movingInto`
+re-inserts it onto that neighbour's leaf, split by the aspect rule arrival
+uses (`slot.width >= slot.height ? .splitV : .splitH`), landing west/north
+*before* the joined tile and east/south after it. Two windows that are already
+axially adjacent are always a trade — they would exchange anyway — so joining
+never fires with a tile the window already shares a split with, and a move
+into an edge with no tile past it is still a nil, still a keybind-chain
+fallback.
+
+The frames are the one new input and the one thing that makes the change
+correct: the neighbour is found in the layout the user is looking at, not in
+tree adjacency. It also carries an invariant the insert relies on — removing a
+window hands its share to siblings east/south of the containers it lived in,
+and a join target is never one of those siblings (it is strictly west/north of
+the removed window, perpendicular-overlapping, past a shared boundary), so the
+captured slot frame is still the one the pair splits. In manual-insertion
+mode the join appends flat beside the leaf instead, matching what arrival
+`inserting` does there, and the west/north re-order is the same trade either
+way.
+
+`Tests/WeftCoreTests/MoveTests.swift` lost the lift test and gained the two
+it points at: window 2 joining 1's left half with the third column untouched,
+and the reported case — bottom-right window west — landing above 1 with the
+east column frame for frame what it was.

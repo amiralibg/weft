@@ -694,72 +694,147 @@ extension Tree {
         return tree.focusing(focused)
     }
 
-    /// Move a window one step in a direction, restructuring the tree — i3's
-    /// `move`, AeroSpace's `move`, yabai's `window --warp`.
+    /// Move a window one step in a direction — i3's `move`, AeroSpace's
+    /// `move` (the 0.6+ what-you-see-is-what-moves one), yabai's
+    /// `window --warp`.
     ///
-    /// This is what `move <dir>` means, and it is **not** a swap of two
-    /// windows. Swapping leaves is right only when both windows own equivalent
-    /// slots, and in a bsp tree they usually do not. Given
+    /// A step is about position, and position is what the tree exists for:
+    /// the tile a window owns. What changes is what the tile holds, not how
+    /// many tiles the screen has — putting a third full-height column beside a
+    /// two-pane layout redesigned it instead of moving a window. Two readings,
+    /// decided by the tree the window is in:
     ///
     /// ```
-    ///   +-------+-------+        splitV[A, splitH[B, C]]
-    ///   |       |   B   |
-    ///   |   A   +-------+        A owns half the screen;
-    ///   |       |   C   |        B owns a quarter.
+    ///   +-------+-------+       Within one split — the row pair at top,
+    ///   |       |   B   |       the column pair at right — a step is a
+    ///   |   A   +-------+       trade: the window takes the neighbour
+    ///   |       |   C   |       slot's whole frame, sizes carried over,
+    ///   +-------+-------+       because the two already own equivalent
+    ///                           space. A told east ends `splitH[B, C] | A`.
+    ///
+    ///   A step into *another* tile joins it. B told west shares A's
+    ///   tall left half — B above A — and the right column is untouched:
+    ///   no third full-height column appeared under a one-step command.
+    ///   +-------+-------+
+    ///   |   B   |       |
+    ///   +-------+   A   |
+    ///   |   A   |       |
     ///   +-------+-------+
     /// ```
     ///
-    /// `move east` on A used to swap the leaves A and B, so A came back as a
-    /// quarter in the top right and B grew to half the screen. The window
-    /// obeyed the direction and changed size doing it, which is the part that
-    /// reads as a bug. Exchanging at the level where the axis matches — A with
-    /// the *whole* B/C subtree — gives `splitH[B, C] | A`: A is on the right,
-    /// still half the screen.
+    /// The rule, in full:
     ///
-    /// The rule, in full. Walk up from the window looking for the nearest
-    /// ancestor that both runs along `dir`'s axis and has somewhere to go in
-    /// that direction:
+    /// - The window's **immediate container running along `dir`'s axis with a
+    ///   sibling that way** — trade places with the sibling, ratios included,
+    ///   so both windows keep their size. A step down a row means "one row
+    ///   down", not "one window to the lower row's place".
+    /// - **A stack** runs along no axis, so a stacked window walks straight
+    ///   out of the stack one press at a time — the one place the climb below
+    ///   is still needed. `stack move <dir>` is the verb for putting one in.
+    /// - Otherwise the window **joins the nearest tile in `dir`**, split by
+    ///   the aspect rule arrival `inserting(_:in:config:)` uses, and it lands
+    ///   on the edge it moved towards — west/north taking the first slot of
+    ///   the shared tile, east/south the second. The frames of the tree the
+    ///   move starts from come in with the call, because the nearest tile is
+    ///   found in the layout, not in the structure.
+    /// - **No tile that way** — the window is already against that edge, or
+    ///   it is the only window — does nothing, deliberately. yabai fails here
+    ///   too, and that failure is what lets `{ move east } || { … }` in a
+    ///   keybind fall through instead of quietly rearranging something.
     ///
-    /// - **A direct child of that ancestor** exchanges places with its
-    ///   neighbour there, ratios included, so both windows keep their size.
-    /// - **Nested deeper** is lifted out of the subtree it is in and dropped
-    ///   beside it at that level: B in the picture above, moved west, leaves
-    ///   the B/C column and lands between A and C — three columns. That is one
-    ///   step west, which is what was asked for.
-    /// - **A stack** matches no axis, so a stacked window walks straight out of
-    ///   the stack. `stack move <dir>` is the verb for putting one in.
-    /// - **No such ancestor** — the window is already against that edge of the
-    ///   tree — does nothing, deliberately. yabai fails here too, and it is
-    ///   what lets `{ move east } || { … }` in a keybind fall through instead
-    ///   of quietly rearranging something.
-    ///
-    /// `swapping(_:_:)` is still there, behind `swap <dir>`, for anyone who
-    /// wants the literal exchange.
-    public func moving(_ id: WindowID, towards dir: Direction) -> Tree {
+    /// `swapping(_:_:)` is still there, behind `swap <dir>`, for trading
+    /// frames across a tile boundary — the literal exchange.
+    public func moving(_ id: WindowID, towards dir: Direction, frames: [WindowID: Frame]) -> Tree {
         guard let root, root.windows.contains(id), fullscreen == nil else { return self }
         guard let path = pathTo(root, target: id), !path.isEmpty else { return self }
         let axis: ContainerLayout = (dir == .west || dir == .east) ? .splitV : .splitH
         let forward = (dir == .east || dir == .south)
 
-        // Deepest first: the nearest ancestor that can take the step is the
-        // one that makes it a *step* rather than a leap across the layout.
-        for depth in stride(from: path.count - 1, through: 0, by: -1) {
-            guard case .container(let parent)? = nodeAt(root, path: Array(path.prefix(depth))),
-                  parent.layout == axis
-            else { continue }
-            let idx = path[depth]
+        // The immediate container decides. Split along `dir`'s axis with a
+        // sibling that way: trade — the two windows already own equivalent
+        // space, so "one step" means trading slots, sizes carried over.
+        if case .container(let parent)? = nodeAt(root, path: Array(path.dropLast())),
+           parent.layout == axis
+        {
+            let idx = path.last!
             let target = idx + (forward ? 1 : -1)
-            // Off the end of this container: the window is against its edge,
-            // so keep climbing. That climb is exactly what "move out of the
-            // container you are in" means.
-            guard parent.children.indices.contains(target) else { continue }
-            if depth == path.count - 1 {
-                return exchanging(at: Array(path.prefix(depth)), idx, target).focusing(id)
+            if parent.children.indices.contains(target) {
+                return exchanging(at: Array(path.dropLast()), idx, target).focusing(id)
             }
-            return lifting(id, toLevel: Array(path.prefix(depth)), beside: idx, forward: forward)
-                .focusing(id)
         }
-        return self
+
+        // No split that way beside the window. A stack member still walks out
+        // FIRST — its container runs along no axis, so the climb below is the
+        // only way out; a tile to join would strand one stackmate inside
+        // another window's tile, which `stack move <dir>` alone does.
+        if case .container(let parent)? = nodeAt(root, path: Array(path.dropLast())),
+           parent.layout == .stack
+        {
+            // Deepest first: the nearest ancestor that can take the step is
+            // the one that makes it a *step* rather than a leap across the
+            // layout. Off the end of a container: keep climbing — that climb
+            // is exactly what "move out of the container you are in" means.
+            for depth in stride(from: path.count - 1, through: 0, by: -1) {
+                guard case .container(let anc)? = nodeAt(root, path: Array(path.prefix(depth))),
+                      anc.layout == axis
+                else { continue }
+                let idx = path[depth]
+                let target = idx + (forward ? 1 : -1)
+                guard anc.children.indices.contains(target) else { continue }
+                if depth == path.count - 1 {
+                    return exchanging(at: Array(path.prefix(depth)), idx, target).focusing(id)
+                }
+                return lifting(id, toLevel: Array(path.prefix(depth)), beside: idx, forward: forward)
+                    .focusing(id)
+            }
+            return self
+        }
+
+        // Between tiles: the tile nearest in `dir`, and join it. The captured
+        // slot survives the removal below — the removed window's share is
+        // handed to siblings east/south of the containers it lived in, and a
+        // join target is never one of those siblings, so its frame does not
+        // move under it.
+        guard let target = Reducer.neighbour(of: id, in: frames, towards: dir),
+              let slot = frames[target]
+        else { return self }
+        return movingInto(id, onto: target, slot: slot, towards: dir)
+    }
+
+    /// Join a tile: `id` leaves its slot and takes the one beside `target`,
+    /// the pair splitting `target`'s frame. `slot` is `target`'s frame in the
+    /// layout the move starts from — stable under the removal, which only
+    /// redistributes area to the east/south of the removed window.
+    private func movingInto(
+        _ id: WindowID, onto target: WindowID, slot: Frame, towards dir: Direction
+    ) -> Tree {
+        guard let root, root.windows.contains(id), id != target, root.windows.contains(target)
+        else { return self }
+        var copy = removing(id)
+        guard let pruned = copy.root, pruned.windows.contains(target) else { return self }
+        switch insertion {
+        case .bsp:
+            // The aspect rule arrival `inserting(_:in:config:)` uses: a wider
+            // than tall slot goes side-by-side, a taller one top/bottom —
+            // whatever leaves both panes usable. A tie (square slot) goes
+            // side-by-side: displays are wide, that is where the room is.
+            let split: ContainerLayout = slot.width >= slot.height ? .splitV : .splitH
+            copy.root = insertBSP(pruned, target: target, newID: id, split: split)
+        case .manual:
+            // A manual tree stays flat: the newcomer goes beside the leaf it
+            // joins with equal shares, matching what arrival does there.
+            copy.root = insertManual(pruned, target: target, newID: id)
+        }
+        // Both insertions put the newcomer *after* the tile it joined. Moving
+        // west or north, the window takes the edge it moved towards instead:
+        // the pair trade, which for the fresh two-child container this always
+        // is (or the flat run a manual insert went into) exchanges the two.
+        if dir == .west || dir == .north,
+           let path = pathTo(copy.root!, target: id), let idx = path.last, idx > 0
+        {
+            copy = copy.exchanging(at: Array(path.dropLast()), idx - 1, idx)
+        }
+        return copy.focusing(id)
     }
 
     /// Trade two children of one container, carrying their ratios with them —

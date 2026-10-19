@@ -2,14 +2,23 @@ import Testing
 
 @testable import WeftCore
 
-/// `move <dir>` — the structural step, i3's `move` and yabai's `window --warp`.
+/// `move <dir>` — i3's `move` and yabai's `window --warp`.
 ///
-/// The property every case here is really checking is that a window which
-/// moves does not also change size for no reason. Swapping leaves, which is
-/// what this replaced, could not hold that: a half-screen window told to go
-/// east came back as a quarter because the window it landed on owned a
-/// quarter.
+/// The verb has two readings, decided by the tree. A step within one split is
+/// a trade: nobody is resized, which is the property these tests were built
+/// around after leaf-swapping broke it. A step into another tile joins it as
+/// its second pane, which is what replaced lifting the window out into a
+/// third full-height column — a shuffle that redesigned the whole layout
+/// under a command that was asked to move one window.
+
 private let moveScreen = Frame(x: 0, y: 0, width: 1000, height: 800)
+
+/// `tree.moving(id, towards: dir, frames:)` with the frames of `tree` itself.
+/// That is what the reducer passes in: the tile a move joins is found in the
+/// layout the move starts from.
+private func step(_ tree: Tree, _ id: WindowID, _ dir: Direction) -> Tree {
+    tree.moving(id, towards: dir, frames: layout(tree, in: moveScreen, config: .none))
+}
 
 /// `splitV[A, splitH[B, C]]` — A owns the left half, B and C a quarter each.
 ///
@@ -37,7 +46,7 @@ private func twoOverOne() -> Tree {
     // The whole reason this exists. A half-screen window sent east is a
     // half-screen window on the right — not a quarter in the top corner,
     // which is what swapping it with window 2 produced.
-    let moved = twoOverOne().focusing(1).moving(1, towards: .east)
+    let moved = step(twoOverOne().focusing(1), 1, .east)
     let f = layout(moved, in: moveScreen, config: .none)
     #expect(f[1] == Frame(x: 500, y: 0, width: 500, height: 800))
     #expect(f[2] == Frame(x: 0, y: 0, width: 500, height: 400))
@@ -53,23 +62,37 @@ private func twoOverOne() -> Tree {
     #expect(f[1] == Frame(x: 500, y: 0, width: 500, height: 400))
 }
 
-@Test func aNestedWindowIsLiftedOutOfItsColumn() {
-    // Window 2 is in the right-hand column with 3. West is one step west —
-    // out of the column and into the row, which is three columns.
-    let moved = twoOverOne().focusing(2).moving(2, towards: .west)
+@Test func aNestedWindowJoinsTheNeighbourTile() {
+    // Window 2 is in the right-hand column with 3. One step west is not a
+    // lift — that read as a rearrangement, a third full-height column beside
+    // a two-pane layout. It shares 1's tall left half instead, and the right
+    // column keeps every point of its frame.
+    let moved = step(twoOverOne().focusing(2), 2, .west)
     #expect(moved.windows.sorted() == [1, 2, 3])
     let f = layout(moved, in: moveScreen, config: .none)
-    // Left to right: 1, 2, 3 — and it landed *between* them, not at the far end.
-    #expect(f[1]!.x < f[2]!.x)
-    #expect(f[2]!.x < f[3]!.x)
-    // Full height: it is no longer sharing a column with anything.
-    #expect(f[2]!.height == 800)
+    // The left half is 2 above 1: a square-ish pair, split by the aspect
+    // rule, and 2 took the edge it moved towards.
+    #expect(f[2] == Frame(x: 0, y: 0, width: 500, height: 400))
+    #expect(f[1] == Frame(x: 0, y: 400, width: 500, height: 400))
+    #expect(f[3] == Frame(x: 500, y: 0, width: 500, height: 800))
+}
+
+@Test func aBottomRightWindowJoinsTheWestTileAboveIt() {
+    // The reported shuffle, exactly: the bottom-right window, `move west`,
+    // and it lifted out until it was a third side-by-side column.
+    let moved = step(twoOverOne().focusing(3), 3, .west)
+    let f = layout(moved, in: moveScreen, config: .none)
+    // The west tile is shared, window 3 on top (it moved towards that edge),
+    // the east column untouched.
+    #expect(f[3] == Frame(x: 0, y: 0, width: 500, height: 400))
+    #expect(f[1] == Frame(x: 0, y: 400, width: 500, height: 400))
+    #expect(f[2] == Frame(x: 500, y: 0, width: 500, height: 800))
 }
 
 @Test func movingInsideAColumnStaysInTheColumn() {
     // South, within the right-hand column: 2 and 3 trade rows and nothing
     // else about the layout changes.
-    let moved = twoOverOne().focusing(2).moving(2, towards: .south)
+    let moved = step(twoOverOne().focusing(2), 2, .south)
     let f = layout(moved, in: moveScreen, config: .none)
     #expect(f[1] == Frame(x: 0, y: 0, width: 500, height: 800))
     #expect(f[3] == Frame(x: 500, y: 0, width: 500, height: 400))
@@ -80,13 +103,13 @@ private func twoOverOne() -> Tree {
     // Nothing is east of window 2, and this is where yabai fails too — which
     // is what lets `{ move east } || { … }` in a keybind fall through.
     let tree = twoOverOne().focusing(2)
-    #expect(tree.moving(2, towards: .east) == tree)
-    #expect(tree.moving(2, towards: .north) == tree)
+    #expect(step(tree, 2, .east) == tree)
+    #expect(step(tree, 2, .north) == tree)
     // And the lone-window case, in every direction.
     var single = Tree()
     single = single.inserting(9, in: moveScreen, config: .none).focusing(9)
     for dir in [Direction.west, .east, .north, .south] {
-        #expect(single.moving(9, towards: dir) == single)
+        #expect(step(single, 9, dir) == single)
     }
 }
 
@@ -107,7 +130,7 @@ private func twoOverOne() -> Tree {
     #expect(near(before[1]!.width, 700))
     #expect(near(before[2]!.width, 300))
 
-    let after = layout(tree.focusing(1).moving(1, towards: .east), in: moveScreen, config: .none)
+    let after = layout(step(tree.focusing(1), 1, .east), in: moveScreen, config: .none)
     #expect(near(after[1]!.width, 700))
     #expect(near(after[2]!.width, 300))
     #expect(near(after[2]!.x, 0))
@@ -122,7 +145,7 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
     var tree = twoOverOne().focusing(2)
     tree = tree.togglingStack()
     #expect(hiddenStackMembers(in: tree).count == 1)
-    let moved = tree.moving(2, towards: .west)
+    let moved = step(tree, 2, .west)
     #expect(moved.windows.sorted() == [1, 2, 3])
     // Out: nothing is hidden behind anything any more.
     #expect(hiddenStackMembers(in: moved).isEmpty)
@@ -132,9 +155,9 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
 @Test func theMovedWindowKeepsFocus() {
     // It is the window the user is thinking about; focus following it is what
     // makes a second press move it again rather than move something else.
-    let moved = twoOverOne().focusing(1).moving(1, towards: .east)
+    let moved = step(twoOverOne().focusing(1), 1, .east)
     #expect(moved.focus == 1)
-    let twice = moved.moving(1, towards: .west)
+    let twice = step(moved, 1, .west)
     #expect(twice.focus == 1)
 }
 
@@ -146,7 +169,7 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
     for id in [1, 2, 3, 4] as [WindowID] { tree = tree.inserting(id, in: moveScreen, config: .none) }
     for start in [1, 2, 3, 4] as [WindowID] {
         for dir in [Direction.west, .east, .north, .south] {
-            let moved = tree.focusing(start).moving(start, towards: dir)
+            let moved = step(tree.focusing(start), start, dir)
             #expect(moved.windows.sorted() == [1, 2, 3, 4], "\(start) \(dir)")
             #expect(Set(moved.windows).count == 4, "\(start) \(dir) duplicated a window")
             // Every window still gets exactly one frame, and none is degenerate.
@@ -163,8 +186,8 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
     // user exercises constantly by tapping a key twice.
     let flat = Tree(root: .container(Container(
         layout: .splitV, children: [.window(1), .window(2), .window(3)])), focus: 2)
-    #expect(flat.moving(2, towards: .east).moving(2, towards: .west) == flat)
-    #expect(flat.moving(2, towards: .west).moving(2, towards: .east) == flat)
+    #expect(step(step(flat, 2, .east), 2, .west) == flat)
+    #expect(step(step(flat, 2, .west), 2, .east) == flat)
 }
 
 @Test func fullscreenIsLeftAlone() {
@@ -173,7 +196,7 @@ private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.1 }
     // whoever un-zooms it.
     let tree = twoOverOne().focusing(1).togglingFullscreen()
     #expect(tree.fullscreen == 1)
-    #expect(tree.moving(1, towards: .east) == tree)
+    #expect(step(tree, 1, .east) == tree)
 }
 
 @Test func resizingMovesTheBorderNextToTheWindowByThatManyPoints() {
