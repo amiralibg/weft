@@ -2993,6 +2993,11 @@ final class Daemon: @unchecked Sendable {
         // Set when focus moved to another display: an empty desktop there
         // still gets the pointer, so the next click agrees.
         var movedToDisplay: String?
+        // Whether this plan moved windows, and the desktops it re-laid out:
+        // their frames get one trailing re-apply (`scheduleMoveSettle`), for
+        // the size write an app drops while it is still changing spaces.
+        var movedWindows = false
+        var retiledSids: [SpaceID] = []
         for effect in plan {
             switch effect {
             case .refuse(let why):
@@ -3020,7 +3025,9 @@ final class Daemon: @unchecked Sendable {
                 movedToDisplay = display
             case .move(let wids, let to):
                 if let failure = moveWindows(wids, to: to) { return failure }
+                movedWindows = true
             case .retile(let sid):
+                retiledSids.append(sid)
                 applySpaceLayout(sid, raiseFocus: false)
             case .focus(let wid):
                 if let wid, let pid = pid(of: wid) {
@@ -3043,6 +3050,16 @@ final class Daemon: @unchecked Sendable {
                     focusNothing()
                 }
             }
+        }
+        // The trailing re-apply is not just for a _display_ change. A window
+        // changing spaces on the SAME display drops the size write just as
+        // often — the space-change animation runs the same way — and this
+        // plan's two `.retile` effects wrote while it ran. Without this, the
+        // window sat at its old size, stuck halfway into whatever slot the
+        // target had; the user's only fix was a float toggle, whose fresh
+        // writes happened to say exactly what these would have.
+        if movedWindows, !retiledSids.isEmpty {
+            scheduleMoveSettle(retiledSids)
         }
         scheduleLayoutSave()
         bus.emit(stateChangedEvent())
@@ -3223,15 +3240,17 @@ final class Daemon: @unchecked Sendable {
         focusSinkLock.withLock { focusSinkLocked == wid }
     }
 
-    /// Re-apply once the apps have finished moving between displays.
+    /// Re-apply once the apps have finished moving between desktops or
+    /// displays.
     ///
     /// A frame written while an app is mid-transition is the one it is most
     /// likely to drop — position usually sticks and size does not, so a window
-    /// arrives on the other monitor at its old size. Moving a window between
-    /// displays produces no event that would bring a sweep, so nothing else
-    /// would correct it. One trailing pass, cancelled by the next move.
-    /// Scheduled from the sync queue, the only queue that touches the
-    /// pending-work items.
+    /// arrives on the other monitor at its old size, or on the other desktop
+    /// stuck halfway into its slot. Moving a window between desktops produces
+    /// no event that would bring a sweep, so nothing else would correct it.
+    /// One trailing pass over the desktops the move touched, cancelled by the
+    /// next move. Scheduled from the sync queue, the only queue that touches
+    /// the pending-work items.
     private func scheduleMoveSettle(_ sids: [SpaceID]) {
         syncQueue.async { [weak self] in
             guard let self else { return }
