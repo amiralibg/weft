@@ -117,6 +117,10 @@ final class ConfigStore: ObservableObject {
     /// member of ("last"), or handed to the rule that would place it on
     /// first sight ("rule").
     @Published var fullscreenReturn = "last"
+    /// Whether placed windows glide into their slots (read-only display of
+    /// `placement-animation` — the pixels need Screen Recording, so off or
+    /// permissionless is the same instant move the user would see).
+    @Published var placementAnimation = true
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
 
@@ -225,6 +229,7 @@ final class ConfigStore: ObservableObject {
         focusFollowsMouse = g?.bool("focus-follows-mouse") ?? false
         followSpaceRules = g?.bool("follow-space-rules") ?? true
         fullscreenReturn = g?.string("fullscreen-return") ?? "last"
+        placementAnimation = g?.bool("placement-animation") ?? true
         manageMenubarApps = g?.bool("manage-menubar-apps") ?? false
         checkForUpdates = g?.bool("check-for-updates") ?? true
     }
@@ -425,6 +430,7 @@ final class ConfigStore: ObservableObject {
         s.remove("workspace-anchor")
         s.set("follow-space-rules", bool: followSpaceRules, default: true)
         s.set("fullscreen-return", string: fullscreenReturn, default: "last")
+        s.set("placement-animation", bool: placementAnimation, default: true)
         s.set("manage-menubar-apps", bool: manageMenubarApps, default: false)
         s.set("check-for-updates", bool: checkForUpdates, default: true)
         s.setRaw("reserve", TomlValue.sidesLiteral(

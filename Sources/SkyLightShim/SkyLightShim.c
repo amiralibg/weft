@@ -39,6 +39,10 @@
     X(SLSTransactionOrderWindow)                 \
     X(SLSNewWindow)                              \
     X(SLSReleaseWindow)                          \
+    X(SLSGetWindowLevel)                         \
+    X(SLSSetWindowLevel)                         \
+    X(SLSSetWindowAlpha)                         \
+    X(SLWindowContextCreate)                     \
     X(CGSNewRegionWithRectList)                  \
     X(CGSReleaseRegion)                          \
     X(_AXUIElementGetWindow)
@@ -131,6 +135,35 @@ static void weft_resolve_once(void) {
 static pthread_once_t weft_resolved = PTHREAD_ONCE_INIT;
 
 static void weft_resolve(void) { pthread_once(&weft_resolved, weft_resolve_once); }
+
+// MARK: - Window capture
+//
+// `CGWindowListCreateImage` is obsoleted from the macOS 15.0 SDK headers —
+// 27.0 here — so its prototype cannot be referenced, C or Swift, without
+// clang refusing it. It is not gone: CoreGraphics still exports the symbol
+// (dlsym-probed on 26.6), which is how capture-animating tiling managers
+// keep working. The call therefore goes through a function-typed name
+// lookup, so no unavailable prototype is ever referenced and this shim
+// compiles. Screen Recording grants or withholds its pixels; nothing here
+// checks, because the caller does (and because the symbol's absence is the
+// animator's "no glide" answer all on its own).
+//
+// The modern capture, SCScreenshotManager, needs a shareable-content
+// enumeration per window — a round trip per animation burst. This is the
+// cheap path; ScreenCaptureKit can replace it wholesale later.
+
+CGImageRef weft_window_capture(
+    CGRect bounds, CGWindowListOption option, CGWindowID wid, CGWindowImageOption imageOption
+) {
+    typedef CGImageRef (*Capture)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
+    static Capture once = NULL;
+    static volatile int settled = 0;
+    if (!settled) {
+        once = (Capture)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
+        settled = 1;
+    }
+    return once ? once(bounds, option, wid, imageOption) : NULL;
+}
 
 // Before main, so no call site ever sees an unfilled pointer and none of them
 // has to ask. Initialisers run dependencies first, so the frameworks this

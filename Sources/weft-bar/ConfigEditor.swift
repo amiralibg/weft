@@ -1339,6 +1339,10 @@ private struct AdvancedPane: View {
                     Text("Tile windows of menu-bar apps")
                     Text("Usually their dropdown panels, which should not take a slot.")
                 }
+                Toggle(isOn: store.bind(\.placementAnimation)) {
+                    Text("Glide windows into place")
+                    Text("A copy of each moved window animates to its slot while the real one is already there. Needs Screen Recording; without it the move is instant.")
+                }
             }
 
             // Updating used to live here as a lone toggle, with the version

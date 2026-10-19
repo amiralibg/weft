@@ -71,6 +71,14 @@ public struct GeneralConfig: Sendable, Equatable {
     /// the instant of each frame write and back on after. An app whose
     /// assistive tooling misbehaves with that goes here.
     public var enhancedUIExempt: [String]
+    /// Whether placed windows glide into their slots instead of teleporting
+    /// (the REDESIGN roadmap's snapshot-proxy animations, now the
+    /// `PlacementAnimator` in WeftPlatform): a proxy copy of each moved
+    /// window glides old frame to new while the real window is already
+    /// beneath it, then fades. On by default; the pixels it glides need
+    /// Screen Recording, so with the permission missing the answer is the
+    /// instant move.
+    public var placementAnimation: Bool
     public var reserve: ScreenReserve
 
     public init(
@@ -87,6 +95,7 @@ public struct GeneralConfig: Sendable, Equatable {
         followSpaceRules: Bool = true,
         enhancedUIExempt: [String] = [],
         fullscreenReturn: FullscreenReturnPolicy = .last,
+        placementAnimation: Bool = true,
         reserve: ScreenReserve = ScreenReserve()
     ) {
         self.innerGap = innerGap
@@ -102,6 +111,7 @@ public struct GeneralConfig: Sendable, Equatable {
         self.followSpaceRules = followSpaceRules
         self.enhancedUIExempt = enhancedUIExempt
         self.fullscreenReturn = fullscreenReturn
+        self.placementAnimation = placementAnimation
         self.reserve = reserve
     }
 
@@ -453,6 +463,9 @@ public func loadConfig(_ input: String) throws -> ValidatedConfig {
             case "follow-space-rules":
                 guard case .bool(let b) = v else { throw err(path, "expected bool") }
                 general.followSpaceRules = b
+            case "placement-animation":
+                guard case .bool(let b) = v else { throw err(path, "expected bool") }
+                general.placementAnimation = b
             case "fullscreen-return":
                 guard case .string(let s) = v else { throw err(path, "expected last|rule") }
                 guard let policy = FullscreenReturnPolicy(rawValue: s) else {

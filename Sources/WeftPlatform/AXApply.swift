@@ -73,6 +73,10 @@ public final class AXApplier: @unchecked Sendable {
     private var pendingResizes: [(wid: WindowID, frame: Frame, pid: Int32)]?
     private var resizeInFlight = false
     private let dragQueue = DispatchQueue(label: "weft.ax.drag", qos: .userInteractive)
+    /// Placement animations (PlacementAnimator's doc is the whole story):
+    /// proxies for what would otherwise teleport. Default off — config turns
+    /// it on, Screen Recording turns captures on.
+    public let placementAnimator = PlacementAnimator()
 
     public init() {
         self.cid = SLSMainConnectionID()
@@ -491,7 +495,12 @@ public final class AXApplier: @unchecked Sendable {
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
+        // Stage the proxies before anything moves: each one is captured on
+        // the frame the window still has, ordered in over it, and covers the
+        // teleport the commit is about to perform under it.
+        placementAnimator.prepare(todo.map { (wid: $0.wid, to: $0.frame) })
         Trace.time("apply.commit") { commitPositions(todo) }
+        placementAnimator.run()
         let grouped = Dictionary(grouping: todo, by: { $0.pid })
         let group = DispatchGroup()
         let counter = Counter()

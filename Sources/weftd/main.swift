@@ -151,6 +151,8 @@ final class Daemon: @unchecked Sendable {
         self.screensByUUID = Dictionary(uniqueKeysWithValues: SpaceControl.tilingAreas(layout))
         self.displayOrder = layout.map { $0.uuid }
         loadConfigFile(initial: true)
+        applier.placementAnimator.enabled =
+            currentConfig().general.placementAnimation && CGPreflightScreenCaptureAccess()
         bus.sink = { [hub, weak self] event in
             // Encode only if somebody is listening. `hub` is the `weftctl
             // subscribe` fan-out, and the trace is off unless asked for:
@@ -3745,6 +3747,8 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateKeymap(next.keymap)
         applier.setEnhancedUIExempt(Set(next.general.enhancedUIExempt))
+        applier.placementAnimator.enabled =
+            next.general.placementAnimation && CGPreflightScreenCaptureAccess()
         input.updateMouseModifier(next.general.mouseModifier)
         input.setBorderDragEnabled(next.general.mouseBorderResize)
         refreshDividerZones()

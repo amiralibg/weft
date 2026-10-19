@@ -631,7 +631,11 @@ these needs a private call beyond what the platform budget already allows.
    Pins by display name already make most of this a matter of grouping.
 7. **Snapshot-proxy animations**, optional and behind Screen Recording:
    capture the window, animate the capture in weft's own overlay, move the
-   real window underneath, fade.
+   real window underneath, fade — shipped in 0.9.22 (`PlacementAnimator`:
+   a 160 ms ease-out glide with a 100 ms fade, `[general] placement-animation`,
+   off automatically without the permission, and skipped for moves whose two
+   ends are on different displays, where a full-screen-wide proxy across both
+   screens would read as streaking rather than gliding).
 8. **`NSPanel` borders** for the public path, and a scored popup classifier
    with a shared, versioned rules database.
 

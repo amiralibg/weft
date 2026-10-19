@@ -348,6 +348,16 @@ import Testing
     }
 }
 
+/// Windows glide into their slots by default, behind Screen Recording
+/// (REDESIGN roadmap 7); `placement-animation = false` is instant.
+@Test func placementAnimationIsOnUnlessRefused() throws {
+    #expect(try loadConfig("").general.placementAnimation)
+    #expect(try loadConfig("[general]\nplacement-animation = false").general.placementAnimation == false)
+    #expect(throws: ConfigError.self) {
+        try loadConfig("[general]\nplacement-animation = \"yes\"")
+    }
+}
+
 /// `show-inactive = false` has no JankyBorders equivalent, so it is drawn as
 /// a fully transparent inactive colour rather than silently ignored.
 @Test func hidingInactiveBordersMakesThemTransparent() throws {

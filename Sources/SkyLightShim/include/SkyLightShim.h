@@ -190,6 +190,44 @@ WEFT_PRIVATE_FN(, int32_t, SLSNewWindow, WEFT_MISSING,
 WEFT_PRIVATE_FN(, int32_t, SLSReleaseWindow, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid), (cid, wid))
 
+// MARK: - Placement animations (weft's own proxy windows)
+//
+// A placement change moves and resizes real windows in one transaction, which
+// is instantaneous and reads as a teleport. The animator draws each moved
+// window's pixels in a proxy of this process's own, glides the proxy, and
+// fades it; the real window is already at its destination underneath. Acting
+// only on weft's own windows, on the level the moved window sits at, it needs
+// nothing beyond what the borders renderer used before it (S5).
+//
+// dlsym-probed 2026-10-19, macOS 26.6: all four export from SkyLight.
+
+/// The window level `wid` sits at. 0 on success; `outLevel` then means level.
+WEFT_PRIVATE_FN(, int32_t, SLSGetWindowLevel, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, int32_t *outLevel), (cid, wid, outLevel))
+
+WEFT_PRIVATE_FN(, int32_t, SLSSetWindowLevel, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, int32_t level), (cid, wid, level))
+
+/// Alpha in 0…1 for one of this process's own windows. The fade step of the
+/// glide; every other frame stays at 1.0.
+WEFT_PRIVATE_FN(, int32_t, SLSSetWindowAlpha, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, double alpha), (cid, wid, alpha))
+
+/// A drawing surface for one of this process's own windows. Caller owns the
+/// context (Create rule). The animator draws the captured image here, once
+/// per animation step — clear, translate into window-local Quartz space, draw.
+WEFT_PRIVATE_FN(WEFT_RETAINED, CFTypeRef, SLWindowContextCreate, NULL,
+    (SLConnectionID cid, SLWindowID wid, void *options), (cid, wid, options))
+
+/// The pixels of one window at `bounds` (frame coordinates, screen space),
+/// as WindowServer composites them: content only, no shadow, no decoration.
+/// Nil without Screen Recording, or if CoreGraphics no longer answers what
+/// the headers obsoleted. C only — see SkyLightShim.c for why no Swift-safe
+/// prototype could be kept.
+CGImageRef weft_window_capture(
+    CGRect bounds, CGWindowListOption option, CGWindowID wid, CGWindowImageOption imageOption
+);
+
 // Region helpers live in CoreGraphics, not SkyLight, and are in no public
 // header. Only RegionShim.h calls them; see there for why.
 WEFT_PRIVATE_FN(, int32_t, CGSNewRegionWithRectList, WEFT_MISSING,
