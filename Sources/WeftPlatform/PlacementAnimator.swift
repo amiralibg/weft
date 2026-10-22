@@ -629,6 +629,10 @@ public final class PlacementAnimator: @unchecked Sendable {
 
     /// Summed edge distance between two frames.
     static func delta(_ a: CGRect, _ b: CGRect) -> Double {
-        Double(abs(a.minX - b.minX) + abs(a.minY - b.minY) + abs(a.width - b.width) + abs(a.height - b.height))
+        // Summed term by term: as one expression, CI's compiler gave up
+        // type-checking it.
+        let origin: CGFloat = abs(a.minX - b.minX) + abs(a.minY - b.minY)
+        let size: CGFloat = abs(a.width - b.width) + abs(a.height - b.height)
+        return Double(origin + size)
     }
 }
