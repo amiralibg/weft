@@ -481,7 +481,7 @@ final class Daemon: @unchecked Sendable {
               let layout = sp.layout(on: sid)
         else { return nil }
         let screen = usableScreen(for: sid)
-        let config = currentConfig().general.asTilingConfig()
+        let config = tilingConfig()
         switch layout {
         case .tiling(let t):
             let frames = WeftCore.layout(t, in: screen, config: config)
@@ -664,7 +664,7 @@ final class Daemon: @unchecked Sendable {
                   case .tiling(let tree)? = self.spaces.layout(on: sid)
             else { return nil }
             let screen = self.usableScreen(for: sid)
-            let config = self.currentConfig().general.asTilingConfig()
+            let config = self.tilingConfig()
             let current = WeftCore.layout(tree, in: screen, config: config)
             let next = tree.resizing(
                 divider: d.a, d.b, axis: d.axis,
@@ -755,7 +755,7 @@ final class Daemon: @unchecked Sendable {
             input.updateStackZones([])
             return
         }
-        let config = cfg.asTilingConfig()
+        let config = tilingConfig(cfg)
         var all: [Divider] = []
         var peeks: [StackPeek] = []
         // One core hop for the whole refresh, not one per space: this runs at
@@ -1602,7 +1602,7 @@ final class Daemon: @unchecked Sendable {
             }
             let (synced, _) = syncMembership(
                 sp, membership: membership, live: live,
-                screens: screens, config: cfg.general.asTilingConfig()
+                screens: screens, config: tilingConfig(cfg.general)
             )
             sp = synced
             // Workspaces seen for the first time this launch take the layout
@@ -1814,7 +1814,7 @@ final class Daemon: @unchecked Sendable {
     /// start"). Sync queue only.
     private func layOutDesktops(showing: Set<SpaceID>, focused: SpaceID?) {
         let sp = readSpaces()
-        let config = currentConfig().general.asTilingConfig()
+        let config = tilingConfig()
         var computed: [SpaceID: [WindowID: Frame]] = [:]
         for sid in sp.order {
             guard case .tiling(let tree)? = sp.layout(on: sid) else { continue }
@@ -2806,7 +2806,7 @@ final class Daemon: @unchecked Sendable {
         let focused: WindowID? = system.flatMap { floats[$0] != nil ? $0 : nil } ?? tree.focus
         guard let focused, !floats.isEmpty else { return nil }
         let hidden = hiddenStackMembers(in: tree)
-        let tiles = layout(tree, in: usableScreen(for: sid), config: currentConfig().general.asTilingConfig())
+        let tiles = layout(tree, in: usableScreen(for: sid), config: tilingConfig())
             .filter { !hidden.contains($0.key) }
         let cycles = tree.cyclingStack(by: (dir == .east || dir == .south) ? 1 : -1) != tree
         return Reducer.focusTarget(from: focused, tiles: tiles, floats: floats, towards: dir, stackCycles: cycles)
@@ -2826,7 +2826,7 @@ final class Daemon: @unchecked Sendable {
         dispatchPrecondition(condition: .notOnQueue(core))
         let mutations: [Mutation] = core.sync {
             let sid = self.spaces.currentSpace
-            let tile = self.currentConfig().general.asTilingConfig()
+            let tile = self.tilingConfig()
             let uScreen = self.usableScreen(for: sid)
             switch sid.flatMap({ self.spaces.layout(on: $0) }) ?? .tiling(Tree()) {
             case .tiling(let tree):
@@ -3134,7 +3134,7 @@ final class Daemon: @unchecked Sendable {
             return IPCResponse(ok: false, error: "macOS did not move window \(where_) to \(label)")
         }
         let unmanaged = core.sync { self.unmanaged }
-        let tile = currentConfig().general.asTilingConfig()
+        let tile = tilingConfig()
         let screen = usableScreen(for: target)
         updateSpaces { s in
             for wid in wids {
@@ -4138,7 +4138,7 @@ final class Daemon: @unchecked Sendable {
             return emit(Trace.stats())
         case "state":
             let screen = self.usableScreen(for: currentSID())
-            let config = currentConfig().general.asTilingConfig()
+            let config = tilingConfig()
             switch currentLayout() {
             case .tiling(let tree):
                 let frames = layout(tree, in: screen, config: config)
@@ -4289,8 +4289,22 @@ final class Daemon: @unchecked Sendable {
         dispatchPrecondition(condition: .notOnQueue(core))
         guard !frames.isEmpty, !missionControlOpen else { return }
         applier.apply(frames: frames, pids: allPids(), force: force) { [weak self] result in
-            self?.noteApplyFailures(result)
+            guard let self else { return }
+            self.noteApplyFailures(result)
+            // A window would not go as small as its tile: lay its desktop out
+            // again around the floor it showed, once, instead of leaving it
+            // hanging off the screen or over its neighbour.
+            if result.minimumsChanged {
+                self.syncQueue.async { self.applyDesktops(showing: Set(frames.keys)) }
+            }
         }
+    }
+
+    /// The tiling config with every window's learned minimum size in it.
+    private func tilingConfig(_ general: GeneralConfig? = nil) -> TilingConfig {
+        var config = (general ?? currentConfig().general).asTilingConfig()
+        config.minimums = applier.learnedMinimums()
+        return config
     }
 
     /// Drop every strike-based exclusion. Windows the *rules* float
@@ -4455,7 +4469,7 @@ final class Daemon: @unchecked Sendable {
         // not on screen, and anything that is belongs to macOS.
         if let display = readSpaces().displayBySpace[sid], readSpaces().isPaused(display) { return }
         let screen = self.usableScreen(for: sid)
-        let config = currentConfig().general.asTilingConfig()
+        let config = tilingConfig()
         guard let spaceLayout = readSpaces().layout(on: sid) else { return }
         switch spaceLayout {
         case .tiling(let tree):
@@ -4569,7 +4583,7 @@ final class Daemon: @unchecked Sendable {
     /// the reserve height, so rescue/query placed windows under the bar.
     private func currentVisibleFrames() -> [WindowID: Frame] {
         let screen = self.usableScreen(for: currentSID())
-        let config = currentConfig().general.asTilingConfig()
+        let config = tilingConfig()
         switch currentLayout() {
         case .tiling(let tree):
             return layout(tree, in: screen, config: config)

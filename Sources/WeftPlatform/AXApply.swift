@@ -51,6 +51,11 @@ public final class AXApplier: @unchecked Sendable {
     /// entry; a different one supersedes it, and the stale write is skipped
     /// when its turn comes rather than performed and immediately undone.
     private var inFlight: [WindowID: (gen: UInt64, frame: Frame)] = [:]
+    /// The smallest size each window has settled at when asked for less
+    /// (`noteMinimum`), and whether that changed since the last apply
+    /// finished — the layout around it is then out of date.
+    private var minimums: [WindowID: WindowMinimum] = [:]
+    private var minimumsChanged = false
     private var writeGenCounter: UInt64 = 0
     /// How long our own writes suppress observer echoes. After this the
     /// expected frame expires so a later user drag that lands near an old
@@ -310,6 +315,7 @@ public final class AXApplier: @unchecked Sendable {
             expectedFrame = expectedFrame.filter { live.contains($0.key) }
             expectedAt = expectedAt.filter { live.contains($0.key) }
             epoch = epoch.filter { live.contains($0.key) }
+            minimums = minimums.filter { live.contains($0.key) }
         }
     }
 
@@ -409,6 +415,9 @@ public final class AXApplier: @unchecked Sendable {
         public var appliedIDs: [WindowID]
         /// Why each entry in `failedIDs` failed, from the last attempt.
         public var failureReasons: [WindowID: FailureReason]
+        /// A window's learned minimum size changed during this apply: the
+        /// frames just written were laid out without it.
+        public var minimumsChanged = false
 
         public init(
             applied: Int, skipped: Int, errors: Int,
@@ -555,14 +564,19 @@ public final class AXApplier: @unchecked Sendable {
         group.notify(queue: .global(qos: .utility)) {
             let (a, e, failed, ok, reasons) = counter.snapshot()
             tTotal.end(detail: detail)
-            completion?(ApplyResult(
+            var result = ApplyResult(
                 applied: a,
                 skipped: frames.count - written,
                 errors: e,
                 failedIDs: failed.sorted(),
                 appliedIDs: ok.sorted(),
                 failureReasons: reasons
-            ))
+            )
+            result.minimumsChanged = self.lock.withLock {
+                defer { self.minimumsChanged = false }
+                return self.minimumsChanged
+            }
+            completion?(result)
         }
     }
 
@@ -1165,6 +1179,16 @@ public final class AXApplier: @unchecked Sendable {
                 if readBack(&rect) != 0 { haveRect = false }
             }
         }
+        // Larger than asked, and still so after asking again and giving the
+        // app a moment: that is the window's floor, not a slow relayout.
+        if haveRect, posOK, !sizeAlreadyRight,
+           rect.width > frame.width + sizeSlop || rect.height > frame.height + sizeSlop
+        {
+            writeSize()
+            usleep(60_000)
+            if readBack(&rect) != 0 { haveRect = false }
+        }
+        if haveRect, posOK { noteMinimum(wid, asked: frame, got: rect) }
         tVerify.end(detail: who)
         // Where the window is decides it, not which route got it there. The
         // WindowServer move is the fast half, and it is gone on the public
@@ -1190,6 +1214,31 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         return reason
+    }
+
+    // MARK: - Minimum sizes
+
+    /// Record, raise or lower `wid`'s floor from one settled write. Only a
+    /// dimension that came out bigger than asked by more than `sizeSlop`
+    /// raises it; a window seen smaller than its floor lowers it, so a floor
+    /// that was wrong, or that the app has since dropped, does not stick.
+    private func noteMinimum(_ wid: WindowID, asked: Frame, got: CGRect) {
+        lock.withLock {
+            var m = minimums[wid] ?? WindowMinimum(width: 0, height: 0)
+            let before = m
+            if got.width > asked.width + sizeSlop { m.width = max(m.width, got.width) }
+            else if got.width < m.width - sizeSlop { m.width = got.width }
+            if got.height > asked.height + sizeSlop { m.height = max(m.height, got.height) }
+            else if got.height < m.height - sizeSlop { m.height = got.height }
+            guard m != before else { return }
+            if m.width <= 0, m.height <= 0 { minimums.removeValue(forKey: wid) } else { minimums[wid] = m }
+            minimumsChanged = true
+        }
+    }
+
+    /// Every window's learned floor, for the layout.
+    public func learnedMinimums() -> [WindowID: WindowMinimum] {
+        lock.withLock { minimums }
     }
 
     private func queue(for pid: Int32) -> DispatchQueue {

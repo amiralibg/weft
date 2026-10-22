@@ -59,6 +59,11 @@ ships them, and System Integrity Protection left exactly as it is.
   resize, or a small frameless panel with no title-bar buttons is floated rather
   than given a slot. That is what an Electron app's floating call widget is, and
   tiling one hands a quarter of the screen to a badge.
+- **Works around a window's minimum size** — a window that will not go as small
+  as its tile (T3 Code and other Electron apps stop at a few hundred points)
+  gets the room it needs from its neighbours, instead of hanging off the
+  screen. Weft learns the floor from the window itself; your split ratios are
+  untouched, so the room goes back when the window does.
 - **A menu-bar app** with a visual settings editor, a searchable keybinding
   cheatsheet (`⌘K`), and a window switcher (`⌃⌥Space`).
 

@@ -170,14 +170,22 @@ public struct TilingConfig: Sendable, Equatable {
         }
     }
 
+    /// The smallest size each window has been seen to accept (see
+    /// `WindowMinimum`). A split gives a child at least this much along its
+    /// axis, taken from siblings with room to spare; the stored ratios are
+    /// not touched, so the room goes back when the window does.
+    public var minimums: [WindowID: WindowMinimum]
+
     public init(
         innerGap: Double = 8,
         outerGap: OuterGap = OuterGap(top: 8, bottom: 8, left: 8, right: 8),
-        stackOffset: Double = 8
+        stackOffset: Double = 8,
+        minimums: [WindowID: WindowMinimum] = [:]
     ) {
         self.innerGap = innerGap
         self.outerGap = outerGap
         self.stackOffset = stackOffset
+        self.minimums = minimums
     }
 
     /// Every spacing knob at zero — gaps and the stack offset alike. Used by
@@ -188,6 +196,21 @@ public struct TilingConfig: Sendable, Equatable {
         outerGap: OuterGap(top: 0, bottom: 0, left: 0, right: 0),
         stackOffset: 0
     )
+}
+
+/// A size below which a window will not go. Apps do not say; weft learns it
+/// when a window settles larger than the frame it was given (T3 Code and
+/// other Electron apps refuse to be shorter than a few hundred points), and
+/// lays out around it instead of leaving the window hanging off the screen
+/// or over its neighbour.
+public struct WindowMinimum: Sendable, Equatable {
+    public var width: Double
+    public var height: Double
+
+    public init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+    }
 }
 
 /// Compute frames for every window. Single write per window downstream —
@@ -215,7 +238,8 @@ public func layout(_ tree: Tree, in screen: Frame, config: TilingConfig) -> [Win
             out[id] = inset
             return out
         }
-        layoutNode(root, in: inset, innerGap: config.innerGap, stackOffset: config.stackOffset, out: &out)
+        layoutNode(root, in: inset, innerGap: config.innerGap, stackOffset: config.stackOffset,
+                   minimums: config.minimums, out: &out)
         out[fs] = inset
         return out
     }
@@ -223,8 +247,54 @@ public func layout(_ tree: Tree, in screen: Frame, config: TilingConfig) -> [Win
     if case .window(let id) = root { return [id: inset] }
     var out: [WindowID: Frame] = [:]
     layoutNode(root, in: inset, innerGap: config.innerGap,
-               stackOffset: config.stackOffset, out: &out)
+               stackOffset: config.stackOffset, minimums: config.minimums, out: &out)
     return out
+}
+
+/// The least room `node` needs along one axis: a split along that axis needs
+/// its children's sum plus the gaps between them; anything else needs its
+/// largest child's.
+private func minimumExtent(
+    _ node: Node, horizontal: Bool, innerGap: Double, minimums: [WindowID: WindowMinimum]
+) -> Double {
+    switch node {
+    case .window(let id):
+        guard let m = minimums[id] else { return 0 }
+        return horizontal ? m.width : m.height
+    case .container(let c):
+        let each = c.children.map {
+            minimumExtent($0, horizontal: horizontal, innerGap: innerGap, minimums: minimums)
+        }
+        let along = (horizontal && c.layout == .splitV) || (!horizontal && c.layout == .splitH)
+        if along, c.children.count > 1 {
+            return each.reduce(0, +) + innerGap * Double(c.children.count - 1)
+        }
+        return each.max() ?? 0
+    }
+}
+
+/// Split `avail` by `ratios`, then raise any share below its minimum to it,
+/// taking the difference from the shares that stay above theirs, in
+/// proportion to their ratios. When the minimums do not all fit, the ratios
+/// stand: no arrangement satisfies them, and a predictable split beats a
+/// squeezed one.
+func constrainedShares(avail: Double, ratios: [Double], minimums: [Double]) -> [Double] {
+    let n = ratios.count
+    var shares = ratios.map { avail * $0 }
+    guard minimums.count == n, minimums.contains(where: { $0 > 0 }),
+          minimums.reduce(0, +) <= avail
+    else { return shares }
+    var pinned = Set<Int>()
+    while true {
+        let short = (0..<n).filter { !pinned.contains($0) && shares[$0] < minimums[$0] - 0.5 }
+        if short.isEmpty { return shares }
+        for i in short { pinned.insert(i); shares[i] = minimums[i] }
+        let free = (0..<n).filter { !pinned.contains($0) }
+        let left = avail - pinned.reduce(0) { $0 + shares[$1] }
+        let weight = free.reduce(0) { $0 + ratios[$1] }
+        guard !free.isEmpty, weight > 0 else { return shares }
+        for i in free { shares[i] = left * ratios[i] / weight }
+    }
 }
 
 /// How many layers of a stack are drawn peeking out behind the active one.
@@ -236,7 +306,7 @@ private let maxVisibleStackLayers = 3
 
 private func layoutNode(
     _ node: Node, in frame: Frame, innerGap: Double, stackOffset: Double,
-    out: inout [WindowID: Frame]
+    minimums: [WindowID: WindowMinimum] = [:], out: inout [WindowID: Frame]
 ) {
     switch node {
     case .window(let id):
@@ -246,7 +316,7 @@ private func layoutNode(
         guard n > 0 else { return }
         if n == 1 {
             layoutNode(c.children[0], in: frame, innerGap: innerGap,
-                       stackOffset: stackOffset, out: &out)
+                       stackOffset: stackOffset, minimums: minimums, out: &out)
             return
         }
         // Stack: the members share one slot, so the only thing that can say
@@ -279,36 +349,44 @@ private func layoutNode(
                     height: max(frame.height - d, 1)
                 )
                 layoutNode(child, in: slot, innerGap: innerGap,
-                           stackOffset: stackOffset, out: &out)
+                           stackOffset: stackOffset, minimums: minimums, out: &out)
             }
             return
         }
         let totalGap = innerGap * Double(n - 1)
+        func shares(_ c: Container, avail: Double, horizontal: Bool) -> [Double] {
+            let ratios = (0..<n).map { $0 < c.ratios.count ? c.ratios[$0] : 1.0 / Double(n) }
+            guard !minimums.isEmpty else { return ratios.map { avail * $0 } }
+            let least = c.children.map {
+                minimumExtent($0, horizontal: horizontal, innerGap: innerGap, minimums: minimums)
+            }
+            return constrainedShares(avail: avail, ratios: ratios, minimums: least)
+        }
         switch c.layout {
         case .splitV:
             let avail = max(frame.width - totalGap, 0)
+            let shares = shares(c, avail: avail, horizontal: true)
             var x = frame.x
             for (i, child) in c.children.enumerated() {
-                let ratio = i < c.ratios.count ? c.ratios[i] : 1.0 / Double(n)
                 // Last child takes the remainder so rounding never leaks/loses a pixel.
-                let w = (i == n - 1) ? (frame.x + frame.width - x) : avail * ratio
+                let w = (i == n - 1) ? (frame.x + frame.width - x) : shares[i]
                 layoutNode(
                     child,
                     in: Frame(x: x, y: frame.y, width: max(w, 1), height: frame.height),
-                    innerGap: innerGap, stackOffset: stackOffset, out: &out
+                    innerGap: innerGap, stackOffset: stackOffset, minimums: minimums, out: &out
                 )
                 x += w + innerGap
             }
         case .splitH:
             let avail = max(frame.height - totalGap, 0)
+            let shares = shares(c, avail: avail, horizontal: false)
             var y = frame.y
             for (i, child) in c.children.enumerated() {
-                let ratio = i < c.ratios.count ? c.ratios[i] : 1.0 / Double(n)
-                let h = (i == n - 1) ? (frame.y + frame.height - y) : avail * ratio
+                let h = (i == n - 1) ? (frame.y + frame.height - y) : shares[i]
                 layoutNode(
                     child,
                     in: Frame(x: frame.x, y: y, width: frame.width, height: max(h, 1)),
-                    innerGap: innerGap, stackOffset: stackOffset, out: &out
+                    innerGap: innerGap, stackOffset: stackOffset, minimums: minimums, out: &out
                 )
                 y += h + innerGap
             }
