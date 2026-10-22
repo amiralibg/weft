@@ -1341,7 +1341,7 @@ private struct AdvancedPane: View {
                 }
                 Toggle(isOn: store.bind(\.placementAnimation)) {
                     Text("Glide windows into place")
-                    Text("A copy of each moved window animates to its slot while the real one is already there. Needs Screen Recording; without it the move is instant.")
+                    Text("Windows glide to their slots in one motion while weft rearranges the real ones behind it. Needs Screen Recording; without it, or with Reduce Motion on, moves are instant.")
                 }
             }
 

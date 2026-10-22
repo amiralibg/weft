@@ -213,6 +213,35 @@ WEFT_PRIVATE_FN(, int32_t, SLSSetWindowLevel, WEFT_MISSING,
 WEFT_PRIVATE_FN(, int32_t, SLSSetWindowAlpha, WEFT_MISSING,
     (SLConnectionID cid, SLWindowID wid, double alpha), (cid, wid, alpha))
 
+/// Whether one of this process's own windows is opaque. A proxy carries a
+/// window's rounded corners and its shadow, so it is not.
+WEFT_PRIVATE_FN(, int32_t, SLSSetWindowOpacity, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, bool opaque), (cid, wid, opaque))
+
+/// The backing scale of one of this process's own windows: 2 on a Retina
+/// display, so a capture drawn into it keeps every pixel.
+WEFT_PRIVATE_FN(, int32_t, SLSSetWindowResolution, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, double scale), (cid, wid, scale))
+
+/// The color space of one of this process's own windows. A proxy takes its
+/// capture's — the display's — so drawing the capture into it is a copy; in
+/// the default sRGB it is a per-pixel conversion, 10–30 ms a window.
+WEFT_PRIVATE_FN(, int32_t, SLSSetWindowColorSpace, WEFT_MISSING,
+    (SLConnectionID cid, SLWindowID wid, CGColorSpaceRef space), (cid, wid, space))
+
+/// A window's transform, global (top-left) space to window space, applied by
+/// the compositor: the glide moves and scales a proxy with this, so nothing
+/// is redrawn per step. Signature from yabai's animation path (MIT — see
+/// DESIGN §11.11). dlsym-probed 2026-10-21, macOS 27.0.1.
+WEFT_PRIVATE_FN(, int32_t, SLSTransactionSetWindowTransform, WEFT_MISSING,
+    (CFTypeRef transaction, SLWindowID wid, int32_t unknown1, int32_t unknown2, CGAffineTransform t),
+    (transaction, wid, unknown1, unknown2, t))
+
+/// Alpha in 0…1 for one of this process's own windows, in a transaction: a
+/// stage fades all of its pieces on the same compositor frame.
+WEFT_PRIVATE_FN(, int32_t, SLSTransactionSetWindowAlpha, WEFT_MISSING,
+    (CFTypeRef transaction, SLWindowID wid, float alpha), (transaction, wid, alpha))
+
 /// A drawing surface for one of this process's own windows. Caller owns the
 /// context (Create rule). The animator draws the captured image here, once
 /// per animation step — clear, translate into window-local Quartz space, draw.
@@ -228,6 +257,12 @@ CGImageRef weft_window_capture(
     CGRect bounds, CGWindowListOption option, CGWindowID wid, CGWindowImageOption imageOption
 );
 
+/// The windows in `wids`, composited in their screen order over `bounds`
+/// (screen space, top-left), at the display's full resolution. Nil without
+/// Screen Recording. The animator's backdrop: the desktop with the windows
+/// that are about to move taken out.
+CGImageRef weft_windows_composite(CGRect bounds, const CGWindowID *wids, int count);
+
 // Region helpers live in CoreGraphics, not SkyLight, and are in no public
 // header. Only RegionShim.h calls them; see there for why.
 WEFT_PRIVATE_FN(, int32_t, CGSNewRegionWithRectList, WEFT_MISSING,
@@ -238,3 +273,4 @@ WEFT_PRIVATE_FN(, int32_t, CGSReleaseRegion, WEFT_MISSING,
 #include "RegionShim.h"
 #include "AXBridge.h"
 #include "BridgeShim.h"
+#include "DisplayLinkShim.h"

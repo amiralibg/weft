@@ -631,11 +631,17 @@ these needs a private call beyond what the platform budget already allows.
    Pins by display name already make most of this a matter of grouping.
 7. **Snapshot-proxy animations**, optional and behind Screen Recording:
    capture the window, animate the capture in weft's own overlay, move the
-   real window underneath, fade — shipped in 0.9.22 (`PlacementAnimator`:
-   a 160 ms ease-out glide with a 100 ms fade, `[general] placement-animation`,
-   off automatically without the permission, and skipped for moves whose two
-   ends are on different displays, where a full-screen-wide proxy across both
-   screens would read as streaking rather than gliding).
+   real window underneath, fade — shipped in 0.9.22 (`PlacementAnimator`,
+   `[general] placement-animation`, off automatically without the permission
+   and under Reduce Motion). Reworked after 0.9.22 into a *stage*: on macOS 27
+   the WindowServer will not move another app's window, so the real windows
+   land one app at a time through Accessibility and gliding copies over them
+   showed both. The stage puts the desktop (cached per display) over every
+   place a moving window passes, glides GPU-transformed copies on a critically
+   damped spring at the display's refresh, waits until every real window has
+   reported landing, then fades the copies over them. A second placement
+   mid-glide retargets the springs instead of restarting. Moves whose two ends
+   are on different displays are still not animated.
 8. **`NSPanel` borders** for the public path, and a scored popup classifier
    with a shared, versioned rules database.
 

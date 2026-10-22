@@ -495,12 +495,12 @@ public final class AXApplier: @unchecked Sendable {
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
-        // Stage the proxies before anything moves: each one is captured on
-        // the frame the window still has, ordered in over it, and covers the
-        // teleport the commit is about to perform under it.
-        placementAnimator.prepare(todo.map { (wid: $0.wid, to: $0.frame) })
+        // The stage goes up before anything moves (PlacementAnimator): every
+        // real write below then happens behind it, in whatever order and at
+        // whatever moment each app answers, and it comes down once they have
+        // all landed.
+        placementAnimator.prepare(todo.map { (wid: $0.wid, to: $0.frame) }, settled: settled)
         Trace.time("apply.commit") { commitPositions(todo) }
-        placementAnimator.run()
         let grouped = Dictionary(grouping: todo, by: { $0.pid })
         let group = DispatchGroup()
         let counter = Counter()
@@ -529,6 +529,9 @@ public final class AXApplier: @unchecked Sendable {
                             reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
                         }
                         counter.add(reason: reason, wid: item.wid)
+                        // Landed or refused, this window has nothing more to
+                        // wait for: the stage may come down once all have.
+                        self.placementAnimator.markLanded(item.wid, frame: item.frame)
                         self.lock.withLock {
                             if self.inFlight[item.wid]?.gen == gen {
                                 self.inFlight.removeValue(forKey: item.wid)
@@ -573,6 +576,9 @@ public final class AXApplier: @unchecked Sendable {
     /// the full protocol and fixes anything that drifted.
     public func applyDragFrames(frames: [WindowID: Frame], pids: [WindowID: Int32]) {
         guard !frames.isEmpty else { return }
+        // A drag moves the reals live under the cursor; a stage still up from
+        // the placement before it would hide exactly that.
+        placementAnimator.cancelAll()
         var resizes: [(wid: WindowID, frame: Frame, pid: Int32)] = []
         // Without a WindowServer move that lands, positions go the slow way
         // with the sizes, through Accessibility.

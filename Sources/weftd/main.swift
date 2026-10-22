@@ -1028,6 +1028,9 @@ final class Daemon: @unchecked Sendable {
         actedSpacesLock.withLock { actedSpacesLocked = now }
         bus.emit(DaemonEvent(kind: .spaceChanged))
         syncFromSnapshot()
+        // Another desktop can have another picture: the next placement's
+        // backdrop is taken now, while nothing is waiting on it.
+        applier.placementAnimator.prewarm()
     }
 
     /// Sweep only if the WindowServer is showing a different desktop from the
@@ -2352,6 +2355,7 @@ final class Daemon: @unchecked Sendable {
     /// tiling area read before the bar is there runs under it.
     private func displaysSettled(lookAgain: Bool = true) {
         refreshScreens()
+        applier.placementAnimator.prewarm()
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
         let geometry = displaysWestToEast().enumerated().map { i, uuid -> String in

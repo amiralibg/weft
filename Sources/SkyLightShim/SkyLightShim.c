@@ -19,6 +19,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define WEFT_PRIVATE_SYMBOLS(X)                  \
@@ -42,6 +43,11 @@
     X(SLSGetWindowLevel)                         \
     X(SLSSetWindowLevel)                         \
     X(SLSSetWindowAlpha)                         \
+    X(SLSSetWindowOpacity)                       \
+    X(SLSSetWindowResolution)                    \
+    X(SLSSetWindowColorSpace)                    \
+    X(SLSTransactionSetWindowTransform)          \
+    X(SLSTransactionSetWindowAlpha)              \
     X(SLWindowContextCreate)                     \
     X(CGSNewRegionWithRectList)                  \
     X(CGSReleaseRegion)                          \
@@ -163,6 +169,28 @@ CGImageRef weft_window_capture(
         settled = 1;
     }
     return once ? once(bounds, option, wid, imageOption) : NULL;
+}
+
+CGImageRef weft_windows_composite(CGRect bounds, const CGWindowID *wids, int count) {
+    typedef CGImageRef (*Composite)(CGRect, CFArrayRef, CGWindowImageOption);
+    static Composite once = NULL;
+    static volatile int settled = 0;
+    if (!settled) {
+        once = (Composite)dlsym(RTLD_DEFAULT, "CGWindowListCreateImageFromArray");
+        settled = 1;
+    }
+    if (once == NULL || count <= 0) return NULL;
+    // The list is of bare window numbers in pointer-sized slots, not of
+    // CFNumbers: a CFArray of CFNumbers is accepted and answers nothing.
+    const void **slots = malloc(sizeof(void *) * (size_t)count);
+    if (slots == NULL) return NULL;
+    for (int i = 0; i < count; i++) slots[i] = (const void *)(uintptr_t)wids[i];
+    CFArrayRef list = CFArrayCreate(NULL, slots, count, NULL);
+    free(slots);
+    if (list == NULL) return NULL;
+    CGImageRef image = once(bounds, list, kCGWindowImageBestResolution);
+    CFRelease(list);
+    return image;
 }
 
 // Before main, so no call site ever sees an unfilled pointer and none of them

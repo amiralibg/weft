@@ -16,7 +16,8 @@ let package = Package(
         // Public header is Sources/SkyLightShim/include/SkyLightShim.h
         .target(
             name: "SkyLightShim",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedFramework("CoreVideo")]
         ),
         // Pure: geometry + world model. No I/O, no AppKit, no SkyLight.
         .target(
