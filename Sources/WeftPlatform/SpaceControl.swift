@@ -30,11 +30,11 @@ public enum SpaceControl {
     }
 
     /// Per-display geometry, west→east. One place matches AppKit's screens to
-    /// the UUIDs SLS reports, because it is the only fiddly part: `visible`
-    /// comes from `NSScreen.visibleFrame` (menu bar + Dock already excluded)
-    /// but in AppKit's bottom-left space, and only the *primary* screen sits
-    /// at AppKit's origin — so the flip to the top-left space AX and SLS share
-    /// must go through the primary's height, never each screen's own.
+    /// the UUIDs SLS reports, because it is the only fiddly part: every
+    /// position comes from CoreGraphics, which is live, and AppKit gives only
+    /// the Dock and menu bar insets (`usableArea`). Origins read from
+    /// `NSScreen` went stale in weftd when a display was plugged or unplugged,
+    /// and only a restart fixed them.
     /// `visibleFrame` takes the menu bar off the main display only, in a
     /// process without an `NSApplication` — which weftd is. `tilingAreas`
     /// takes every other display's off too.
@@ -60,22 +60,17 @@ public enum SpaceControl {
         var active = [CGDirectDisplayID](repeating: 0, count: 16)
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(16, &active, &count) == .success else { return [] }
-        let screens = NSScreen.screens
-        let primaryHeight = screens.first(where: { $0.frame.origin == .zero })?.frame.height
-            ?? screens.first?.frame.height
-            ?? 0
-        var visibleByID: [CGDirectDisplayID: Frame] = [:]
-        for screen in screens {
+        // AppKit's frames, kept in its own bottom-left space: `usableArea`
+        // takes only the insets from them, and places them on CG's bounds.
+        var appKitByID: [CGDirectDisplayID: (frame: Frame, visible: Frame)] = [:]
+        for screen in NSScreen.screens {
             guard let number = screen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")
             ] as? NSNumber else { continue }
-            let vf = screen.visibleFrame
-            guard vf.width > 100, vf.height > 100 else { continue }
-            visibleByID[CGDirectDisplayID(number.uint32Value)] = Frame(
-                x: vf.minX,
-                y: primaryHeight - vf.maxY,
-                width: vf.width,
-                height: vf.height
+            let f = screen.frame, vf = screen.visibleFrame
+            appKitByID[CGDirectDisplayID(number.uint32Value)] = (
+                Frame(x: f.minX, y: f.minY, width: f.width, height: f.height),
+                Frame(x: vf.minX, y: vf.minY, width: vf.width, height: vf.height)
             )
         }
         var out: [DisplayFrames] = []
@@ -86,7 +81,11 @@ public enum SpaceControl {
             guard let str = CFUUIDCreateString(nil, uuid) as String? else { continue }
             let b = CGDisplayBounds(id)
             let full = Frame(x: b.minX, y: b.minY, width: b.width, height: b.height)
-            out.append(DisplayFrames(uuid: str, frame: full, visible: visibleByID[id] ?? full))
+            let appKit = appKitByID[id]
+            out.append(DisplayFrames(
+                uuid: str, frame: full,
+                visible: usableArea(bounds: full, screenFrame: appKit?.frame, screenVisible: appKit?.visible)
+            ))
         }
         // (x, then y): a stable arrangement order even when two displays
         // share an x, which vertically stacked monitors do.

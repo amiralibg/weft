@@ -69,6 +69,35 @@ public func belowMenuBars(_ visible: Frame, display: Frame, menuBars: [Frame]) -
     return out
 }
 
+/// A display's usable area: its live CoreGraphics `bounds` (top-left origin),
+/// less the Dock and menu bar insets AppKit reports for it.
+///
+/// `screenFrame` and `screenVisible` are `NSScreen.frame` and `visibleFrame`,
+/// in AppKit's bottom-left space. Only their *differences* are used. weftd has
+/// no `NSApplication`, and its `NSScreen` list can lag the WindowServer after
+/// a display is plugged, unplugged or rearranged — an origin from it tiled a
+/// display at its old place until weft was restarted. An inset does not move
+/// with the arrangement, so it survives that; a size that no longer matches
+/// means the screen is not the one AppKit last saw, and none of it is used.
+public func usableArea(bounds: Frame, screenFrame: Frame?, screenVisible: Frame?) -> Frame {
+    guard let f = screenFrame, let v = screenVisible,
+          abs(f.width - bounds.width) < 1, abs(f.height - bounds.height) < 1
+    else { return bounds }
+    let left = v.x - f.x
+    let right = (f.x + f.width) - (v.x + v.width)
+    let bottom = v.y - f.y
+    let top = (f.y + f.height) - (v.y + v.height)
+    guard [left, right, bottom, top].allSatisfy({ $0 >= 0 }),
+          bounds.width - left - right > 100, bounds.height - top - bottom > 100
+    else { return bounds }
+    return Frame(
+        x: bounds.x + left,
+        y: bounds.y + top,
+        width: bounds.width - left - right,
+        height: bounds.height - top - bottom
+    )
+}
+
 /// A connected display, as pin resolution needs it.
 public struct DisplayIdentity: Sendable, Equatable {
     public var uuid: String

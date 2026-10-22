@@ -96,3 +96,28 @@ private let displays = [
     // Menu bar hidden: nothing to take off.
     #expect(belowMenuBars(samsung, display: samsung, menuBars: []) == samsung)
 }
+
+/// Positions come from CoreGraphics and only the insets from AppKit, so a
+/// display that moved since AppKit last looked still tiles where it is.
+@Test func usableAreaPlacesAppKitInsetsOnLiveBounds() {
+    // AppKit, bottom-left: the laptop with a 38pt menu bar and a 60pt Dock.
+    let frame = Frame(x: 0, y: 0, width: 1710, height: 1112)
+    let visible = Frame(x: 0, y: 60, width: 1710, height: 1014)
+    let here = Frame(x: 0, y: 0, width: 1710, height: 1112)
+    #expect(usableArea(bounds: here, screenFrame: frame, screenVisible: visible)
+        == Frame(x: 0, y: 38, width: 1710, height: 1014))
+    // The same laptop after the arrangement changed under a stale NSScreen.
+    let moved = Frame(x: 3840, y: 1048, width: 1710, height: 1112)
+    #expect(usableArea(bounds: moved, screenFrame: frame, screenVisible: visible)
+        == Frame(x: 3840, y: 1086, width: 1710, height: 1014))
+}
+
+/// A display AppKit has not seen, or one whose resolution changed since, is
+/// taken whole; the menu bar comes off it in `belowMenuBars`.
+@Test func usableAreaIgnoresAScreenOfAnotherSize() {
+    let bounds = Frame(x: -1049, y: -2160, width: 3840, height: 2160)
+    #expect(usableArea(bounds: bounds, screenFrame: nil, screenVisible: nil) == bounds)
+    let old = Frame(x: 0, y: 0, width: 2560, height: 1440)
+    let oldVisible = Frame(x: 0, y: 0, width: 2560, height: 1415)
+    #expect(usableArea(bounds: bounds, screenFrame: old, screenVisible: oldVisible) == bounds)
+}

@@ -2346,10 +2346,23 @@ final class Daemon: @unchecked Sendable {
     /// sized to a screen that no longer exists. The sweep then numbers the
     /// desktops again: a display that went has its desktops' layouts stashed
     /// by place, and one that came back takes them back (`adoptDisplays`).
-    private func displaysSettled() {
+    ///
+    /// Then once more, a beat later: a display that has just arrived gets its
+    /// menu bar window and its desktops after CoreGraphics reports it, and a
+    /// tiling area read before the bar is there runs under it.
+    private func displaysSettled(lookAgain: Bool = true) {
         refreshScreens()
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
+        let geometry = displaysWestToEast().enumerated().map { i, uuid -> String in
+            let f = usableScreen(onDisplay: uuid)
+            return "\(i + 1) \(Int(f.width))x\(Int(f.height))@\(Int(f.x)),\(Int(f.y))"
+        }.joined(separator: " ")
+        fputs("weftd: displays changed\(lookAgain ? "" : " (second look)"): \(geometry)\n", stderr)
+        guard lookAgain else { return }
+        let again = DispatchWorkItem { [weak self] in self?.displaysSettled(lookAgain: false) }
+        pendingDisplaySettle = again
+        syncQueue.asyncAfter(deadline: .now() + 1.5, execute: again)
     }
 
     // MARK: - Socket handling
