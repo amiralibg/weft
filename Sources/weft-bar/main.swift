@@ -111,6 +111,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
         FocusSinkWindow.shared.install()
 
+        // Quit Weft stopped the engine; opening WeftBar is how it comes back.
+        Task { @MainActor in
+            await Task.detached { EngineService.startIfStopped() }.value
+            self.state.refresh()
+        }
+
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(spaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
@@ -497,10 +503,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        // Quit
-        let quitItem = NSMenuItem(title: "Quit Weft", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // Quit means weft, not just this icon: the engine stops too, so
+        // tiling and keybinds go with it. Opening WeftBar starts it again.
+        // Hold ⌥ for the old behaviour, the icon alone.
+        let quitItem = NSMenuItem(title: "Quit Weft", action: #selector(quitWeft), keyEquivalent: "q")
+        quitItem.target = self
         quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
+        quitItem.toolTip = "Stop tiling and keybinds, and close the menu bar app"
         menu.addItem(quitItem)
+        let quitBarItem = NSMenuItem(
+            title: "Quit Menu Bar Only", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
+        )
+        quitBarItem.keyEquivalentModifierMask = [.command, .option]
+        quitBarItem.isAlternate = true
+        quitBarItem.image = NSImage(systemSymbolName: "menubar.rectangle", accessibilityDescription: nil)
+        quitBarItem.toolTip = "Close the menu bar app and leave weft tiling"
+        menu.addItem(quitBarItem)
+    }
+
+    /// Stop the engine, then this app. The engine first and waited for: a
+    /// WeftBar that exits before `bootout` returns would leave weftd running
+    /// with nothing on screen to say so.
+    @objc private func quitWeft() {
+        Task { @MainActor in
+            await Task.detached { EngineService.stop() }.value
+            NSApp.terminate(nil)
+        }
     }
 
     @objc private func focusDesktop(_ sender: NSMenuItem) { send("space focus \(sender.tag)") }

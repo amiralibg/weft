@@ -65,7 +65,9 @@ ships them, and System Integrity Protection left exactly as it is.
   screen. Weft learns the floor from the window itself; your split ratios are
   untouched, so the room goes back when the window does.
 - **A menu-bar app** with a visual settings editor, a searchable keybinding
-  cheatsheet (`⌘K`), and a window switcher (`⌃⌥Space`).
+  cheatsheet (`⌘K`), and a window switcher (`⌃⌥Space`). **Quit Weft** stops
+  tiling and keybinds along with the icon; opening WeftBar starts them again.
+  Hold `⌥` for **Quit Menu Bar Only**, which leaves weft tiling.
 
 Weft is young, and it asks for real system permissions to do its job. The design
 notes in [`docs/DESIGN.md`](docs/DESIGN.md) are candid about what is solved, what

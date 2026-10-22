@@ -380,6 +380,9 @@ final class Daemon: @unchecked Sendable {
         // older weft left that the startup pass could not finish.
         writeLayouts(layoutsSnapshot())
         parker.unparkAll()
+        // A borders weft started goes with it: Quit Weft means no weft on
+        // screen, and a border ring around the last focused window is weft.
+        bordersBridge.stop()
     }
 
     /// The launch self-test (NATIVE.md, "Self-tests and degradation"): the
