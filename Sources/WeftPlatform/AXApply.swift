@@ -64,6 +64,9 @@ public final class AXApplier: @unchecked Sendable {
     /// inside this is app constraint, NOT refusal — never a failure, never a
     /// strike. Only position failure fails.
     private let sizeSlop: Double = 8.0
+    /// How long an Accessibility write may take to show before it counts as
+    /// refused (see the verify step of `setFrameOnQueue`).
+    private let lateApplyWait: TimeInterval = 0.15
     private let cid: SLConnectionID
     /// App activation only. Separate from the per-pid AX queues so a slow
     /// `activate()` never delays that app's frame writes (see `focusWindow`).
@@ -451,10 +454,17 @@ public final class AXApplier: @unchecked Sendable {
         let tDiff = Trace.start("apply.diff")
         var settled: [WindowID: Frame] = [:]
         var todo: [(wid: WindowID, frame: Frame, pid: Int32)] = []
-        let asked = lock.withLock { lastTarget }
+        let (asked, pending) = lock.withLock { (lastTarget, inFlight) }
         for (wid, frame) in frames {
             guard let pid = pids[wid] else { continue }
-            if !force,
+            // A window already where this asks is settled — unless an older
+            // write for somewhere else is still queued for it. That write
+            // would run after this pass and carry the window off to a slot
+            // it no longer has (swap twice quickly: the second swap found
+            // the window still home, skipped it, and the first swap's write
+            // landed anyway). Claiming it below supersedes the stale write.
+            let staleWrite = pending[wid].map { !framesEqual($0.frame, frame, tolerance: 0.5) } ?? false
+            if !force, !staleWrite,
                let actual = WorldReader.frame(of: wid),
                isSettled(actual, at: frame, lastTarget: asked[wid], sizeSlop: sizeSlop)
             {
@@ -1121,6 +1131,22 @@ public final class AXApplier: @unchecked Sendable {
                         posOK = abs(rect.minX - target.x) <= verifyTolerance
                             && abs(rect.minY - target.y) <= verifyTolerance
                     } else { haveRect = false }
+                }
+                // Through Accessibility an app may take the frame and apply it
+                // a moment later: Gecko (Zen, Firefox) answers the write at
+                // once and moves on its next layout pass. Read straight away,
+                // that is the old position twice — a "refusal" — and two of
+                // those floated a window that tiles perfectly well as a quirk,
+                // for good. Give it a few frames before judging; only this
+                // app's own queue waits.
+                if publicBounds, haveRect, !posOK {
+                    let deadline = Date().addingTimeInterval(lateApplyWait)
+                    while !posOK, Date() < deadline {
+                        usleep(10_000)
+                        guard readBack(&rect) == 0 else { haveRect = false; break }
+                        posOK = abs(rect.minX - target.x) <= verifyTolerance
+                            && abs(rect.minY - target.y) <= verifyTolerance
+                    }
                 }
             }
             // One more size write when the first fell well short. An app
