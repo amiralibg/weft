@@ -354,22 +354,26 @@ private func layoutNode(
             return
         }
         let totalGap = innerGap * Double(n - 1)
-        func shares(_ c: Container, avail: Double, horizontal: Bool) -> [Double] {
-            let ratios = (0..<n).map { $0 < c.ratios.count ? c.ratios[$0] : 1.0 / Double(n) }
-            guard !minimums.isEmpty else { return ratios.map { avail * $0 } }
+        func ratio(_ i: Int) -> Double { i < c.ratios.count ? c.ratios[i] : 1.0 / Double(n) }
+        // Shares bent around minimums, or nil when no window has one: the
+        // plain split then reads its ratios in place, allocating nothing —
+        // this runs on the core queue for every apply (LayoutBudgetTests).
+        func shares(avail: Double, horizontal: Bool) -> [Double]? {
+            guard !minimums.isEmpty else { return nil }
             let least = c.children.map {
                 minimumExtent($0, horizontal: horizontal, innerGap: innerGap, minimums: minimums)
             }
-            return constrainedShares(avail: avail, ratios: ratios, minimums: least)
+            guard least.contains(where: { $0 > 0 }) else { return nil }
+            return constrainedShares(avail: avail, ratios: (0..<n).map(ratio), minimums: least)
         }
         switch c.layout {
         case .splitV:
             let avail = max(frame.width - totalGap, 0)
-            let shares = shares(c, avail: avail, horizontal: true)
+            let shares = shares(avail: avail, horizontal: true)
             var x = frame.x
             for (i, child) in c.children.enumerated() {
                 // Last child takes the remainder so rounding never leaks/loses a pixel.
-                let w = (i == n - 1) ? (frame.x + frame.width - x) : shares[i]
+                let w = (i == n - 1) ? (frame.x + frame.width - x) : shares?[i] ?? avail * ratio(i)
                 layoutNode(
                     child,
                     in: Frame(x: x, y: frame.y, width: max(w, 1), height: frame.height),
@@ -379,10 +383,10 @@ private func layoutNode(
             }
         case .splitH:
             let avail = max(frame.height - totalGap, 0)
-            let shares = shares(c, avail: avail, horizontal: false)
+            let shares = shares(avail: avail, horizontal: false)
             var y = frame.y
             for (i, child) in c.children.enumerated() {
-                let h = (i == n - 1) ? (frame.y + frame.height - y) : shares[i]
+                let h = (i == n - 1) ? (frame.y + frame.height - y) : shares?[i] ?? avail * ratio(i)
                 layoutNode(
                     child,
                     in: Frame(x: frame.x, y: y, width: frame.width, height: max(h, 1)),
