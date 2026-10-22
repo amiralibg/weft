@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>weft, a tiling window manager for macOS</title>
+  <meta name="description" content="Weft tiles every macOS desktop and runs your keyboard shortcuts inside one small native app. Mission Control, swipes and System Integrity Protection stay as macOS ships them.">
+  <meta name="theme-color" content="#000000">
+  <meta property="og:title" content="weft, a tiling window manager for macOS">
+  <meta property="og:description" content="Windows that tile themselves. Native desktops, instant shortcuts, SIP stays on.">
+  <meta property="og:image" content="assets/weft-icon.png">
+  <link rel="icon" href="assets/weft-icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" data-nav>
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="weft, back to top">
+        <img src="assets/weft-icon.png" alt="" width="22" height="22">
+        <span>weft</span>
+      </a>
+      <nav aria-label="Sections">
+        <ul class="nav-links">
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#try">Try it</a></li>
+          <li><a href="https://github.com/amiralibg/weft">GitHub</a></li>
+        </ul>
+      </nav>
+      <a class="pill pill-small pill-blue" href="#install">Download</a>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- ── Hero ─────────────────────────────────────────────────── -->
+    <section class="hero" data-theme="dark" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy" data-hero-copy>
+        <p class="hero-kicker intro" style="--i:0"><img src="assets/weft-icon.png" alt="" width="28" height="28">weft <span data-version>0.9.22</span></p>
+        <h1 id="hero-title" class="hero-title">
+          <span class="intro" style="--i:1">Windows that</span>
+          <span class="intro gradient-text" style="--i:2">tile themselves.</span>
+        </h1>
+        <p class="hero-sub intro" style="--i:3">A tiling window manager for macOS. Every desktop arranges itself, every shortcut answers the moment you press it, and System Integrity Protection stays on.</p>
+        <div class="hero-cta intro" style="--i:4">
+          <a class="pill pill-blue" data-download href="https://github.com/amiralibg/weft/releases/latest">Download for Mac</a>
+          <a class="pill pill-outline" href="#try">Try it in your browser</a>
+        </div>
+        <p class="hero-meta intro" style="--i:5">macOS 15 or later. Apple silicon and Intel. Free and open source.</p>
+      </div>
+
+      <div class="hero-stage intro" style="--i:6" data-hero-stage>
+        <div class="macbook" aria-hidden="true">
+          <div class="mb-lid">
+            <div class="mb-bezel">
+              <span class="mb-notch"></span>
+              <div class="display" data-display="hero">
+                <div class="menubar">
+                  <span class="mb-app" data-app-name>Finder</span>
+                  <span class="mb-menus">File&nbsp;&nbsp;&nbsp;Edit&nbsp;&nbsp;&nbsp;View&nbsp;&nbsp;&nbsp;Window&nbsp;&nbsp;&nbsp;Help</span>
+                  <span class="mb-right">
+                    <span class="weft-item"><svg viewBox="0 0 16 16" width="13" height="13"><rect x="1.5" y="1.5" width="13" height="13" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v13M8 8h6.5" stroke="currentColor" stroke-width="1.5"/></svg><span data-desk-label>1</span></span>
+                    <svg class="mb-icon" viewBox="0 0 20 14" width="17" height="12"><path d="M10 12.5 2.5 5a10.6 10.6 0 0 1 15 0Z" fill="currentColor"/></svg>
+                    <svg class="mb-icon" viewBox="0 0 26 13" width="22" height="11"><rect x=".75" y=".75" width="21.5" height="11.5" rx="3.2" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".55"/><rect x="2.5" y="2.5" width="15" height="8" rx="1.8" fill="currentColor"/><path d="M23.6 4.5v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".55"/></svg>
+                    <span class="mb-clock">Fri 9:41</span>
+                  </span>
+                </div>
+                <div class="screen" data-screen></div>
+                <div class="hud" data-hud><span data-hud-keys></span><span class="hud-label" data-hud-label></span></div>
+              </div>
+            </div>
+          </div>
+          <div class="mb-base"><span></span></div>
+        </div>
+        <button class="playpause" type="button" data-playpause aria-label="Pause the animation" aria-pressed="false">
+          <svg class="icon-pause" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="5" y="4" width="3.2" height="12" rx="1" fill="currentColor"/><rect x="11.8" y="4" width="3.2" height="12" rx="1" fill="currentColor"/></svg>
+          <svg class="icon-play" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M6 4.2v11.6a.8.8 0 0 0 1.2.7l9.4-5.8a.8.8 0 0 0 0-1.4L7.2 3.5a.8.8 0 0 0-1.2.7Z" fill="currentColor"/></svg>
+        </button>
+        <p class="sr-only">An animation of a MacBook running weft: windows open and split the screen between them, focus and windows move with the keyboard, and the desktop switches.</p>
+      </div>
+    </section>
+
+    <!-- ── How it works: a pinned scene ─────────────────────────── -->
+    <section class="story" data-theme="light" id="how" aria-labelledby="how-title" data-story>
+      <div class="story-pin">
+        <h2 id="how-title" class="story-eyebrow">How weft works</h2>
+
+        <div class="studio" aria-hidden="true">
+          <div class="sd-frame">
+            <div class="display" data-display="story">
+              <div class="menubar">
+                <span class="mb-app" data-app-name>Finder</span>
+                <span class="mb-menus">File&nbsp;&nbsp;&nbsp;Edit&nbsp;&nbsp;&nbsp;View&nbsp;&nbsp;&nbsp;Window</span>
+                <span class="mb-right">
+                  <span class="weft-item"><svg viewBox="0 0 16 16" width="12" height="12"><rect x="1.5" y="1.5" width="13" height="13" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v13M8 8h6.5" stroke="currentColor" stroke-width="1.5"/></svg><span data-desk-label>1</span></span>
+                  <span class="mb-clock">Fri 9:41</span>
+                </span>
+              </div>
+              <div class="screen" data-screen></div>
+              <div class="hud" data-hud><span data-hud-keys></span><span class="hud-label" data-hud-label></span></div>
+            </div>
+          </div>
+          <div class="sd-stand"></div>
+        </div>
+
+        <ol class="story-steps" data-story-steps>
+          <li class="story-step"><h3>Open a window.</h3><p>It fills the desktop. No dragging, no snapping, nothing to arrange.</p></li>
+          <li class="story-step"><h3>Open another. It takes half.</h3><p>The focused window gives up half of its space to the new one.</p></li>
+          <li class="story-step"><h3>A third splits the long side.</h3><p>Weft cuts along whichever side is longer, so windows stay usable shapes.</p></li>
+          <li class="story-step"><h3>Moving restructures. It never swaps.</h3><p><kbd>⌥⇧H</kbd> takes Notes one step west in the layout, into a column of its own. Nothing trades places, so nothing shrinks to a quarter.</p></li>
+          <li class="story-step"><h3>Every desktop is a workspace.</h3><p><kbd>⌥1</kbd> to <kbd>⌥8</kbd> jump between your Mission Control desktops, and each one keeps its own layout.</p></li>
+          <li class="story-step"><h3>Mission Control still works.</h3><p>These are real macOS desktops, so swipes, <kbd>⌃←</kbd> <kbd>⌃→</kbd> and full-screen apps work as they always have.</p></li>
+        </ol>
+
+        <div class="story-dots" aria-hidden="true" data-story-dots></div>
+      </div>
+    </section>
+
+    <!-- ── Statement: words light up with scroll ─────────────────── -->
+    <section class="statement" data-theme="dark" aria-label="Speed" data-statement>
+      <div class="statement-pin">
+        <p class="statement-text" data-words>Weft reads the keyboard itself. A shortcut runs the moment you press it, with no process started per keypress. When nothing changes, weft does nothing at all. Your Mac stays quiet.</p>
+      </div>
+    </section>
+
+    <!-- ── Features ──────────────────────────────────────────────── -->
+    <section class="features" data-theme="light" id="features" aria-labelledby="features-title">
+      <div class="section-head reveal">
+        <h2 id="features-title">Everything else.<br><span class="muted">Built in.</span></h2>
+      </div>
+
+      <div class="bento">
+        <article class="tile tile-wide reveal" style="--d:0">
+          <div class="tile-art art-displays" aria-hidden="true">
+            <div class="ad-screen ad-a"><i></i><i></i></div>
+            <div class="ad-screen ad-b"><i></i><i></i><i></i></div>
+            <span class="ad-cable"></span>
+          </div>
+          <div class="tile-copy">
+            <h3>Plug in a display. Weft notices.</h3>
+            <p>Each desktop tiles inside its own display, and west and east pick a display by where it sits. Connect or disconnect one and the layouts follow, with no restart.</p>
+          </div>
+        </article>
+
+        <article class="tile reveal" style="--d:1">
+          <div class="tile-art art-stack" aria-hidden="true">
+            <span class="as-card as-1">Safari</span><span class="as-card as-2">Notes</span><span class="as-card as-3">Mail</span>
+          </div>
+          <div class="tile-copy">
+            <h3>Stacks</h3>
+            <p>Several windows share one slot. <kbd>⌥N</kbd> and <kbd>⌥P</kbd> cycle through them.</p>
+          </div>
+        </article>
+
+        <article class="tile reveal" style="--d:0">
+          <div class="tile-art art-drag" aria-hidden="true">
+            <i class="dr-a"></i><i class="dr-b"></i><span class="dr-cursor"></span>
+          </div>
+          <div class="tile-copy">
+            <h3>Drag the gap</h3>
+            <p>Resize two tiled windows by dragging the space between them. No modifier needed.</p>
+          </div>
+        </article>
+
+        <article class="tile reveal" style="--d:1">
+          <div class="tile-art art-rules" aria-hidden="true">
+            <pre><span class="k">[[rule]]</span>
+app   = <span class="s">"^Slack$"</span>
+space = <span class="s">"chat"</span></pre>
+            <span class="ru-chip">Slack</span><span class="ru-desk">chat</span>
+          </div>
+          <div class="tile-copy">
+            <h3>Window rules</h3>
+            <p>Match an app or a title with a regex. Send it to a desktop, or tell weft to leave it alone.</p>
+          </div>
+        </article>
+
+        <article class="tile reveal" style="--d:2">
+          <div class="tile-art art-modes" aria-hidden="true">
+            <span class="mo-pill"><b>resize</b> mode</span>
+            <span class="mo-keys"><i>H</i><i>J</i><i>K</i><i>L</i></span>
+          </div>
+          <div class="tile-copy">
+            <h3>Modes</h3>
+            <p>Layers like vim. <kbd>⌥⇧R</kbd> turns H, J, K and L into resize keys until you press Escape.</p>
+          </div>
+        </article>
+
+        <article class="tile tile-wide reveal" style="--d:0">
+          <div class="tile-art art-menu" aria-hidden="true">
+            <div class="me-bar"><span class="me-item">▣ 2</span></div>
+            <div class="me-menu">
+              <span class="me-head">Built-in Display</span>
+              <span class="me-row"><b>1</b>main</span>
+              <span class="me-row"><b>2</b>code</span>
+              <span class="me-row"><b>3</b>chat</span>
+              <span class="me-sep"></span>
+              <span class="me-row">Window Switcher…<kbd>⌃⌥Space</kbd></span>
+              <span class="me-row">Keyboard Shortcuts…<kbd>⌘K</kbd></span>
+              <span class="me-row">Settings…<kbd>⌘,</kbd></span>
+              <span class="me-sep"></span>
+              <span class="me-row">Quit Weft<kbd>⌘Q</kbd></span>
+              <span class="me-hl"></span>
+            </div>
+          </div>
+          <div class="tile-copy">
+            <h3>A menu bar app that stays out of the way.</h3>
+            <p>Your desktops at a glance, settings you can click through, a searchable list of your shortcuts, and a window switcher. Your config is still a plain TOML file.</p>
+          </div>
+        </article>
+
+        <article class="tile reveal" style="--d:1">
+          <div class="tile-art art-float" aria-hidden="true">
+            <i class="fl-a"></i><i class="fl-b"></i><i class="fl-c"></i>
+          </div>
+          <div class="tile-copy">
+            <h3>Tile or float</h3>
+            <p>Switch any desktop between <code>bsp</code> and <code>float</code>. Dialogs and panels float on their own.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ── Try it ───────────────────────────────────────────────── -->
+    <section class="try" data-theme="dark" id="try" aria-labelledby="try-title">
+      <div class="section-head section-head-dark reveal">
+        <h2 id="try-title">Try it yourself.</h2>
+        <p>The keys weft ships with. Hold <kbd>⌥</kbd> and press <kbd>H</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd>, add <kbd>⇧</kbd> to move a window, or press the keys below. Drag the space between windows to resize them.</p>
+      </div>
+
+      <div class="try-stage reveal">
+        <div class="try-display">
+          <div class="display" data-display="try">
+            <div class="menubar" aria-hidden="true">
+              <span class="mb-app" data-app-name>Terminal</span>
+              <span class="mb-menus">File&nbsp;&nbsp;&nbsp;Edit&nbsp;&nbsp;&nbsp;View&nbsp;&nbsp;&nbsp;Window</span>
+              <span class="mb-right">
+                <span class="weft-item"><svg viewBox="0 0 16 16" width="12" height="12"><rect x="1.5" y="1.5" width="13" height="13" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v13M8 8h6.5" stroke="currentColor" stroke-width="1.5"/></svg><span data-desk-label>1</span></span>
+                <span class="mb-clock">Fri 9:41</span>
+              </span>
+            </div>
+            <div class="screen" data-screen></div>
+            <div class="hud" data-hud aria-hidden="true"><span data-hud-keys></span><span class="hud-label" data-hud-label></span></div>
+          </div>
+        </div>
+
+        <div class="keyboard" data-keyboard>
+          <div class="kb-group">
+            <span class="kb-label">Focus</span>
+            <div class="kb-keys">
+              <span class="kb-mod" aria-hidden="true"><b>⌥</b>option</span>
+              <button class="kb-key" data-cmd="focus west" aria-label="Focus west, Option H">H</button>
+              <button class="kb-key" data-cmd="focus south" aria-label="Focus south, Option J">J</button>
+              <button class="kb-key" data-cmd="focus north" aria-label="Focus north, Option K">K</button>
+              <button class="kb-key" data-cmd="focus east" aria-label="Focus east, Option L">L</button>
+            </div>
+          </div>
+          <div class="kb-group">
+            <span class="kb-label">Move</span>
+            <div class="kb-keys">
+              <span class="kb-mod" aria-hidden="true"><b>⌥⇧</b>opt shift</span>
+              <button class="kb-key" data-cmd="move west" aria-label="Move west, Option Shift H">H</button>
+              <button class="kb-key" data-cmd="move south" aria-label="Move south, Option Shift J">J</button>
+              <button class="kb-key" data-cmd="move north" aria-label="Move north, Option Shift K">K</button>
+              <button class="kb-key" data-cmd="move east" aria-label="Move east, Option Shift L">L</button>
+            </div>
+          </div>
+          <div class="kb-group">
+            <span class="kb-label">Desktop</span>
+            <div class="kb-keys">
+              <span class="kb-mod" aria-hidden="true"><b>⌥</b>option</span>
+              <button class="kb-key" data-cmd="space focus 1" aria-label="Go to desktop 1, Option 1">1</button>
+              <button class="kb-key" data-cmd="space focus 2" aria-label="Go to desktop 2, Option 2">2</button>
+              <button class="kb-key" data-cmd="space focus 3" aria-label="Go to desktop 3, Option 3">3</button>
+            </div>
+          </div>
+          <div class="kb-group">
+            <span class="kb-label">Send window</span>
+            <div class="kb-keys">
+              <span class="kb-mod" aria-hidden="true"><b>⌥⇧</b>opt shift</span>
+              <button class="kb-key" data-cmd="space move-window 1" aria-label="Send window to desktop 1, Option Shift 1">1</button>
+              <button class="kb-key" data-cmd="space move-window 2" aria-label="Send window to desktop 2, Option Shift 2">2</button>
+              <button class="kb-key" data-cmd="space move-window 3" aria-label="Send window to desktop 3, Option Shift 3">3</button>
+            </div>
+          </div>
+          <div class="kb-group">
+            <span class="kb-label">Layout</span>
+            <div class="kb-keys">
+              <span class="kb-mod" aria-hidden="true"><b>⌥</b>option</span>
+              <button class="kb-key kb-wide" data-cmd="window toggle zoom-fullscreen" aria-label="Zoom the focused window, Option F">F<small>zoom</small></button>
+              <button class="kb-key kb-wide" data-cmd="balance" aria-label="Balance the layout, Option B">B<small>balance</small></button>
+            </div>
+          </div>
+          <div class="kb-group">
+            <span class="kb-label">Apps</span>
+            <div class="kb-keys">
+              <button class="kb-key kb-text" data-cmd="open">Open a window</button>
+              <button class="kb-key kb-text" data-cmd="close">Close window</button>
+            </div>
+          </div>
+        </div>
+
+        <p class="try-log" role="status" aria-live="polite"><span class="try-log-label">weft ran</span><code data-log>nothing yet</code><span data-log-note>Press a key to start.</span></p>
+      </div>
+    </section>
+
+    <!-- ── Install ──────────────────────────────────────────────── -->
+    <section class="install" data-theme="light" id="install" aria-labelledby="install-title">
+      <div class="install-head reveal">
+        <img class="install-icon" src="assets/weft-icon.png" alt="" width="96" height="96">
+        <h2 id="install-title">Get weft.</h2>
+        <p>Free, open source, and about a minute to set up.</p>
+        <div class="install-cta">
+          <a class="pill pill-blue pill-large" data-download href="https://github.com/amiralibg/weft/releases/latest">Download <span data-asset-name>WeftBar</span></a>
+        </div>
+        <p class="install-meta">macOS 15 or later. Apple silicon and Intel.</p>
+      </div>
+
+      <ol class="install-steps">
+        <li class="reveal" style="--d:0"><span class="step-num">1</span><h3>Open the zip</h3><p>Drag <strong>WeftBar</strong> into Applications.</p></li>
+        <li class="reveal" style="--d:1"><span class="step-num">2</span><h3>Open Anyway</h3><p>Weft isn't notarised yet. In System Settings, Privacy &amp; Security, click <strong>Open Anyway</strong>.</p></li>
+        <li class="reveal" style="--d:2"><span class="step-num">3</span><h3>Grant two permissions</h3><p>Setup walks you through Accessibility and Input Monitoring for the engine, <code>weftd</code>.</p></li>
+        <li class="reveal" style="--d:3"><span class="step-num">4</span><h3>Start tiling</h3><p>Open a window and it finds its place. <kbd>⌘K</kbd> in the menu shows every shortcut.</p></li>
+      </ol>
+
+      <div class="terminal reveal" data-terminal>
+        <div class="terminal-bar">
+          <span class="lights" aria-hidden="true"><span class="light light-close"></span><span class="light light-min"></span><span class="light light-max"></span></span>
+          <span class="terminal-title">Prefer Terminal? One command, nothing compiles.</span>
+          <button class="terminal-copy" type="button" data-copy="install-cmd">Copy</button>
+        </div>
+        <pre class="terminal-body"><span class="t-prompt" aria-hidden="true">~ %</span> <code id="install-cmd" data-type>curl -fsSL --retry 5 --retry-all-errors \
+  https://raw.githubusercontent.com/amiralibg/weft/main/scripts/install-release.sh | bash</code><span class="cursor" aria-hidden="true"></span></pre>
+      </div>
+      <p class="terminal-note reveal">It downloads the latest release, checks its checksum, installs <code>weftd</code> and <code>weftctl</code> in <code>~/.local/bin</code> and WeftBar in <code>~/Applications</code>, then opens Setup. Rather read it first? Take the archive from the <a href="https://github.com/amiralibg/weft/releases/latest">releases page</a> and run its <code>install.sh</code>.</p>
+
+      <div class="facts">
+        <p class="reveal" style="--d:0"><strong>Permissions go to the engine.</strong> macOS grants them per program, and the program moving your windows is <code>weftd</code>, not the icon in your menu bar.</p>
+        <p class="reveal" style="--d:1"><strong>Updates come from the menu.</strong> When a release is out, <em>Update to weft…</em> appears in WeftBar's menu.</p>
+        <p class="reveal" style="--d:2"><strong>Stopping is one click.</strong> <em>Quit Weft</em> stops tiling, shortcuts and the menu bar icon together. Open WeftBar to start again.</p>
+      </div>
+    </section>
+
+    <!-- ── Candid ───────────────────────────────────────────────── -->
+    <section class="candid" data-theme="light" aria-labelledby="candid-title">
+      <div class="candid-inner reveal">
+        <h2 id="candid-title">Weft is young.</h2>
+        <p>It needs real permissions to move your windows. For desktops it uses a few private macOS calls. It tests each one when it starts and checks every result, and if a macOS update breaks one, weft turns it off, tells you, and keeps tiling. The design notes are blunt about what works and what macOS won't allow.</p>
+        <a class="text-link" href="https://github.com/amiralibg/weft/blob/main/docs/DESIGN.md">Read the design notes <span aria-hidden="true">›</span></a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer" data-theme="light">
+    <div class="footer-inner">
+      <p class="footer-brand"><img src="assets/weft-icon.png" alt="" width="18" height="18"> weft</p>
+      <ul class="footer-links">
+        <li><a href="https://github.com/amiralibg/weft">Source on GitHub</a></li>
+        <li><a href="https://github.com/amiralibg/weft/releases">All releases</a></li>
+        <li><a href="https://github.com/amiralibg/weft/issues/new/choose">Report a bug</a></li>
+        <li><a href="https://github.com/amiralibg/weft/blob/main/LICENSE">MIT license</a></li>
+      </ul>
+      <p class="footer-fine">Weft is not affiliated with Apple. Mac, macOS and Mission Control are trademarks of Apple Inc.</p>
+    </div>
+  </footer>
+
+  <script src="tiler.js" defer></script>
+  <script src="main.js" defer></script>
+</body>
+</html>
