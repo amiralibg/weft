@@ -8,6 +8,13 @@ let package = Package(
         .executable(name: "weftd", targets: ["weftd"]),
         .executable(name: "weftctl", targets: ["weftctl"]),
         .executable(name: "weft-bar", targets: ["weft-bar"]),
+        // The engine Shuttle (github.com/amiralibg/shuttle) builds on: private
+        // routes, Accessibility, desktops, hotkeys, the socket. One copy, so a
+        // macOS update that breaks a route is fixed once for both apps.
+        .library(
+            name: "WeftKit",
+            targets: ["SkyLightShim", "WeftCore", "WeftPlatform", "WeftInput", "WeftIPC"]
+        ),
     ],
     targets: [
         // C target: private SLS/CGS/AX symbols, resolved by name at load time
