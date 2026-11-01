@@ -642,6 +642,13 @@ these needs a private call beyond what the platform budget already allows.
    reported landing, then fades the copies over them. A second placement
    mid-glide retargets the springs instead of restarting. Moves whose two ends
    are on different displays are still not animated.
+   Replaced after 0.9.23 by `LiveAnimator`, Shuttle's model: no copies at all.
+   The real windows follow the spring (ω = 26) through Accessibility, one
+   frame per display refresh, newest frame wins per window so a slow app gets
+   fewer frames instead of a backlog, and the full frame-set protocol lands
+   the exact target when each spring settles. The stage's capture latency,
+   stretched bitmaps, wait for the slowest app and closing crossfade are gone,
+   and so is its need for Screen Recording.
 8. **`NSPanel` borders** for the public path, and a scored popup classifier
    with a shared, versioned rules database.
 

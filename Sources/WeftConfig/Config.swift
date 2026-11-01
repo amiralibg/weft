@@ -72,12 +72,10 @@ public struct GeneralConfig: Sendable, Equatable {
     /// assistive tooling misbehaves with that goes here.
     public var enhancedUIExempt: [String]
     /// Whether placed windows glide into their slots instead of teleporting
-    /// (the REDESIGN roadmap's snapshot-proxy animations, now the
-    /// `PlacementAnimator` in WeftPlatform): a proxy copy of each moved
-    /// window glides old frame to new while the real window is already
-    /// beneath it, then fades. On by default; the pixels it glides need
-    /// Screen Recording, so with the permission missing the answer is the
-    /// instant move.
+    /// (`LiveAnimator` in WeftPlatform): the real windows follow a spring at
+    /// the display's refresh rate, newest frame first for a slow app, and
+    /// land on the exact frame. On by default; Reduce Motion makes every
+    /// move instant.
     public var placementAnimation: Bool
     public var reserve: ScreenReserve
 

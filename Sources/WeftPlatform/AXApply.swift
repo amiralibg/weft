@@ -81,13 +81,23 @@ public final class AXApplier: @unchecked Sendable {
     private var pendingResizes: [(wid: WindowID, frame: Frame, pid: Int32)]?
     private var resizeInFlight = false
     private let dragQueue = DispatchQueue(label: "weft.ax.drag", qos: .userInteractive)
-    /// Placement animations (PlacementAnimator's doc is the whole story):
-    /// proxies for what would otherwise teleport. Default off — config turns
-    /// it on, Screen Recording turns captures on.
-    public let placementAnimator = PlacementAnimator()
+    /// Placement animations (LiveAnimator's doc is the whole story): the real
+    /// windows glide into their slots. Default off — config turns it on.
+    public let liveAnimator = LiveAnimator()
+    /// The newest in-between frame of a glide waiting to be written, per
+    /// window, and the windows whose app queue is already draining them.
+    private var liveFrames: [WindowID: (pid: Int32, frame: Frame)] = [:]
+    private var liveDraining: Set<WindowID> = []
+    /// Until when a gliding window's moved/resized notifications are ours.
+    /// Each in-between frame arrives late and is already stale by the time
+    /// the observer reads the window, so matching it against one expected
+    /// frame would read our own glide back as the user dragging.
+    private var gliding: [WindowID: Date] = [:]
+    private let glideEchoTail: TimeInterval = 0.35
 
     public init() {
         self.cid = SLSMainConnectionID()
+        liveAnimator.post = { [unowned self] wid, pid, frame in self.postLiveFrame(wid, pid: pid, frame) }
     }
 
     // MARK: - Binding
@@ -183,6 +193,11 @@ public final class AXApplier: @unchecked Sendable {
         /// small windows, where a false positive costs little and a false
         /// negative is very visible.
         case panelChrome
+        /// `AXModal`: a sign-in, passkey or permission prompt.
+        case modal
+        /// Small, and neither minimisable nor able to go full screen — a
+        /// dialog's title bar on a window reporting the standard subrole.
+        case dialogChrome
     }
 
     /// Is this a real, tileable window?
@@ -239,29 +254,41 @@ public final class AXApplier: @unchecked Sendable {
                 el, kAXSizeAttribute as CFString, &sizeSettable
             ) == .success else { return nil }
             guard sizeSettable.boolValue else { return .failure(.fixedSize) }
-            // Chrome check, small windows only. A real document window has a
-            // minimise button, a full-screen button, or both; a floating
-            // widget that has talked its way past the two tests above has
-            // neither. Restricted by size because a legitimately chromeless
-            // window (a game, a kiosk view) is always large, and floating one
-            // of those would be much worse than tiling a badge.
+            // Chrome check (`WindowChrome`). A real document window can be
+            // minimised, can go full screen, or both. A sign-in or passkey
+            // prompt, a permission dialog, a floating widget that has talked
+            // its way past the two tests above can do neither, and a modal
+            // window says so outright. Size-bounded, because a legitimately
+            // chromeless window (a game, a kiosk view) is always large.
             var bounds = CGRect.zero
-            if Self.readBounds(wid, &bounds) == 0,
-               bounds.width < 480 || bounds.height < 320
-            {
-                var button: CFTypeRef?
-                let chrome = [
-                    kAXMinimizeButtonAttribute,
-                    kAXFullScreenButtonAttribute,
-                    kAXCloseButtonAttribute,
-                ].contains {
-                    AXUIElementCopyAttributeValue(el, $0 as CFString, &button) == .success
-                }
-                // All three absent, or it is a real window. One title-bar
-                // button is enough to prove there is a title bar.
-                if !chrome { return .failure(.panelChrome) }
+            guard Self.readBounds(wid, &bounds) == 0 else { return .success(()) }
+            func element(_ attr: String) -> AXUIElement? {
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success,
+                      let ref, CFGetTypeID(ref) == AXUIElementGetTypeID()
+                else { return nil }
+                return (ref as! AXUIElement)
             }
-            return .success(())
+            func bool(_ e: AXUIElement, _ attr: String) -> Bool? {
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(e, attr as CFString, &ref) == .success else { return nil }
+                return (ref as? NSNumber)?.boolValue
+            }
+            let minimize = element(kAXMinimizeButtonAttribute)
+            let chrome = WindowChrome(
+                width: bounds.width, height: bounds.height,
+                hasClose: element(kAXCloseButtonAttribute) != nil,
+                // A button AX cannot say is enabled counts as working.
+                canMinimize: minimize.map { bool($0, kAXEnabledAttribute) ?? true } ?? false,
+                hasFullScreen: element(kAXFullScreenButtonAttribute) != nil,
+                modal: bool(el, kAXModalAttribute) ?? false
+            )
+            switch chrome.verdict {
+            case .window: return .success(())
+            case .modal: return .failure(.modal)
+            case .dialog: return .failure(.dialogChrome)
+            case .panel: return .failure(.panelChrome)
+            }
     }
 
     /// `classify` for a whole sweep at once, one pass per app instead of one
@@ -514,51 +541,58 @@ public final class AXApplier: @unchecked Sendable {
             completion?(ApplyResult(applied: 0, skipped: frames.count, errors: 0))
             return
         }
-        // The stage goes up before anything moves (PlacementAnimator): every
-        // real write below then happens behind it, in whatever order and at
-        // whatever moment each app answers, and it comes down once they have
-        // all landed.
-        placementAnimator.prepare(todo.map { (wid: $0.wid, to: $0.frame) }, settled: settled)
-        Trace.time("apply.commit") { commitPositions(todo) }
-        let grouped = Dictionary(grouping: todo, by: { $0.pid })
+        // Which writes glide (`LiveAnimator`): the windows that are on screen
+        // and really moving within one display, plus any already mid-glide,
+        // whose springs are retargeted. Everything else is written at once.
+        let glides = glidePlan(todo)
+        let instant = todo.filter { glides[$0.wid] == nil }
+        Trace.time("apply.commit") { commitPositions(instant) }
         let group = DispatchGroup()
         let counter = Counter()
-        for (pid, items) in grouped {
+        // The full frame-set protocol for one window, on its app's queue.
+        let land: @Sendable ((wid: WindowID, frame: Frame, pid: Int32)) -> Void = { item in
+            let gen = gens[item.wid]
+            // Superseded while it waited: a newer apply claimed this window,
+            // and its write is behind this one on the same serial queue (or
+            // waits on the same spring). Performing this one would be a
+            // relayout the app throws away a moment later.
+            guard self.lock.withLock({ self.inFlight[item.wid]?.gen == gen }) else { return }
+            // One immediate retry: transient timeouts (Gecko relayout,
+            // JetBrains) are the common failure, not dead apps — the 0.15s
+            // messaging timeout bounds both.
+            var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: item.pid)
+            if reason != nil {
+                // The app may have replaced the window's element (closed and
+                // reopened it): the retry resolves the new one instead of
+                // writing to the dead one again.
+                if self.deadElement(item.wid) { self.forgetElement(item.wid) }
+                reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: item.pid)
+            }
+            counter.add(reason: reason, wid: item.wid)
+            self.lock.withLock {
+                if self.inFlight[item.wid]?.gen == gen {
+                    self.inFlight.removeValue(forKey: item.wid)
+                }
+            }
+        }
+        for (pid, items) in Dictionary(grouping: instant, by: { $0.pid }) {
             group.enter()
             queue(for: pid).async {
-                self.withEnhancedUIOff(pid: pid) {
-                    for item in items {
-                        let gen = gens[item.wid]
-                        // Superseded while it waited: a newer apply claimed
-                        // this window, and its write is behind this one on
-                        // the same serial queue. Performing this one would be
-                        // a relayout the app throws away a moment later.
-                        guard self.lock.withLock({ self.inFlight[item.wid]?.gen == gen }) else {
-                            continue
-                        }
-                        // One immediate retry: transient timeouts (Gecko
-                        // relayout, JetBrains) are the common failure, not
-                        // dead apps — the 0.15s messaging timeout bounds both.
-                        var reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
-                        if reason != nil {
-                            // The app may have replaced the window's element
-                            // (closed and reopened it): the retry resolves the
-                            // new one instead of writing to the dead one again.
-                            if self.deadElement(item.wid) { self.forgetElement(item.wid) }
-                            reason = self.setFrameOnQueue(item.frame, wid: item.wid, pid: pid)
-                        }
-                        counter.add(reason: reason, wid: item.wid)
-                        // Landed or refused, this window has nothing more to
-                        // wait for: the stage may come down once all have.
-                        self.placementAnimator.markLanded(item.wid, frame: item.frame)
-                        self.lock.withLock {
-                            if self.inFlight[item.wid]?.gen == gen {
-                                self.inFlight.removeValue(forKey: item.wid)
-                            }
-                        }
-                    }
-                }
+                self.withEnhancedUIOff(pid: pid) { for item in items { land(item) } }
                 group.leave()
+            }
+        }
+        for item in todo {
+            guard let from = glides[item.wid] else { continue }
+            group.enter()
+            let settle: @Sendable () -> Void = {
+                self.queue(for: item.pid).async {
+                    self.withEnhancedUIOff(pid: item.pid) { land(item) }
+                    group.leave()
+                }
+            }
+            if !liveAnimator.animate(item.wid, pid: item.pid, from: from, to: Self.rect(item.frame), onSettle: settle) {
+                settle()
             }
         }
         group.notify(queue: .global(qos: .utility)) {
@@ -600,9 +634,14 @@ public final class AXApplier: @unchecked Sendable {
     /// the full protocol and fixes anything that drifted.
     public func applyDragFrames(frames: [WindowID: Frame], pids: [WindowID: Int32]) {
         guard !frames.isEmpty else { return }
-        // A drag moves the reals live under the cursor; a stage still up from
-        // the placement before it would hide exactly that.
-        placementAnimator.cancelAll()
+        // A drag moves the windows under the cursor; a glide still running
+        // from the placement before it would fight the hand. Its landing
+        // writes are dropped too (they would put the window back in its old
+        // slot mid-drag): the settle at the end of the drag lands everything.
+        if frames.keys.contains(where: liveAnimator.isAnimating) {
+            lock.withLock { for wid in frames.keys { inFlight.removeValue(forKey: wid) } }
+            liveAnimator.finishAll()
+        }
         var resizes: [(wid: WindowID, frame: Frame, pid: Int32)] = []
         // Without a WindowServer move that lands, positions go the slow way
         // with the sizes, through Accessibility.
@@ -697,6 +736,115 @@ public final class AXApplier: @unchecked Sendable {
             }
         }
         group.notify(queue: dragQueue) { [weak self] in self?.drainResizes() }
+    }
+
+    /// Where each gliding write starts from, keyed by window: the ones on
+    /// screen that move at least 2pt and stay on their display, and any window
+    /// already gliding (its spring is retargeted, `from` unused). Empty with
+    /// animations off or under Reduce Motion. A window on another desktop is
+    /// not seen moving, and a cross-display move through Accessibility in
+    /// small steps would be clamped by every display edge it meets.
+    private func glidePlan(_ todo: [(wid: WindowID, frame: Frame, pid: Int32)]) -> [WindowID: CGRect] {
+        guard liveAnimator.enabled, !todo.isEmpty,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else { return [:] }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let onScreen = Set(list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
+        let displays = Self.activeDisplays()
+        var out: [WindowID: CGRect] = [:]
+        for item in todo {
+            var pre = CGRect.zero
+            guard onScreen.contains(UInt32(item.wid)), Self.readBounds(item.wid, &pre) == 0 else { continue }
+            if liveAnimator.isAnimating(item.wid) {
+                out[item.wid] = pre
+                continue
+            }
+            let to = Self.rect(item.frame)
+            guard LiveAnimator.distance(pre, to) >= 2,
+                  let d = Self.display(of: pre, in: displays), Self.display(of: to, in: displays) == d
+            else { continue }
+            out[item.wid] = pre
+        }
+        return out
+    }
+
+    static func rect(_ f: Frame) -> CGRect {
+        CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
+    }
+
+    static func activeDisplays() -> [CGRect] {
+        var count: UInt32 = 0
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        guard CGGetActiveDisplayList(16, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    /// Index of the display holding `r`'s centre, else the first it touches.
+    static func display(of r: CGRect, in displays: [CGRect]) -> Int? {
+        let centre = CGPoint(x: r.midX, y: r.midY)
+        return displays.firstIndex { $0.contains(centre) } ?? displays.firstIndex { $0.intersects(r) }
+    }
+
+    /// One in-between frame of a glide (`LiveAnimator`). It replaces any frame
+    /// still waiting for the window, and the app's queue starts draining if it
+    /// is not already: a slow app gets fewer, newer frames, never a backlog.
+    private func postLiveFrame(_ wid: WindowID, pid: Int32, _ frame: Frame) {
+        let start: Bool = lock.withLock {
+            liveFrames[wid] = (pid, frame)
+            gliding[wid] = Date().addingTimeInterval(glideEchoTail)
+            return liveDraining.insert(wid).inserted
+        }
+        guard start else { return }
+        queue(for: pid).async { self.drainLive(wid, pid: pid) }
+    }
+
+    /// Runs on the app's queue until no in-between frame waits for `wid`. No
+    /// read-back and no correction: the protocol write when the spring
+    /// settles does that once, for the frame that matters.
+    private func drainLive(_ wid: WindowID, pid: Int32) {
+        guard let el = resolveElement(for: wid, pid: pid) else {
+            lock.withLock {
+                liveFrames.removeValue(forKey: wid)
+                liveDraining.remove(wid)
+            }
+            return
+        }
+        withEnhancedUIOff(pid: pid) {
+            while true {
+                let next: Frame? = lock.withLock {
+                    let f = liveFrames.removeValue(forKey: wid)?.frame
+                    if f == nil { liveDraining.remove(wid) }
+                    return f
+                }
+                guard let frame = next else { return }
+                var pre = CGRect.zero
+                let readable = Self.readBounds(wid, &pre) == 0
+                let resize = !readable
+                    || abs(pre.width - frame.width) > 0.5 || abs(pre.height - frame.height) > 0.5
+                let order: AXWriteOrder = readable && resize
+                    ? axWriteOrder(from: Frame(x: pre.minX, y: pre.minY, width: pre.width, height: pre.height), to: frame)
+                    : .positionThenSize
+                func size() {
+                    guard resize else { return }
+                    var s = CGSize(width: frame.width, height: frame.height)
+                    if let v = AXValueCreate(.cgSize, &s) {
+                        AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, v)
+                    }
+                }
+                func position() {
+                    var p = CGPoint(x: frame.x, y: frame.y)
+                    if PrivateAPI.canMoveOtherAppsWindows {
+                        SLSMoveWindow(cid, wid, &p)
+                    } else if let v = AXValueCreate(.cgPoint, &p) {
+                        AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, v)
+                    }
+                }
+                switch order {
+                case .positionThenSize: position(); size()
+                case .sizeThenPosition: size(); position()
+                }
+            }
+        }
     }
 
     /// Put every window at its target position in one WindowServer commit.
@@ -882,6 +1030,10 @@ public final class AXApplier: @unchecked Sendable {
     /// Expires after `echoTTL` so stale targets never suppress real user moves.
     public func isEcho(wid: WindowID, frame: Frame) -> Bool {
         lock.withLock {
+            if let until = gliding[wid] {
+                if Date() < until { return true }
+                gliding.removeValue(forKey: wid)
+            }
             guard let exp = expectedFrame[wid], let at = expectedAt[wid] else { return false }
             guard Date().timeIntervalSince(at) <= echoTTL else {
                 expectedFrame.removeValue(forKey: wid)

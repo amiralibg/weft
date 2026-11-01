@@ -151,8 +151,7 @@ final class Daemon: @unchecked Sendable {
         self.screensByUUID = Dictionary(uniqueKeysWithValues: SpaceControl.tilingAreas(layout))
         self.displayOrder = layout.map { $0.uuid }
         loadConfigFile(initial: true)
-        applier.placementAnimator.enabled =
-            currentConfig().general.placementAnimation && CGPreflightScreenCaptureAccess()
+        applier.liveAnimator.enabled = currentConfig().general.placementAnimation
         bus.sink = { [hub, weak self] event in
             // Encode only if somebody is listening. `hub` is the `weftctl
             // subscribe` fan-out, and the trace is off unless asked for:
@@ -1031,9 +1030,6 @@ final class Daemon: @unchecked Sendable {
         actedSpacesLock.withLock { actedSpacesLocked = now }
         bus.emit(DaemonEvent(kind: .spaceChanged))
         syncFromSnapshot()
-        // Another desktop can have another picture: the next placement's
-        // backdrop is taken now, while nothing is waiting on it.
-        applier.placementAnimator.prewarm()
     }
 
     /// Sweep only if the WindowServer is showing a different desktop from the
@@ -1285,6 +1281,9 @@ final class Daemon: @unchecked Sendable {
         // Windows whose fullscreen memo says "not home yet": one bridged move
         // each, carried out in phase 3 like the rule moves.
         var pendingFullscreen: [FullscreenRestore] = []
+        // Windows kept out of every layout this sweep until AX says what they
+        // are (see the hold in the membership loop).
+        var held: Set<WindowID> = []
         // For telling a borderless-fullscreen game or player from a window,
         // and for numbering the displays west to east.
         let screenFrames = SpaceControl.displayLayout()
@@ -1400,6 +1399,8 @@ final class Daemon: @unchecked Sendable {
             // the menu bar — and not to the workspace showing at the time.
             var looseDesktops: [WindowID: [SpaceID]] = [:]
             let showing = Set(sp.currentByDisplay.values)
+            // Every window some layout already holds, for the hold below.
+            let laidOut = Set(sp.workspaces.values.flatMap { $0.layout.windows })
             // On every desktop (Dock › Options › All Desktops): floats, and
             // weft never moves it (NATIVE.md).
             let everywhere = membershipByDesktop(
@@ -1456,6 +1457,24 @@ final class Daemon: @unchecked Sendable {
                 // guessing "no" there would unmanage the whole space.
                 if self.standardWindow[w.id] == false {
                     unmanagedNow.insert(w.id)
+                    continue
+                }
+                // Not classified yet, on a desktop the user is looking at, and
+                // new to every layout: wait for AX's answer before giving it a
+                // slot. A sign-in or passkey prompt, a sheet or a popover used
+                // to be tiled the moment it appeared — every other window on
+                // the desktop squeezed aside — and only floated a sweep or a
+                // second later, when AX answered or the "AX cannot see it"
+                // timer ran out. Shuttle never tiles a window it has not
+                // classified, and nothing jumps. The wait is a sweep or two
+                // for a real window (the creation ladder and the follow-up
+                // below re-ask), and bounded by that timer for one AX never
+                // names. Off-screen desktops still guess "manage" (S0): AX
+                // cannot see them, and guessing no would unmanage a whole
+                // desktop.
+                if self.standardWindow[w.id] == nil, !screenLocked,
+                   !Set(w.spaces).isDisjoint(with: showing), !laidOut.contains(w.id) {
+                    held.insert(w.id)
                     continue
                 }
                 let bundle = bundles[w.pid] ?? nil
@@ -1701,6 +1720,15 @@ final class Daemon: @unchecked Sendable {
             pendingClassify = work
             syncQueue.asyncAfter(deadline: .now() + 1.1, execute: work)
         }
+        // A held window is tiled by the first sweep after AX answers. Real
+        // windows answer within a sweep or two, so ask again soon rather than
+        // leave a new window untiled until the "AX cannot see it" timer.
+        if !held.isEmpty {
+            pendingHeld?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.syncFromSnapshot() }
+            pendingHeld = work
+            syncQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
+        }
         // A window judged "not a real window" gets one more sweep to disagree,
         // once the app has had a few seconds to finish starting. Nothing else
         // guarantees one: an app that opens a window on an otherwise idle
@@ -1919,6 +1947,8 @@ final class Daemon: @unchecked Sendable {
     private var pendingClassify: DispatchWorkItem?
     /// One-shot second opinion on a window judged "not a real window".
     private var pendingRecheck: DispatchWorkItem?
+    /// The quick re-sweep for windows held until AX classifies them.
+    private var pendingHeld: DispatchWorkItem?
     /// Follow-up sweep after a rule relocates a window, so layout membership
     /// catches up with where the window actually is.
     private var pendingRuleResync: DispatchWorkItem?
@@ -2358,7 +2388,6 @@ final class Daemon: @unchecked Sendable {
     /// tiling area read before the bar is there runs under it.
     private func displaysSettled(lookAgain: Bool = true) {
         refreshScreens()
-        applier.placementAnimator.prewarm()
         bus.emit(DaemonEvent(kind: .displayChanged))
         syncFromSnapshot()
         let geometry = displaysWestToEast().enumerated().map { i, uuid -> String in
@@ -3645,6 +3674,8 @@ final class Daemon: @unchecked Sendable {
         case .subrole: return "it is a dialog or panel, not a window"
         case .fixedSize: return "the app will not let it be resized"
         case .panelChrome: return "it is a small window with no title-bar buttons (a popup)"
+        case .modal: return "it is a modal dialog (a sign-in or passkey prompt)"
+        case .dialogChrome: return "it is a small window that can neither minimise nor go full screen (a dialog)"
         }
     }
     /// wid → when AX first failed to produce an element for it while its space
@@ -3767,8 +3798,7 @@ final class Daemon: @unchecked Sendable {
         }
         input.updateKeymap(next.keymap)
         applier.setEnhancedUIExempt(Set(next.general.enhancedUIExempt))
-        applier.placementAnimator.enabled =
-            next.general.placementAnimation && CGPreflightScreenCaptureAccess()
+        applier.liveAnimator.enabled = next.general.placementAnimation
         input.updateMouseModifier(next.general.mouseModifier)
         input.setBorderDragEnabled(next.general.mouseBorderResize)
         refreshDividerZones()

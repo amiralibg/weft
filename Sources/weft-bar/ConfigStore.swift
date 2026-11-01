@@ -117,9 +117,7 @@ final class ConfigStore: ObservableObject {
     /// member of ("last"), or handed to the rule that would place it on
     /// first sight ("rule").
     @Published var fullscreenReturn = "last"
-    /// Whether placed windows glide into their slots (read-only display of
-    /// `placement-animation` — the pixels need Screen Recording, so off or
-    /// permissionless is the same instant move the user would see).
+    /// Whether placed windows glide into their slots (`placement-animation`).
     @Published var placementAnimation = true
     @Published var manageMenubarApps = false
     @Published var checkForUpdates = true
